@@ -70,11 +70,10 @@ def check_reprojection(inputs, sample) -> bool:
 def check_scale(inputs) -> bool:
     """Geometry should be O(1); the *denoising target* must be near unit variance.
 
-    Flow matching mixes the target with `x0 ~ N(0, I)`. A target with std 0.03
-    would make `x_k` almost pure noise, and the best the model could do is
-    output `-x0` -- learning nothing about motion. This check is what caught
-    that: normalising absolute positions to scene scale left the residual ~10x
-    too small, which is why `MOTION_SCALE` exists.
+    Flow matching mixes the target with `x0 ~ N(0, I)`. A target with std 0.26
+    (what scene normalisation alone gives) makes `x_k` noise-dominated, so the
+    model drifts toward just outputting `-x0`. This check is why `TRAJ_SCALE`
+    exists.
     """
     geom = inputs.norm.apply(inputs.traj_metric)
     target_std = inputs.traj.std().item()

@@ -12,8 +12,10 @@ operations, in this order (see `docs/architecture_spec.md`):
 2. **Normalise** -- scale/centre using statistics from the *observed* frames
    only, so nothing leaks from the future.
 
-3. **Residual** -- express the trajectory as an offset from each point's
-   frame-0 position, rather than an absolute coordinate.
+3. **Scale the target** -- one further global constant so the trajectory the
+   model denoises has unit variance, as flow matching requires. Positions stay
+   absolute (what the paper does); the frame-0 anchor is kept separately as
+   conditioning rather than being subtracted out.
 
 The inverse (`denormalise`) turns model output back into metric coordinates
 for visualisation and metrics.
@@ -24,54 +26,51 @@ what its dataclass comments say.
 
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 
 from genpoint3d.data.kubric import KubricSample
 from genpoint3d.geometry import batch_project, batch_unproject
 
 
-# Dataset-level constant: how large a residual is, in scene-normalised units.
-# A single global number (not per-clip) so nothing leaks from an individual
-# sample's future -- this is what "normalise trajectories to unit variance"
-# means in the paper. Recalibrate with `scripts/calibrate_motion_scale.py`
-# whenever the training set changes.
-MOTION_SCALE = 0.0383  # calibrated on 2 clips -- redo on the full training set
+# Dataset-level constant: the spread of scene-normalised trajectories.
+# Scene normalisation makes *geometry* O(1), but leaves trajectories at ~0.26 --
+# and flow matching mixes them with `x0 ~ N(0, I)`, so the target must be near
+# unit variance or the interpolant is mostly noise. One global number, not
+# per-clip, so no sample's own motion leaks into its normalisation (and so a
+# fast clip stays genuinely faster than a slow one). Recalibrate with
+# `scripts/calibrate_motion_scale.py` whenever the training set changes.
+TRAJ_SCALE = 0.2136  # calibrated on 2 clips -- redo on the full training set
 
 
 @dataclass
 class NormStats:
-    """Affine normalisation, shared by every point and frame in a clip.
+    """Affine normalisation for one clip.
 
-    Two scales, because two different quantities need to be O(1):
-
-    - `scale` (scene extent) normalises *geometry* -- the pointmap and the
-      frame-0 anchor, which feed the conditioning.
-    - `motion_scale` normalises the *residual*, which is what the model
-      actually denoises. Flow matching mixes it with `x0 ~ N(0, I)`, so if the
-      residual had scene scale it would be ~10x smaller than the noise and the
-      model would just learn to output `-x0`.
+    `mean`/`scale` are per-clip and come from the observed scene, so a tabletop
+    and a street both land in the same box. `traj_scale` is a single global
+    constant applied on top, only to the trajectory, to bring the denoising
+    target to unit variance.
     """
 
-    mean: torch.Tensor          # (3,) metric centre of the observed scene
-    scale: torch.Tensor         # () scalar, metres per normalised unit
-    motion_scale: torch.Tensor  # () scalar, normalised units per residual unit
+    mean: torch.Tensor        # (3,) metric centre of the observed scene
+    scale: torch.Tensor       # () scalar, metres per normalised unit
+    traj_scale: torch.Tensor  # () scalar, normalised units per model unit
 
     def apply(self, pts: torch.Tensor) -> torch.Tensor:
-        """(..., 3) metric -> (..., 3) scene-normalised."""
+        """(..., 3) metric -> (..., 3) scene-normalised. For geometry."""
         return (pts - self.mean) / self.scale
 
     def invert(self, pts: torch.Tensor) -> torch.Tensor:
         """(..., 3) scene-normalised -> (..., 3) metric."""
         return pts * self.scale + self.mean
 
-    def apply_residual(self, res: torch.Tensor) -> torch.Tensor:
-        """(..., 3) scene-normalised offset -> (..., 3) model units."""
-        return res / self.motion_scale
+    def apply_traj(self, pts: torch.Tensor) -> torch.Tensor:
+        """(..., 3) metric -> (..., 3) model units. For the denoising target."""
+        return self.apply(pts) / self.traj_scale
 
-    def invert_residual(self, res: torch.Tensor) -> torch.Tensor:
-        """(..., 3) model units -> (..., 3) scene-normalised offset."""
-        return res * self.motion_scale
+    def invert_traj(self, pts: torch.Tensor) -> torch.Tensor:
+        """(..., 3) model units -> (..., 3) metric."""
+        return self.invert(pts * self.traj_scale)
 
 
 @dataclass
@@ -87,8 +86,8 @@ class ModelInputs:
     extrinsics: torch.Tensor  # (T, 4, 4) frame-0-camera -> frame-t camera
 
     # --- what the model denoises (stage 2) ---
-    traj: torch.Tensor        # (T, N, 3) normalised residual  <- THE TARGET
-    anchor: torch.Tensor      # (N, 3) normalised frame-0 position
+    traj: torch.Tensor        # (T, N, 3) normalised absolute position <- TARGET
+    anchor: torch.Tensor      # (N, 3) scene-normalised frame-0 position
     visibility: torch.Tensor  # (T, N) bool, True = visible
 
     # --- query pointers (stage 3) ---
@@ -101,10 +100,10 @@ class ModelInputs:
     def traj_metric(self) -> torch.Tensor:
         """(T, N, 3) absolute metric positions in the frame-0 camera frame.
 
-        The full inverse of the three transform steps, and exactly how model
-        output is turned back into metres for visualisation and metrics.
+        The full inverse of the transform, and exactly how model output is
+        turned back into metres for visualisation and metrics.
         """
-        return self.norm.invert(self.norm.invert_residual(self.traj) + self.anchor)
+        return self.norm.invert_traj(self.traj)
 
 
 def relative_extrinsics(extrinsics: torch.Tensor) -> torch.Tensor:
@@ -125,7 +124,7 @@ def to_frame0(points_world: torch.Tensor, extrinsics: torch.Tensor) -> torch.Ten
 
 def compute_norm_stats(
     pointmap: torch.Tensor,
-    motion_scale: float = MOTION_SCALE,
+    traj_scale: float = TRAJ_SCALE,
     lo: float = 2.0,
     hi: float = 98.0,
 ) -> NormStats:
@@ -136,11 +135,11 @@ def compute_norm_stats(
     Trims the far/near tails by depth percentile before measuring, so a few
     skybox pixels at 10000 m cannot dominate the scale.
     """
-    ms = torch.as_tensor(motion_scale, dtype=torch.float32)
+    ts = torch.as_tensor(traj_scale, dtype=torch.float32)
     pts = pointmap.permute(0, 2, 3, 1).reshape(-1, 3)
     pts = pts[torch.isfinite(pts).all(dim=-1)]
     if pts.numel() == 0:
-        return NormStats(torch.zeros(3), torch.ones(()), ms)
+        return NormStats(torch.zeros(3), torch.ones(()), ts)
 
     z = pts[:, 2]
     z_lo, z_hi = torch.quantile(z, torch.tensor([lo / 100.0, hi / 100.0], dtype=z.dtype))
@@ -152,13 +151,13 @@ def compute_norm_stats(
     scale = (inliers - mean).norm(dim=-1).max()
     if not torch.isfinite(scale) or scale < 1e-6:
         scale = torch.ones_like(scale)
-    return NormStats(mean=mean, scale=scale, motion_scale=ms)
+    return NormStats(mean=mean, scale=scale, traj_scale=ts)
 
 
 def transform(
     sample: KubricSample,
     num_context_frames: int,
-    motion_scale: float = MOTION_SCALE,
+    traj_scale: float = TRAJ_SCALE,
 ) -> ModelInputs:
     """`KubricSample` -> `ModelInputs`. The whole of step 1.
 
@@ -188,12 +187,11 @@ def transform(
         intrinsics[:num_context_frames],
         extrinsics[:num_context_frames],
     )
-    norm = compute_norm_stats(obs_pointmap, motion_scale=motion_scale)
-    traj_norm = norm.apply(traj_cam0)
+    norm = compute_norm_stats(obs_pointmap, traj_scale=traj_scale)
 
-    # 3. residual ----------------------------------------------------------
-    anchor = traj_norm[0]                             # (N, 3) frame-0 position
-    traj = norm.apply_residual(traj_norm - anchor[None])  # (T, N, 3) model units
+    # 3. scale the target to unit variance ---------------------------------
+    traj = norm.apply_traj(traj_cam0)   # (T, N, 3) absolute, in model units
+    anchor = norm.apply(traj_cam0[0])   # (N, 3) frame-0 position, for conditioning
 
     return ModelInputs(
         seq_id=sample.seq_id,
