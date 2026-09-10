@@ -1,0 +1,19 @@
+# Datasets and model outputs — large, regenerable, never committed
+/data/
+/outputs/
+/checkpoints/
+
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Copyrighted paper text — kept local, not redistributed
+/refs/
