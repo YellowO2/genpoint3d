@@ -78,7 +78,7 @@ flowchart LR
     cond["Query + timestep conditioning<br/>appearance and position at query<br/>+ noise level"]
     blocks["DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
     cutoff["Conditioning cutoff<br/>features before, null after<br/>tracking vs forecasting"]
-    heads["Output heads<br/>position + visibility"]
+    heads["Output head<br/>position"]
 
     video --> prep --> enc
     noisy --> tok
@@ -96,8 +96,8 @@ flowchart LR
     classDef input   fill:#fff,stroke:#c6ccd4,stroke-width:1.5px,stroke-dasharray:4 3,color:#555d68
 
     class video,query,noisy input
-    class prep,enc,tok,cond,blocks done
-    class cutoff,heads partial
+    class prep,enc,tok,cond,blocks,heads done
+    class cutoff partial
 </pre>
   </div>
 
@@ -111,11 +111,11 @@ flowchart LR
     >
     <span
       ><i class="sw" style="background: #e7f3ec; border-color: #4a9d6e"></i
-      >implemented</span
+      >implemented and in use</span
     >
     <span
       ><i class="sw" style="background: #fdf4e1; border-color: #d4a12c"></i
-      >partially</span
+      >implemented, not in use</span
     >
   </div>
 </div>
