@@ -3,15 +3,17 @@
 #
 # Submit with:  qsub scripts/job.pbs
 #
-# Queue routing is automatic from the resources requested. "-q ai" + ngpus=1
-# lands in aiq1, which allows any walltime from 1s to 24h. Do NOT use
-# "-q normal" for a GPU job shorter than 2h -- g1 has a 2-hour MINIMUM and a
-# job under it is rejected rather than queued.
+# The "ai" queue REJECTS personal projects, so this uses "normal". Routing is
+# then automatic from the resources requested:
+#     ngpus=1, walltime >  2h  -> g1
+#     ngpus=1, walltime <= 2h  -> gdev
+# A job matching neither is rejected outright rather than queued.
 #
 #PBS -N genpoint3d
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
 #PBS -l walltime=06:00:00
-#PBS -q ai
+#PBS -q normal
+#PBS -P personal-yhuang01
 #PBS -j oe
 #PBS -o /home/users/ntu/yhuang01/scratch/genpoint3d/outputs/
 

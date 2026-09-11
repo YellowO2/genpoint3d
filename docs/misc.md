@@ -55,14 +55,26 @@ allow_patterns=["000[0-4]*/*"]     # sequences 000000-000499
 Routing is automatic from the resources you request, and jobs that match no
 internal queue are silently not fulfilled.
 
-| submit queue | resources | internal | walltime allowed |
-| --- | --- | --- | --- |
-| `-q ai` | ngpus=1 | aiq1 | **1s - 24h** |
-| `-q ai` | ngpus=1, short | aidev | 1s - 2h |
-| `-q normal` | ngpus=1 | g1 | **2h MINIMUM** - 24h |
+**A project code IS required**, and the account only has
+`personal-yhuang01` (100,000 SU; GPU billed at 64 SU/hour, so ~1,560
+GPU-hours). Personal projects are **rejected by the `ai` queue**, so
+everything goes through `-q normal`:
 
-So a 30-minute GPU job on `-q normal` fails. Use `-q ai` for anything GPU.
-No `-P` project code is needed on this account.
+```bash
+qsub -q normal -P personal-yhuang01 job.pbs
+```
+
+Routing inside `normal` is automatic from the resources requested:
+
+| resources | internal queue | walltime allowed |
+| --- | --- | --- |
+| ngpus=1, long | g1 | 2h - 24h |
+| 1 - 4 gpus, short | gdev | 1s - 2h |
+| ncpus=1 only | q1 | 2h - 24h |
+| 1 - 128 cpus, short | qdev | 1s - 2h |
+
+Walltime is a **cap, not a reservation** — the job ends when the script ends.
+But exceeding it kills the job, so leave headroom.
 
 ---
 
