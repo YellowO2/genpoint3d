@@ -50,12 +50,18 @@ allow_patterns=["000[0-4]*/*"]     # sequences 000000-000499
 
 ---
 
-## NSCC queue routing — a too-short GPU job is REJECTED, not queued
+## NSCC: how to submit a job
 
-Routing is automatic from the resources you request, and jobs that match no
-internal queue are silently not fulfilled.
+**Always submit like this:**
 
-**A project code IS required**, and the account only has
+```bash
+qsub -q normal -P personal-yhuang01 job.pbs
+```
+
+Learned the hard way: `-q ai` looks right for ML work but rejects personal
+projects, and omitting `-P` is rejected outright.
+
+A project code IS required, and the account only has
 `personal-yhuang01` (100,000 SU; GPU billed at 64 SU/hour, so ~1,560
 GPU-hours). Personal projects are **rejected by the `ai` queue**, so
 everything goes through `-q normal`:
