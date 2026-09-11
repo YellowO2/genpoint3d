@@ -47,7 +47,7 @@ class PointDiT(nn.Module):
         self.dim, self.depth, self.num_heads = dim, depth, num_heads
         head_dim = dim // num_heads
 
-        # [2] point tokeniser -- genuinely just an embedding layer
+        # [2] path tokeniser -- genuinely just an embedding layer
         self.token_proj = nn.Linear(3, dim, bias=False)
 
         # [3] conditioning vector c

@@ -1,5 +1,59 @@
 # Reference papers & code
 
+## Lookup table — the facts we keep re-deriving
+
+Checked against the actual source, not the papers. Clone paths are the session
+scratchpad. Add a row rather than re-scraping.
+
+| | coord frame | task-causal | attn-causal | token INPUT | TARGET | generative |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Gen-points** (ours to extend) | — (2D pixels) | yes | yes | — | absolute | flow matching |
+| **genpt** | — (2D raster) | no | no | displacement fwd+bwd | absolute | flow matching |
+| **TAPIP3D** | world (depth+pose lifted) | no | no | displacement fwd+bwd | absolute (iterative) | no, regression |
+| **MotionForesight** | frozen **last-observed** cam | **yes** | **no** | absolute pointmaps | **residual from frame-0** | video diffusion, 1-step |
+| **MolmoMotion** | frozen **frame-0** cam (`t0`) | yes | yes | text tokens | absolute | autoregressive LLM |
+| **ours** | frozen **frame-0** cam | yes | yes | absolute (← odd one out) | absolute | flow matching |
+
+**Two meanings of "causal", do not confuse them.**
+*Task-causal* = the future is not in the input at all. *Attention-causal* = a
+mask inside the transformer. MotionForesight is task-causal but NOT
+attention-causal: its future slots hold learnable mask latents, so bidirectional
+attention has nothing to leak. **You only need an attention mask if the future
+slots contain information worth leaking.** Ours exists for autoregressive
+rollout and diffusion forcing, not for leak prevention.
+
+**Consequence for us:** TAPIP3D and genpt feed forward *and* backward frame
+differences. The forward one (`coords[t] - coords[t+1]`) looks at the future.
+They can afford it — they are trackers with the whole video. We cannot, because
+we chose an attention mask. If we adopt displacement input we take only the
+past-looking difference, `coords[t] - coords[t-1]`.
+
+### Where to look, by question
+
+| question | file:line |
+| --- | --- |
+| genpt: what enters the transformer | `genpt/src/models/networks/genpt_fm.py:344-364` |
+| genpt: iterative refinement update | `genpt_fm.py:368-375` |
+| genpt: noise sigma per quantity | `genpt_fm.py:50-55` (`p_1_coords_sigma=0.25`, vis/conf `1.0`) |
+| genpt: coords normalised to raster | `genpt/src/data/tapvid_kubric_subseq_dataset.py:32` |
+| genpt: the transformer itself | `genpt/src/models/networks/transformer_genpt.py` |
+| TAPIP3D: updater input construction | `TAPIP3D/models/point_tracker_3d.py:185-220` |
+| MotionForesight: mask latents for future frames | `motionforesight/models_pretrained/future_scene_flow/model.py:123-129, 248-263` |
+| MotionForesight: residual target | `model.py:238-245, 322-330` |
+| MotionForesight: per-clip normalisation | `motionforesight/.../sparse_dataset.py` `_compute_pj_norm` |
+| MotionForesight: reframe to a frozen camera | `sparse_dataset.py:1-15` |
+| MolmoMotion: coordinate frame | `molmo-motion/README.md:37` |
+
+### Scratchpad clones
+`genpt`, `TAPIP3D`, `DiT`, `co-tracker`, `motionforesight`, `molmo-motion`, `4RC`
+under the session scratchpad. Re-clone with `git clone --depth 1` if gone:
+`tesfaldet/genpt`, `zbw001/TAPIP3D`, `facebookresearch/DiT`,
+`facebookresearch/co-tracker`, `brains-bots-n-behavior/motionforesight`,
+`allenai/molmo-motion`, `Luo-Yihang/4RC`.
+
+---
+
+
 ## The FYP paper (target to extend to 3D)
 - **Generative Point Tracking and Forecasting** — Lu, Cao, Feng, Owens. CVPR 2026.
   - Paper: https://openaccess.thecvf.com/content/CVPR2026/html/Lu_Generative_Point_Tracking_and_Forecasting_CVPR_2026_paper.html
