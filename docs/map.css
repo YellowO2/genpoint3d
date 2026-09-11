@@ -1,0 +1,72 @@
+/* Styling for map.html. Nothing here needs editing to change the content. */
+
+:root {
+  --ground: #fbfaf8;  --surface: #fff;     --line: #ddddd6;
+  --ink: #1a1d21;     --ink-soft: #555b63; --accent: #cf4a22;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #14171b; --surface: #1b1f24;  --line: #333a42;
+    --ink: #e8e9ea;    --ink-soft: #a8b0b8; --accent: #f2724a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 15px/1.6 "IBM Plex Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+header {
+  padding: 13px 22px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+
+main { display: grid; grid-template-columns: 1fr 1fr; }
+@media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+
+#left  { padding: 22px; border-right: 1px solid var(--line); overflow-x: auto; }
+#right { padding: 22px; }
+@media (max-width: 1000px) { #left { border-right: 0; border-bottom: 1px solid var(--line); } }
+
+#left svg { max-width: 100%; height: auto; }
+#left a { cursor: pointer; }
+#left a:hover rect { filter: brightness(.94); }
+#left g.node.on rect { stroke: var(--accent); stroke-width: 3.5px; }
+
+nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+nav button {
+  font: 500 12px "IBM Plex Sans", sans-serif;
+  padding: 7px 11px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+}
+nav button[aria-current="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* pre-wrap is what lets the sections below be written as plain text:
+   newlines are newlines, blank lines are paragraph breaks, no <p> needed. */
+section {
+  display: none;
+  white-space: pre-wrap;
+  max-width: 68ch;
+  color: var(--ink-soft);
+}
+section.on { display: block; }
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: normal;
+}
+
+.mono { font: 400 12.5px/1.55 "IBM Plex Mono", ui-monospace, monospace; }
