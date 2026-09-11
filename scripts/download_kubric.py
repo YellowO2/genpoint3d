@@ -9,12 +9,16 @@ to the same redirect works, which is what this does.
 Resumable: files already on disk with a non-zero size are skipped, so rerunning
 after an interruption only fetches what is missing.
 
+Uses your HF token if one is available (env or `~/.cache/huggingface/token`).
+Anonymous requests get rate limited and fail with HTTP 429 partway through.
+
 Run:  python scripts/download_kubric.py --out ~/scratch/kubric --clips 500
 """
 
 import argparse
 import json
-import sys
+import os
+import random
 import time
 import urllib.error
 import urllib.request
@@ -26,16 +30,48 @@ API = f"https://huggingface.co/api/datasets/{REPO}/tree/main"
 RAW = f"https://huggingface.co/datasets/{REPO}/resolve/main"
 
 
-def get(url: str, tries: int = 5) -> bytes:
+def _token() -> str | None:
+    """HF token from the env or the CLI's cache. Anonymous requests are rate
+    limited far more aggressively, which shows up as HTTP 429 partway through."""
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(var):
+            return os.environ[var]
+    for path in (Path.home() / ".cache/huggingface/token",
+                 Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser() / "token"):
+        if path.exists():
+            t = path.read_text().strip()
+            if t:
+                return t
+    return None
+
+
+HEADERS = {"User-Agent": "genpoint3d"}
+if _token():
+    HEADERS["Authorization"] = f"Bearer {_token()}"
+
+
+def get(url: str, tries: int = 8) -> bytes:
+    """Fetch with backoff. 429 (rate limit) is honoured via Retry-After when
+    the server sends one, otherwise exponential backoff with jitter."""
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "genpoint3d"})
-            with urllib.request.urlopen(req, timeout=60) as r:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=120) as r:
                 return r.read()
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = float(e.headers.get("Retry-After") or min(60, 2 ** i))
+            elif e.code in (500, 502, 503, 504):
+                wait = min(60, 2 ** i)
+            else:
+                raise
             if i == tries - 1:
                 raise
-            time.sleep(2 ** i)
+            time.sleep(wait + random.uniform(0, 2))
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if i == tries - 1:
+                raise
+            time.sleep(min(60, 2 ** i) + random.uniform(0, 2))
     raise RuntimeError("unreachable")
 
 
@@ -67,7 +103,7 @@ def main() -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--clips", type=int, default=500)
     p.add_argument("--start", type=int, default=0)
-    p.add_argument("--workers", type=int, default=16)
+    p.add_argument("--workers", type=int, default=8)
     args = p.parse_args()
 
     root = Path(args.out).expanduser()
