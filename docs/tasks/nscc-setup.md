@@ -81,18 +81,34 @@ PY
 
 Interrupted downloads resume — just rerun it.
 
-## 4. Cache the transform
+## 4. Cache the transform and the DINOv3 features
 
-Decoding 48 PNGs per clip costs ~1.3 s; caching makes training ~30x cheaper.
-One-off, CPU only, safe on the login node for 500 clips (~12 min).
+Decoding 48 PNGs per clip costs ~1.3 s and re-encoding DINOv3 every epoch
+would dominate training, so both are done once up front.
+
+This one wants a GPU (it runs DINOv3 over every frame), so submit it rather
+than running it on the login node:
 
 ```bash
 python scripts/preprocess.py \
   --root ~/scratch/kubric \
-  --out  ~/scratch/cache/kubric500.pt
+  --out  ~/scratch/cache/kubric500.pt \
+  --features --feat-dim 256 --image-size 384 --points 256
 ```
 
-Expect roughly 0.1 MB/clip, so ~50 MB total.
+Expect ~7 MB/clip, so ~3.6 GB for 500 clips. On CPU it is ~3 s/clip (25 min);
+on a GPU, a few minutes.
+
+Sanity check before trusting it:
+
+```bash
+python -c "
+import torch; b=torch.load('$HOME/scratch/cache/kubric500.pt', weights_only=False)
+c=b['clips'][0]
+print(len(b['clips']),'clips | feat_dim',b['feat_dim'])
+print({k:(tuple(v.shape) if hasattr(v,'shape') else v) for k,v in c.items() if k!='seq_id'})
+"
+```
 
 ---
 
@@ -131,6 +147,10 @@ python scripts/train.py \
   --out outputs/run500
 ```
 
+Watch the `VAL ... ratio` line. That is the whole experiment: sampled RMSE
+divided by the RMSE of just predicting the mean trajectory. 1.0 means nothing
+generalised. Below 1.0 is real learning on clips the model has never seen.
+
 ```bash
 qsub job.pbs
 qstat -u $USER              # watch it
@@ -143,6 +163,9 @@ qstat -u $USER              # watch it
 - `$SCRATCH` is unset on this system; use `~/scratch` explicitly.
 - `/scratch` is usually purged periodically — keep checkpoints you care about
   somewhere durable.
-- The command in section 5 trains **without images**, which is a weak
-  experiment (see `docs/map.html`). It is here so the pipeline is proven
-  end-to-end on the cluster. The real run comes once step 3 lands.
+- Section 5 trains pure **tracking**: every frame keeps its image, so the
+  tracking/forecasting mask is off. That is deliberate -- forecasting is much
+  harder, and training both at once splits the signal. Turn masking on only
+  once tracking is learning.
+- DINOv3 is cached, not run during training, so the GPU only ever sees the
+  12M-parameter model. The 21M encoder is frozen and already spent.

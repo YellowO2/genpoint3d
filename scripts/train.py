@@ -73,17 +73,21 @@ class ClipDataset(Dataset):
         )
 
 
-def split(cache: str, val_frac: float, seed: int) -> tuple[list[dict], list[dict]]:
+def split(cache: str, val_frac: float, seed: int) -> tuple[list[dict], list[dict], int | None]:
     """Deterministic train/val split over whole clips -- never over points.
 
     Splitting by point would put the same scene in both halves and the val
     number would be meaningless.
+
+    Also returns the cache's feature width, which the model needs: the encoder
+    chooses its own width and it need not equal the model's.
     """
-    clips = torch.load(cache, weights_only=False)["clips"]
+    blob = torch.load(cache, weights_only=False)
+    clips = blob["clips"]
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(clips), generator=g).tolist()
     n_val = max(1, int(len(clips) * val_frac))
-    return [clips[i] for i in perm[n_val:]], [clips[i] for i in perm[:n_val]]
+    return [clips[i] for i in perm[n_val:]], [clips[i] for i in perm[:n_val]], blob.get("feat_dim")
 
 
 def to_device(batch, device):
@@ -146,7 +150,7 @@ def main() -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    train_clips, val_clips = split(args.cache, args.val_frac, args.seed)
+    train_clips, val_clips, feat_dim = split(args.cache, args.val_frac, args.seed)
     has_feats = "context" in train_clips[0]
     print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips"
           f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
@@ -162,7 +166,7 @@ def main() -> int:
     )
 
     model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
-                     cross_attn=has_feats).to(device)
+                     cross_attn=has_feats, feat_dim=feat_dim).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
