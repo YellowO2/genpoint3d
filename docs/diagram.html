@@ -75,7 +75,7 @@ flowchart LR
     prep["Data prep<br/>reframe + normalise"]
     enc["Visual encoder<br/>DINOv3-S, frozen"]
     sample(["sample at query point<br/>once, at frame 0"])
-    mask(["switch: features or null<br/>tracking vs forecasting"])
+    mask(["conditioning cutoff<br/>features before, null after"])
     tok["Trajectory tokeniser"]
     cond["Conditioning<br/>appearance + position<br/>+ noise level"]
     blocks["DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
