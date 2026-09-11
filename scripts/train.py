@@ -110,27 +110,57 @@ def to_device(batch, device):
     )
 
 
+# Distance thresholds for delta_avg, in model units. TAP-Vid uses pixel
+# thresholds; ours are metric-ish, so these are indicative only until we
+# calibrate them against a published protocol.
+DELTA_THRESHOLDS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50) -> dict:
-    """Sample from pure noise and compare against ground truth.
+    """Three numbers, deliberately distinct -- see docs/misc.md for the naming.
 
-    `ratio` is the headline: sampled RMSE over the RMSE of predicting the mean
-    trajectory. A model that learnt nothing scores ~1.0.
+    val_loss  the SAME flow-matching objective as training, on held-out clips.
+              Plot it against training loss: the gap is overfitting. This is
+              the standard figure and the only one comparable to our own
+              training curve.
+    delta_avg fraction of predicted points within a distance threshold of the
+              truth. The TAP-Vid-3D style metric; the closest thing we have to
+              something other papers report.
+    ratio     sampled RMSE / mean-trajectory RMSE. Homemade sanity check --
+              1.0 means nothing was learnt. NOT comparable to any paper.
     """
     model.eval()
     err_sq = base_sq = n = 0.0
+    loss_sum = loss_n = 0.0
+    hits = {t: 0.0 for t in DELTA_THRESHOLDS}
+
     for batch in loader:
         traj, anchor, vis, ctx, idc = to_device(batch, device)
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+
+        l, _ = flow_matching_loss(model, traj, anchor, mask=vis,
+                                  context=ctx, visual_mask=vm, id_card=idc)
+        loss_sum += l.item(); loss_n += 1
+
         pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                       context=ctx, visual_mask=vm, id_card=idc)
         mean_traj = traj.mean(dim=(1, 2), keepdim=True)
         err_sq += (pred - traj).pow(2).mean(-1)[vis].sum().item()
         base_sq += (mean_traj - traj).pow(2).mean(-1)[vis].sum().item()
         n += vis.sum().item()
+
+        dist = (pred - traj).norm(dim=-1)[vis]          # model units
+        for t in DELTA_THRESHOLDS:
+            hits[t] += (dist < t).sum().item()
+
     model.train()
     rmse, base = (err_sq / max(n, 1)) ** 0.5, (base_sq / max(n, 1)) ** 0.5
-    return {"rmse": rmse, "baseline": base, "ratio": rmse / max(base, 1e-9)}
+    deltas = {f"d{t}": hits[t] / max(n, 1) for t in DELTA_THRESHOLDS}
+    return {"val_loss": loss_sum / max(loss_n, 1),
+            "delta_avg": sum(deltas.values()) / len(deltas),
+            **deltas,
+            "rmse": rmse, "baseline": base, "ratio": rmse / max(base, 1e-9)}
 
 
 def main() -> int:
@@ -214,9 +244,9 @@ def main() -> int:
             if step % args.val_every == 0 or step == args.steps:
                 tv = time.time()
                 m = evaluate(model, val_loader, device)
-                print(f"  VAL step {step}  rmse {m['rmse']:.4f}"
-                      f"  baseline {m['baseline']:.4f}"
-                      f"  ratio {m['ratio']:.3f}   <- want << 1"
+                print(f"  VAL step {step}  val_loss {m['val_loss']:.4f}"
+                      f"  delta_avg {m['delta_avg']:.3f}"
+                      f"  ratio {m['ratio']:.3f}"
                       f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step, **m})
                 (out / "log.json").write_text(json.dumps(log, indent=2))
