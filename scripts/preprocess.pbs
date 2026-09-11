@@ -16,6 +16,10 @@ set -euo pipefail
 ROOT=$HOME/scratch
 cd $ROOT/genpoint3d
 
+# PBS only writes its -o file when the job ENDS. Tee to scratch so
+# progress can be watched live with: tail -f ~/scratch/<name>.live.log
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
 module load python/3.11.7-gcc11
 source $ROOT/venvs/fyp/bin/activate
 mkdir -p $ROOT/cache
