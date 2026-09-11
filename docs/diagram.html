@@ -69,20 +69,21 @@
     <pre class="mermaid">
 flowchart LR
     video["RGB video<br/>+ depth + pose"]
-    query["Query points"]
     noisy["Noisy trajectory"]
+    query["Query points"]
 
     prep["Data prep<br/>reframe + normalise"]
     enc["Visual encoder<br/>DINOv3-S, frozen"]
     tok["Trajectory tokeniser"]
-    cond["Conditioning<br/>appearance at query<br/>+ position + noise level"]
+    cond["Query + timestep conditioning<br/>appearance and position at query<br/>+ noise level"]
     blocks["DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
     heads["Output heads<br/>position + visibility"]
 
     video --> prep --> enc
     noisy --> tok
     query --> cond
-    enc -->|"appearance at query"| cond
+    tok ~~~ cond
+    enc -->|"feature map"| cond
     enc -->|"features, or null after cutoff"| blocks
     tok --> blocks
     cond -.->|AdaLN| blocks
