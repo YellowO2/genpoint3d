@@ -205,6 +205,30 @@ class Block(nn.Module):
         return x
 
 
+class CrossBlock(nn.Module):
+    """Cross-attention + feed-forward. Point tokens read the visual feature map.
+
+    Same shape as `Block`, but keys and values come from `context` instead of
+    from the tokens themselves. This is stage [4c], and it is the whole
+    tracking/forecasting switch: pass real features to track, pass the learned
+    null embedding to forecast. No branching anywhere else in the model.
+    """
+
+    def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int) -> None:
+        super().__init__()
+        self.norm_q = AdaRMSNorm(dim, cond_dim)
+        self.norm_kv = RMSNorm(dim)
+        self.attn = Attention(dim, num_heads, context_dim=dim)
+        self.norm_ff = AdaRMSNorm(dim, cond_dim)
+        self.ff_up = GEGLU(dim, dim * mlp_mult)
+        self.ff_down = zero_init(nn.Linear(dim * mlp_mult, dim, bias=False))
+
+    def forward(self, x, cond, context):
+        x = x + self.attn(self.norm_q(x, cond), context=self.norm_kv(context))
+        x = x + self.ff_down(self.ff_up(self.norm_ff(x, cond)))
+        return x
+
+
 # --------------------------------------------------------------- embeddings
 
 class FourierEmbedding(nn.Module):

@@ -18,7 +18,9 @@ images at all.
 import torch
 from torch import nn
 
-from genpoint3d.models.layers import Block, FourierEmbedding, RMSNorm, RoPE, zero_init
+from genpoint3d.models.layers import (
+    Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
+)
 
 
 class PointDiT(nn.Module):
@@ -42,9 +44,11 @@ class PointDiT(nn.Module):
         num_heads: int = 4,
         mlp_mult: int = 3,
         cond_dim: int = 256,
+        cross_attn: bool = False,
     ) -> None:
         super().__init__()
         self.dim, self.depth, self.num_heads = dim, depth, num_heads
+        self.cross_attn = cross_attn
         head_dim = dim // num_heads
 
         # [2] path tokeniser -- genuinely just an embedding layer
@@ -67,6 +71,16 @@ class PointDiT(nn.Module):
         self.time_rope = RoPE(head_dim, num_heads, n_axes=1)   # position = frame index
         self.space_rope = RoPE(head_dim, num_heads, n_axes=3)  # position = query xyz
 
+        # [4c] point-image cross-attention, and the tracking/forecasting switch.
+        # A masked frame's features are replaced wholesale by `null_ctx`, which
+        # means "nothing here". One shared vector suffices because RoPE already
+        # tells the model which frame it is looking at.
+        if cross_attn:
+            self.cross_blocks = nn.ModuleList(
+                CrossBlock(dim, num_heads, mlp_mult, cond_dim) for _ in range(depth)
+            )
+            self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
+
         # [5] position head
         self.out_norm = RMSNorm(dim)
         self.out = zero_init(nn.Linear(dim, 3, bias=False))
@@ -74,15 +88,30 @@ class PointDiT(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def forward(self, x: torch.Tensor, k: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        k: torch.Tensor,
+        anchor: torch.Tensor,
+        context: torch.Tensor | None = None,
+        visual_mask: torch.Tensor | None = None,
+        id_card: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
-        x:      (B, T, N, 3)    noisy trajectory, in model units
-        k:      (B,) or (B, T)  noise level in [0, 1]. Per-frame `k` is what
-                                diffusion forcing needs later, so it is
-                                supported from the start.
-        anchor: (B, N, 3)       scene-normalised frame-0 position of each query
+        x:           (B, T, N, 3)    noisy trajectory, in model units
+        k:           (B,) or (B, T)  noise level in [0, 1]. Per-frame `k` is
+                                     what diffusion forcing needs later, so it
+                                     is supported from the start.
+        anchor:      (B, N, 3)       scene-normalised frame-0 position
+        context:     (B, T, P, D)    DINOv3 patch features per frame  [4c]
+        visual_mask: (B, T) bool     True = frame has visual conditioning.
+                                     False swaps in `null_ctx` -> forecasting.
+        id_card:     (B, N, D)       DINOv3 feature sampled at the query  [3]
 
-        returns (B, T, N, 3)    predicted velocity
+        returns      (B, T, N, 3)    predicted velocity
+
+        The last three are optional; without them this is the step-2 model that
+        sees no images at all.
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
@@ -91,7 +120,15 @@ class PointDiT(nn.Module):
         if k.dim() == 1:
             k = k[:, None].expand(B, T)
         cond = self.time_emb(k[..., None])[:, :, None] + self.anchor_emb(anchor)[:, None]
+        if id_card is not None:
+            cond = cond + id_card[:, None]          # the "what am I" term
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
+
+        # Masked frames lose their features entirely, before any attention.
+        if context is not None and visual_mask is not None:
+            context = torch.where(
+                visual_mask[..., None, None], context, self.null_ctx.to(context.dtype)
+            )
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
@@ -103,7 +140,8 @@ class PointDiT(nn.Module):
         causal = torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]
 
         # --- [4] blocks ---
-        for temporal, spatial in zip(self.temporal_blocks, self.spatial_blocks):
+        cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth
+        for temporal, spatial, cross in zip(self.temporal_blocks, self.spatial_blocks, cross_blocks):
             # each point's own timeline; a frame may only see its own past
             ht = h.permute(0, 2, 1, 3).reshape(B * N, T, -1)
             ct = cond.permute(0, 2, 1, 3).reshape(B * N, T, -1)
@@ -113,7 +151,12 @@ class PointDiT(nn.Module):
             # all points within one frame
             hs = h.reshape(B * T, N, -1)
             cs = cond.reshape(B * T, N, -1)
-            h = spatial(hs, cs, theta=theta_space).view(B, T, N, -1)
+            h = spatial(hs, cs, theta=theta_space)
+
+            # [4c] each point queries its own frame's feature map (or the null)
+            if cross is not None:
+                h = cross(h, cs, context.reshape(B * T, -1, self.dim))
+            h = h.view(B, T, N, -1)
 
         # --- [5] head ---
         return self.out(self.out_norm(h))

@@ -51,11 +51,11 @@ flowchart TD
     models/model.py`"]
 
     cond["`**🟡 [3] Conditioning c**
-    ID card + Q pos-emb + noise level k
+    🟡 ID card + ✅ Q pos-emb + ✅ noise level k
     models/model.py`"]
 
     blocks["`**🟡 [4] DiT blocks × depth ← you are here**
-    ✅ temporal, ✅ spatial, ⬜ cross-attn
+    ✅ temporal, ✅ spatial, 🟡 cross-attn
     models/model.py, models/layers.py`"]
 
     heads["`**🟡 [5] Output heads**
@@ -92,7 +92,8 @@ flowchart TD
     class video,query,noisy input
     class prep,tok done
     class cond,blocks,heads,mask untested
-    class enc,sample todo
+
+    class enc,sample untested
 </pre
         >
       </div>
