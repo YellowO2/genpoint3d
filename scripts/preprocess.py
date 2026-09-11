@@ -36,6 +36,26 @@ from genpoint3d.data.kubric import KubricSequenceDataset
 from genpoint3d.data.transform import scene_pointmap, transform
 
 
+def _complete(root: Path, seq_ids: list[str]) -> list[str]:
+    """Drop clips that are still downloading.
+
+    A finished clip has its .npy plus a frames/ dir holding one RGB and one
+    depth PNG per frame. Preprocessing a half-written clip crashes on a
+    missing file, so this makes it safe to run while a download is in flight.
+    """
+    ok = []
+    for s in seq_ids:
+        d = root / s
+        npy, frames = d / f"{s}.npy", d / "frames"
+        if not (npy.exists() and frames.is_dir()):
+            continue
+        rgb = sorted(frames.glob("[0-9][0-9][0-9].png"))
+        depth = sorted(frames.glob("*_depth.png"))
+        if rgb and len(rgb) == len(depth):
+            ok.append(s)
+    return ok
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--root", required=True)
@@ -45,9 +65,17 @@ def main() -> int:
     p.add_argument("--image-size", type=int, default=384)
     p.add_argument("--feat-dim", type=int, default=256, help="must match the model's dim")
     p.add_argument("--stub", action="store_true", help="random backbone, for testing without DINOv3 access")
+    p.add_argument("--limit", type=int, default=None, help="only the first N complete clips")
     args = p.parse_args()
 
     ds = KubricSequenceDataset(args.root, num_query_points=args.points)
+    ds.seq_ids = _complete(Path(args.root), ds.seq_ids)
+    if args.limit:
+        ds.seq_ids = ds.seq_ids[: args.limit]
+    print(f"{len(ds)} complete clips to process", flush=True)
+    if not ds.seq_ids:
+        print("nothing to do")
+        return 1
 
     encoder = None
     if args.features:

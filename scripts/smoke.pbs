@@ -1,0 +1,36 @@
+#!/bin/bash
+# Small end-to-end rehearsal on the GPU: preprocess a few clips, train briefly.
+# Catches bugs in ~10 min instead of burning a 6-hour slot.
+#
+#   qsub -q normal -P personal-yhuang01 scripts/smoke.pbs
+#
+#PBS -N smoke
+#PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
+#PBS -l walltime=00:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/smoke.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+
+python -c "import torch; print('cuda ok:', torch.cuda.is_available())"
+
+echo "=== preprocess 20 clips ==="
+python scripts/preprocess.py \
+  --root $ROOT/kubric --out $ROOT/cache/smoke20.pt \
+  --features --feat-dim 256 --image-size 384 --points 256 \
+  --limit 20
+
+echo "=== train 300 steps ==="
+python scripts/train.py \
+  --cache $ROOT/cache/smoke20.pt --out outputs/smoke \
+  --steps 300 --batch 8 --points 128 \
+  --val-frac 0.2 --val-every 150 --warmup 50
+
+echo "=== SMOKE OK ==="
