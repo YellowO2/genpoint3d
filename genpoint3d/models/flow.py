@@ -44,11 +44,14 @@ def flow_matching_loss(
     anchor: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     per_frame_k: bool = False,
+    **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
     x1:     (B, T, N, 3) ground-truth trajectory, in model units
     anchor: (B, N, 3) conditioning
     mask:   (B, T, N) bool, True = include in the loss (e.g. visibility)
+    cond:   optional `context` / `visual_mask` / `id_card`, passed straight to
+            the model. Absent means the model sees no images.
 
     `per_frame_k` gives every frame its own independent noise level -- diffusion
     forcing. Off for now; turn it on when we add autoregressive rollout.
@@ -61,7 +64,7 @@ def flow_matching_loss(
     x_k = (1.0 - k_b) * x0 + k_b * x1
     target = x1 - x0
 
-    pred = model(x_k, k, anchor)
+    pred = model(x_k, k, anchor, **cond)
     err = (pred - target).pow(2).mean(dim=-1)  # (B, T, N)
 
     if mask is not None:
@@ -80,6 +83,7 @@ def sample(
     num_frames: int,
     steps: int = 50,
     generator: Optional[torch.Generator] = None,
+    **cond,
 ) -> torch.Tensor:
     """Integrate the velocity field from noise (k=0) to data (k=1).
 
@@ -92,5 +96,5 @@ def sample(
     dk = 1.0 / steps
     for i in range(steps):
         k = torch.full((B,), i * dk, device=anchor.device)
-        x = x + model(x, k, anchor) * dk
+        x = x + model(x, k, anchor, **cond) * dk
     return x

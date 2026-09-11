@@ -9,10 +9,15 @@ The metric that matters is `ratio` on the VAL split: RMSE of sampled
 trajectories divided by the RMSE of the mean trajectory. 1.0 means nothing was
 learnt. Below 1.0 means real signal.
 
-Note there is still no visual conditioning (step 3 of the build order). So this
-is not tracking and not forecasting -- it is a pure motion prior: "given where
-a point starts, where do points like that tend to go". A genuine result, but a
-weaker one than the paper's.
+With a feature cache this trains pure TRACKING: every frame keeps its image, so
+`visual_mask` is all-True and the null embedding is never used. Masking is
+deliberately left off for the first learning run -- forecasting is far harder
+than tracking, and training both at once splits the signal between them. If
+tracking does not work, forecasting never would. Turn it on with
+`--random-cutoff` once tracking is learning.
+
+Without a feature cache this falls back to the step-2 model, which sees no
+images at all -- a pure motion prior rather than tracking.
 
 Run:  python scripts/preprocess.py --root DATA --out cache/kubric.pt
       python scripts/train.py --cache cache/kubric.pt --steps 20000 --batch 8
@@ -50,12 +55,22 @@ class ClipDataset(Dataset):
     def __getitem__(self, i: int):
         c = self.clips[i]
         traj, anchor, vis = c["traj"], c["anchor"], c["visibility"]
+        id_card = c.get("id_card")
         n = traj.shape[1]
         if self.num_points < n:
             idx = (torch.randperm(n)[: self.num_points] if self.resample
                    else torch.arange(self.num_points))
             traj, anchor, vis = traj[:, idx], anchor[idx], vis[:, idx]
-        return traj, anchor, vis
+            if id_card is not None:
+                id_card = id_card[idx]
+
+        # Empty tensors rather than None so the default collate still works.
+        ctx = c.get("context")
+        return (
+            traj, anchor, vis,
+            ctx.float() if ctx is not None else torch.zeros(0),
+            id_card.float() if id_card is not None else torch.zeros(0),
+        )
 
 
 def split(cache: str, val_frac: float, seed: int) -> tuple[list[dict], list[dict]]:
@@ -71,6 +86,16 @@ def split(cache: str, val_frac: float, seed: int) -> tuple[list[dict], list[dict
     return [clips[i] for i in perm[n_val:]], [clips[i] for i in perm[:n_val]]
 
 
+def to_device(batch, device):
+    """Move a batch and normalise the optional feature tensors to None."""
+    traj, anchor, vis, ctx, idc = (t.to(device) for t in batch)
+    return (
+        traj, anchor, vis,
+        ctx if ctx.numel() else None,
+        idc if idc.numel() else None,
+    )
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50) -> dict:
     """Sample from pure noise and compare against ground truth.
@@ -80,9 +105,11 @@ def evaluate(model, loader, device, steps: int = 50) -> dict:
     """
     model.eval()
     err_sq = base_sq = n = 0.0
-    for traj, anchor, vis in loader:
-        traj, anchor, vis = traj.to(device), anchor.to(device), vis.to(device)
-        pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps)
+    for batch in loader:
+        traj, anchor, vis, ctx, idc = to_device(batch, device)
+        vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+        pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                      context=ctx, visual_mask=vm, id_card=idc)
         mean_traj = traj.mean(dim=(1, 2), keepdim=True)
         err_sq += (pred - traj).pow(2).mean(-1)[vis].sum().item()
         base_sq += (mean_traj - traj).pow(2).mean(-1)[vis].sum().item()
@@ -120,7 +147,9 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     train_clips, val_clips = split(args.cache, args.val_frac, args.seed)
-    print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips", flush=True)
+    has_feats = "context" in train_clips[0]
+    print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips"
+          f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
 
     train_loader = DataLoader(
         ClipDataset(train_clips, args.points),
@@ -132,7 +161,8 @@ def main() -> int:
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     )
 
-    model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads).to(device)
+    model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
+                     cross_attn=has_feats).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -142,11 +172,14 @@ def main() -> int:
 
     log, step, t0, running = [], 0, time.time(), 0.0
     while step < args.steps:
-        for traj, anchor, vis in train_loader:
+        for batch in train_loader:
             if step >= args.steps:
                 break
-            traj, anchor, vis = traj.to(device), anchor.to(device), vis.to(device)
-            loss, _ = flow_matching_loss(model, traj, anchor, mask=vis)
+            traj, anchor, vis, ctx, idc = to_device(batch, device)
+            # All-True: pure tracking. Every frame keeps its image.
+            vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+            loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
+                                         context=ctx, visual_mask=vm, id_card=idc)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()

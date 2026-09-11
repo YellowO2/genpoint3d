@@ -43,10 +43,16 @@ class PointDiT(nn.Module):
         depth: int = 6,
         num_heads: int = 4,
         mlp_mult: int = 3,
-        cond_dim: int = 256,
+        cond_dim: int | None = None,
         cross_attn: bool = False,
+        feat_dim: int | None = None,
     ) -> None:
         super().__init__()
+        # The conditioning width has no reason to differ from the model width,
+        # and silently defaulting it to a constant made a size-64 model try to
+        # add a 256-wide vector. Follow `dim` unless told otherwise.
+        cond_dim = cond_dim or dim
+        feat_dim = feat_dim or dim
         self.dim, self.depth, self.num_heads = dim, depth, num_heads
         self.cross_attn = cross_attn
         head_dim = dim // num_heads
@@ -55,6 +61,10 @@ class PointDiT(nn.Module):
         self.token_proj = nn.Linear(3, dim, bias=False)
 
         # [3] conditioning vector c
+        # The encoder's output width is its own choice, so project rather than
+        # assume it matches.
+        self.id_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
+        self.ctx_proj = nn.Linear(feat_dim, dim, bias=False) if (cross_attn and feat_dim != dim) else None
         self.anchor_emb = FourierEmbedding(3, cond_dim)
         self.time_emb = FourierEmbedding(1, cond_dim)
         self.cond_mlp = nn.Sequential(
@@ -121,8 +131,11 @@ class PointDiT(nn.Module):
             k = k[:, None].expand(B, T)
         cond = self.time_emb(k[..., None])[:, :, None] + self.anchor_emb(anchor)[:, None]
         if id_card is not None:
-            cond = cond + id_card[:, None]          # the "what am I" term
+            cond = cond + self.id_proj(id_card)[:, None]   # the "what am I" term
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
+
+        if context is not None and self.ctx_proj is not None:
+            context = self.ctx_proj(context)
 
         # Masked frames lose their features entirely, before any attention.
         if context is not None and visual_mask is not None:
