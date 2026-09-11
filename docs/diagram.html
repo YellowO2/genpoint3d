@@ -74,21 +74,16 @@ flowchart LR
 
     prep["Data prep<br/>reframe + normalise"]
     enc["Visual encoder<br/>DINOv3-S, frozen"]
-    sample@{ shape: rounded, label: "sample at query point<br/>once, at frame 0" }
-    mask@{ shape: rounded, label: "conditioning cutoff<br/>features before, null after" }
     tok["Trajectory tokeniser"]
-    cond["Conditioning<br/>appearance + position<br/>+ noise level"]
+    cond["Conditioning<br/>appearance at query<br/>+ position + noise level"]
     blocks["DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
     heads["Output heads<br/>position + visibility"]
 
     video --> prep --> enc
     noisy --> tok
-    query --> sample
-    query -->|position| cond
-    enc -->|feature map| sample
-    enc -->|feature map| mask
-    sample -->|appearance| cond
-    mask -->|features or null| blocks
+    query --> cond
+    enc -->|"appearance at query"| cond
+    enc -->|"features, or null after cutoff"| blocks
     tok --> blocks
     cond -.->|AdaLN| blocks
     blocks --> heads
@@ -96,12 +91,10 @@ flowchart LR
     classDef done    fill:#e7f3ec,stroke:#4a9d6e,stroke-width:1.5px,color:#153322
     classDef partial fill:#fdf4e1,stroke:#d4a12c,stroke-width:1.5px,color:#3c2e0b
     classDef input   fill:#fff,stroke:#c6ccd4,stroke-width:1.5px,stroke-dasharray:4 3,color:#555d68
-    classDef op      fill:#f7f8f9,stroke:#aab1ba,stroke-width:1.5px,color:#3f4650
 
     class video,query,noisy input
     class prep,enc,tok,cond,blocks done
     class heads partial
-    class sample,mask op
 </pre>
   </div>
 
@@ -120,10 +113,6 @@ flowchart LR
     <span
       ><i class="sw" style="background: #fdf4e1; border-color: #d4a12c"></i
       >partially</span
-    >
-    <span
-      ><i class="sw op" style="background: #f7f8f9; border-color: #aab1ba"></i
-      >operation</span
     >
   </div>
 </div>
