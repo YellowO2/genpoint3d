@@ -106,6 +106,7 @@ flowchart TD
           <button data-doc="decisions">Decisions</button>
           <button data-doc="sources">Code sources</button>
           <button data-doc="open">Still open</button>
+          <button data-doc="todo">Not built yet</button>
         </nav>
 
         <!-- ═══ the stages — these match the boxes in the diagram above ═══ -->
@@ -294,6 +295,48 @@ Then at inference, we mask it deliberately too (like pass the null embedding) to
           chosen from the CVPR spec first. Not reused: genpt injects image info
           as correlation-pyramid features through AdaRMSNorm. We need
           cross-attention so ∅ works for forecasting.
+        </section>
+
+        <section id="todo">
+          <h2>Not built yet</h2>
+          <pre>
+Parts of the paper we have deliberately not implemented. Listed so none of
+them is quietly forgotten.
+
+FROM THE PAPER
+  Visibility head        Linear(D -> 1) + BCE, predicting whether a point is
+                         occluded or off-screen at each frame. model.py only
+                         has Linear(dim, 3) -- position. Needed before any
+                         TAP-Vid-3D metric works, since AJ and OA both score
+                         occlusion.
+
+  Autoregressive         Generate a window of W frames, slide by stride S,
+  sliding window         feed the previous window back as a causal prefix.
+                         This is how the paper handles video longer than one
+                         window. We do all 24 frames in one shot, which only
+                         works because Kubric clips are exactly 24 frames.
+
+  Diffusion forcing      Independent noise level per frame during training.
+                         flow.py already accepts per_frame_k, it is just off.
+                         Needed for stable autoregressive rollout.
+
+  Point-count            Reshape N points into random factor pairs each step
+  factorization          so the model handles any number of query points.
+
+EVALUATION
+  APD3D / AJ3D / OA      The standard TAP-Vid-3D metrics. Ours is a homemade
+                         ratio against a mean-path baseline, comparable to
+                         nothing. TAPIP3D has a working implementation to
+                         port. Thresholds are pixel distances back-projected
+                         through depth and intrinsics, not fixed metres.
+
+OURS, NOT IN THE PAPER
+  dt conditioning        The model sees frame INDEX, never elapsed time, so
+                         frame rate is baked into the learnt motion prior.
+                         Feeding dt alongside the noise level would make it
+                         frame-rate agnostic. Nobody in the papers we read
+                         does this.
+          </pre>
         </section>
 
         <section id="open">
