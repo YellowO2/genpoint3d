@@ -185,6 +185,7 @@ def main() -> int:
     sched = torch.optim.lr_scheduler.SequentialLR(opt, [warm, cos], [args.warmup])
 
     log, step, t0, running = [], 0, time.time(), 0.0
+    best = float('inf')
     while step < args.steps:
         for batch in train_loader:
             if step >= args.steps:
@@ -219,10 +220,16 @@ def main() -> int:
                       f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step, **m})
                 (out / "log.json").write_text(json.dumps(log, indent=2))
-                torch.save(
-                    {"model": model.state_dict(), "step": step, "args": vars(args)},
-                    out / "ckpt.pt",
-                )
+                ckpt = {"model": model.state_dict(), "step": step,
+                        "args": vars(args), "val": m}
+                torch.save(ckpt, out / "ckpt.pt")
+                # Keep the best separately: val typically bottoms out and then
+                # drifts up as the model overfits, so the LAST checkpoint is
+                # not the one you want.
+                if m["ratio"] < best:
+                    best = m["ratio"]
+                    torch.save(ckpt, out / "best.pt")
+                    print(f"       new best ratio {best:.3f}", flush=True)
 
     print(f"\ndone in {(time.time() - t0) / 60:.1f} min -> {out}", flush=True)
     return 0
