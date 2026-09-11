@@ -211,10 +211,12 @@ def main() -> int:
                 running = 0.0
 
             if step % args.val_every == 0 or step == args.steps:
+                tv = time.time()
                 m = evaluate(model, val_loader, device)
                 print(f"  VAL step {step}  rmse {m['rmse']:.4f}"
                       f"  baseline {m['baseline']:.4f}"
-                      f"  ratio {m['ratio']:.3f}   <- want << 1", flush=True)
+                      f"  ratio {m['ratio']:.3f}   <- want << 1"
+                      f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step, **m})
                 (out / "log.json").write_text(json.dumps(log, indent=2))
                 torch.save(

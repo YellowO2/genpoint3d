@@ -130,3 +130,24 @@ still falls, so it looks like it is working.
 
 This is why `TRAJ_SCALE` exists in `data/transform.py`, and why
 `scripts/check_transform.py` asserts `0.3 < target_std < 3.0`.
+
+---
+
+## Measured timings — fill these in as we learn them
+
+So we can size walltime and plan runs instead of guessing.
+
+| what | hardware | measured |
+| --- | --- | --- |
+| download 500 clips (24.5k files) | NSCC login | ~45 min, throttled to ~10 files/s |
+| preprocess (PNG decode + DINOv3) | A100 shared (`gdev`) | **4.0 s/clip** -> 463 clips = ~31 min |
+| preprocess | Mac CPU (MPS) | 4.7 s/clip |
+| cache size | - | **7.3 MB/clip** -> 463 clips = 3.4 GB |
+| raw Kubric on disk | - | 13 MB/clip -> 500 clips = 6.5 GB |
+| train step, 17.9M, batch 16, N=128 | A100 | *TBD -- read `s/it` from the log* |
+| validation (50 sampling steps) | A100 | *TBD -- printed in seconds after each VAL* |
+
+Useful conversions:
+- 460 clips at batch 16 = ~29 steps per epoch, so 3000 steps = ~104 epochs.
+- 500 clips x 24 frames at 24 fps = **8 minutes of video total**. It is a small
+  dataset; do not over-read a weak result.
