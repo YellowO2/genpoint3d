@@ -197,9 +197,23 @@ PStudio, monocular RGB with *estimated* depth:
 **State of the art is AJ3D ~19 / 100.** The task is far from solved; do not
 expect high numbers.
 
-**Not comparable to us** as things stand: those subsets are real video with
-estimated depth. We are on Kubric with ground-truth depth, which is much
-easier, so our numbers should be higher and mean something different.
+**Not comparable to us**: those subsets are real video with ESTIMATED depth.
+Much harder than our setting.
+
+**Kubric3D is the right comparison** -- same simulator, 24 frames, RGB-D with
+ground-truth depth (DELTA paper, Table 3):
+
+| method | AJ | APD3D | OA |
+| --- | --- | --- | --- |
+| DELTA | 81.4 | 88.6 | 96.6 |
+| DOT-3D | 72.3 | 77.5 | 88.7 |
+| SpatialTracker | 42.7 | 51.6 | 96.5 |
+
+With GT depth the numbers are **80-90**, not ~19. Their eval set is 143 videos
+of 24 frames at 384x512 -- structurally near-identical to our val split.
+
+**DELTA trains on 5,632 Kubric videos. We have 322.** A 17x data gap, which is
+the concrete basis for "we are data-limited, not architecture-limited".
 
 **Gen-points** (our paper) reports Kubric *2D pixel* tracking: delta_avg ~64,
 AJ ~53, OA ~85-88. Also not comparable -- 2D, different split, 200k steps.
