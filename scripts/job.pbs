@@ -32,7 +32,7 @@ echo "=== node ==="
 nvidia-smi
 python -c "import torch; print('torch', torch.__version__, '| cuda available', torch.cuda.is_available())"
 
-CACHE=$ROOT/cache/kubric500.pt
+CACHE=$ROOT/cache/kubric.pt
 
 # --- preprocess: only if the cache is not already built -------------------
 if [ ! -f "$CACHE" ]; then
