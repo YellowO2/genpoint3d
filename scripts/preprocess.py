@@ -43,15 +43,23 @@ def _complete(root: Path, seq_ids: list[str]) -> list[str]:
     depth PNG per frame. Preprocessing a half-written clip crashes on a
     missing file, so this makes it safe to run while a download is in flight.
     """
+    import numpy as np
+
     ok = []
     for s in seq_ids:
         d = root / s
         npy, frames = d / f"{s}.npy", d / "frames"
         if not (npy.exists() and frames.is_dir()):
             continue
-        rgb = sorted(frames.glob("[0-9][0-9][0-9].png"))
-        depth = sorted(frames.glob("*_depth.png"))
-        if rgb and len(rgb) == len(depth):
+        try:
+            # The .npy is the authority on how many frames the clip has.
+            # Counting PNGs against each other is not enough: a clip stopped
+            # halfway has equal RGB and depth counts and would pass.
+            t = int(np.load(npy, allow_pickle=True).item()["intrinsics"].shape[0])
+        except Exception:
+            continue  # .npy itself truncated or unreadable
+        if all((frames / f"{i:03d}.png").exists()
+               and (frames / f"{i:03d}_depth.png").exists() for i in range(t)):
             ok.append(s)
     return ok
 
