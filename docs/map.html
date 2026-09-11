@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>genpoint3d — the map</title>
+
+<!--
+  THE MAP. Architecture + file layout + progress, in one page.
+  Open it in a browser (double-click is enough; no server needed).
+
+  To edit:
+    diagram  -> the <pre class="mermaid"> block. Boxes are labels, arrows are
+                separate lines; nothing is position-dependent.
+    detail   -> the <section class="doc" id="..."> blocks. Plain HTML prose.
+    linking  -> a box's `click <node> href "#id"` must match a section's id.
+    status   -> the emoji in a box label, plus its name in the `class ...` lines
+                at the bottom of the diagram.
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+
+<style>
+/* ── tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --ground:#fbfaf8; --surface:#ffffff; --sunken:#f2f1ee;
+  --line:#ddddd6; --line-soft:#eaeae4;
+  --ink:#1a1d21; --ink-soft:#545a62; --ink-faint:#878d95;
+  --accent:#cf4a22; --accent-dim:#f7e9e3;
+  --ok:#3f7d4e; --warn:#a8791a; --idle:#8a919a;
+  --shadow:0 1px 2px rgba(26,29,33,.05), 0 10px 28px rgba(26,29,33,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:#14171b; --surface:#1b1f24; --sunken:#23282e;
+    --line:#333a42; --line-soft:#272d33;
+    --ink:#e8e9ea; --ink-soft:#a8b0b8; --ink-faint:#79818a;
+    --accent:#f2724a; --accent-dim:#3a241d;
+    --ok:#6cb87e; --warn:#d9ad4a; --idle:#79818a;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.32);
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#14171b; --surface:#1b1f24; --sunken:#23282e;
+  --line:#333a42; --line-soft:#272d33;
+  --ink:#e8e9ea; --ink-soft:#a8b0b8; --ink-faint:#79818a;
+  --accent:#f2724a; --accent-dim:#3a241d;
+  --ok:#6cb87e; --warn:#d9ad4a; --idle:#79818a;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.32);
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition-duration:.01ms!important}}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font:400 15px/1.62 "IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ── header ─────────────────────────────────────────────────────────── */
+header{
+  position:sticky; top:0; z-index:20;
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px 22px;
+  padding:13px 22px; border-bottom:1px solid var(--line);
+  background:color-mix(in srgb,var(--ground) 90%,transparent);
+  backdrop-filter:blur(10px);
+}
+header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:-.01em}
+header h1 span{color:var(--ink-faint);font-weight:400}
+.legend{display:flex;gap:15px;margin-left:auto;flex-wrap:wrap}
+.legend b{
+  display:inline-flex;align-items:center;gap:6px;font-weight:500;
+  font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-faint);
+}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+
+/* ── layout ─────────────────────────────────────────────────────────── */
+main{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1fr)}
+@media (max-width:1000px){main{grid-template-columns:1fr}}
+
+#diagram-pane{padding:24px 22px 64px;border-right:1px solid var(--line);min-height:calc(100vh - 51px)}
+@media (max-width:1000px){#diagram-pane{border-right:0;border-bottom:1px solid var(--line);min-height:0}}
+#diagram{overflow-x:auto}
+#diagram svg{max-width:100%;height:auto;display:block;margin:0 auto}
+#diagram a{cursor:pointer;outline:none}
+#diagram a:hover rect,#diagram a:hover polygon{filter:brightness(.94)}
+#diagram a:focus-visible rect,#diagram a:focus-visible polygon{stroke:var(--accent);stroke-width:3px}
+#diagram g.node.is-active rect,#diagram g.node.is-active polygon{stroke:var(--accent);stroke-width:3.5px}
+
+.eyebrow{
+  margin:0 0 11px;font-weight:500;font-size:11px;
+  letter-spacing:.11em;text-transform:uppercase;color:var(--accent);
+}
+
+/* ── panel ──────────────────────────────────────────────────────────── */
+#panel-pane{padding:24px 22px 80px;position:sticky;top:51px;max-height:calc(100vh - 51px);overflow-y:auto}
+@media (max-width:1000px){#panel-pane{position:static;max-height:none}}
+
+nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+nav button{
+  font:500 12px/1 "IBM Plex Sans",sans-serif;
+  padding:7px 11px;border-radius:3px;cursor:pointer;
+  color:var(--ink-soft);background:var(--surface);
+  border:1px solid var(--line);transition:all .12s;
+}
+nav button:hover{color:var(--ink);border-color:var(--ink-faint)}
+nav button[aria-current="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+
+#panel{background:var(--surface);border:1px solid var(--line);border-radius:5px;box-shadow:var(--shadow);padding:24px 27px 28px}
+.doc{display:none}
+.doc.active{display:block}
+.doc h2{margin:0 0 15px;font-size:21px;font-weight:600;letter-spacing:-.016em;line-height:1.25;text-wrap:balance}
+.doc .body{font-family:"IBM Plex Serif",Georgia,serif;color:var(--ink-soft);max-width:64ch}
+.doc .body>*:last-child{margin-bottom:0}
+.doc p{margin:0 0 13px}
+.doc strong{color:var(--ink);font-weight:600}
+.doc ul,.doc ol{margin:0 0 13px;padding-left:21px}
+.doc li{margin-bottom:5px}
+.doc code{font:400 .87em/1.4 "IBM Plex Mono",ui-monospace,monospace;background:var(--sunken);padding:2px 5px;border-radius:3px;color:var(--ink)}
+.doc pre{background:var(--sunken);border:1px solid var(--line-soft);border-radius:4px;padding:13px 15px;overflow-x:auto;margin:0 0 13px}
+.doc pre code{background:none;padding:0;font-size:12.5px;line-height:1.6;white-space:pre}
+.doc blockquote{margin:0 0 13px;padding:1px 0 1px 15px;border-left:2px solid var(--accent);font-style:italic}
+.doc table{border-collapse:collapse;width:100%;margin:0 0 13px;font-family:"IBM Plex Sans",sans-serif;font-size:13.5px}
+.doc th,.doc td{border-bottom:1px solid var(--line-soft);padding:7px 10px;text-align:left;vertical-align:top}
+.doc th{font-weight:600;color:var(--ink);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase}
+.doc .tag{display:inline-block;font:500 10.5px/1 "IBM Plex Sans",sans-serif;letter-spacing:.05em;text-transform:uppercase;padding:3px 7px;border-radius:3px}
+.tag.ok{background:var(--ok);color:#fff}
+.tag.warn{background:var(--warn);color:#fff}
+.tag.idle{background:var(--idle);color:#fff}
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1>genpoint3d <span>/ the map</span></h1>
+  <div class="legend">
+    <b><i class="dot" style="background:var(--ok)"></i>done</b>
+    <b><i class="dot" style="background:var(--warn)"></i>written, unproven</b>
+    <b><i class="dot" style="background:var(--idle)"></i>not started</b>
+  </div>
+</header>
+
+<main>
+<section id="diagram-pane">
+  <p class="eyebrow">Pipeline &middot; hover a box, or click it for detail</p>
+
+<pre class="mermaid">
+flowchart TD
+    video["RGB video + depth + camera pose"]
+    query["query points<br/>2D pixel + frame index"]
+
+    prep["✅ [0] DATA PREP<br/>data/kubric.py — read files<br/>data/transform.py — reframe + scale"]
+
+    enc["⬜ [1] VISUAL ENCODER<br/>DINOv3-S, frozen<br/>models/encoder.py"]
+
+    mask["🟡 MASKING — the switch<br/>data/masking.py<br/>show C_t → tracking<br/>show ∅ → forecasting"]
+
+    tok["✅ [2] POINT TOKENISER<br/>3D positions → tokens<br/>models/model.py"]
+
+    cond["🟡 [3] CONDITIONING c<br/>⬜ ID card · ✅ Q pos-emb · ✅ noise level k<br/>models/model.py"]
+
+    blocks["🟡 [4] DiT BLOCKS × depth · ← YOU ARE HERE<br/>✅ a. temporal attention<br/>✅ b. spatial attention<br/>⬜ c. point–image cross-attn<br/>models/model.py + models/layers.py"]
+
+    heads["🟡 [5] OUTPUT HEADS<br/>🟡 position → 3 xyz<br/>⬜ visibility → 1 occluded?<br/>models/model.py"]
+
+    video --> prep --> enc
+    query --> tok
+    enc -->|"sample at Q<br/>— who am I"| cond
+    enc -->|"feature map C_t<br/>— what is where"| mask
+    mask -->|"C_t or ∅"| blocks
+    tok --> blocks
+    cond -.->|"AdaLN"| blocks
+    blocks --> heads
+
+    click prep href "#stage-0"
+    click enc href "#stage-1"
+    click mask href "#masking"
+    click tok href "#stage-2"
+    click cond href "#stage-3"
+    click blocks href "#stage-4"
+    click heads href "#stage-5"
+
+    classDef done fill:#c8e6c9,stroke:#4caf50,color:#000
+    classDef untested fill:#fff9c4,stroke:#fbc02d,color:#000
+    classDef todo fill:#eceff1,stroke:#b0bec5,color:#000
+    classDef input fill:#e1f5fe,stroke:#4fc3f7,color:#000
+    classDef switch fill:#f8bbd0,stroke:#e91e63,color:#000
+
+    class video,query input
+    class prep,tok done
+    class cond,blocks,heads,mask untested
+    class enc todo
+</pre>
+
+  <div class="doc active" style="margin-top:22px">
+    <div class="body">
+      <p>Only <strong>[2]–[5] are trained</strong>. [1] is frozen off-the-shelf.
+      The training objective lives in <code>models/flow.py</code> — not a stage,
+      it scores the output.</p>
+    </div>
+  </div>
+</section>
+
+<section id="panel-pane">
+  <p class="eyebrow">Detail</p>
+
+  <nav id="nav">
+    <button data-doc="build-order">Build order</button>
+    <button data-doc="files">File layout</button>
+    <button data-doc="training">Training</button>
+    <button data-doc="decisions">Decisions</button>
+    <button data-doc="sources">Code sources</button>
+    <button data-doc="open">Still open</button>
+  </nav>
+
+  <div id="panel">
+
+<!-- ══ overview ════════════════════════════════════════════════════════ -->
+<section class="doc" id="build-order">
+  <h2>Build order</h2>
+  <div class="body">
+    <p>Extend <em>Gen-points</em> (Lu, Cao, Feng, Owens, CVPR 2026 — generative
+    point tracking <strong>and</strong> forecasting) from 2D to 3D.</p>
+    <table>
+      <tr><th>Step</th><th>What</th><th>Status</th></tr>
+      <tr><td>1</td><td>Data prep — [0]</td><td><span class="tag ok">done</span></td></tr>
+      <tr><td>2</td><td>Backbone + flow matching, <strong>no images</strong> — [2] [4a] [4b] [5-position]</td><td><span class="tag warn">unproven</span></td></tr>
+      <tr><td>3</td><td>DINOv3 + cross-attention — [1] [3-ID card] [4c]</td><td><span class="tag idle">not started</span></td></tr>
+      <tr><td>4</td><td>Visibility head — [5-visibility]</td><td><span class="tag idle">not started</span></td></tr>
+    </table>
+    <p>Step 2 is the de-risk: an <em>unconditional</em> trajectory generator. If
+    it cannot memorise 2 clips, the fault is the backbone or the flow-matching
+    code — and finding that out with an encoder attached would be miserable.</p>
+    <p><strong>Step 2 remaining:</strong> run <code>scripts/overfit.py</code> and
+    confirm the loss falls to ~0. Blocked on compute. Already verified: 11.93M
+    params, causal masking exact, gradients flow.</p>
+    <p>Step 1 passes four checks — round-trip 0.00e+00 m, static-scene drift
+    0.34%, reprojection 0.000 px, target std ≈ 1.</p>
+  </div>
+</section>
+
+<section class="doc" id="files">
+  <h2>File layout</h2>
+  <div class="body">
+<pre><code>genpoint3d/              the package
+  data/                    [0] data prep
+    kubric.py                reads Kubric files -&gt; raw numpy
+    transform.py             raw -&gt; model-ready (reframe, normalise, scale)
+    masking.py               THE SWITCH: which frames get hidden
+  models/                  [1]-[5] the network
+    model.py                 THE ARCHITECTURE — open this one
+    layers.py                the machinery (RMSNorm, RoPE, Attention, ...)
+    flow.py                  training objective + sampler
+    encoder.py               [1] DINOv3 — step 3
+  geometry.py              3D&lt;-&gt;2D maths (project / unproject)
+  viz/rerun_log.py         3D visualisation
+
+scripts/                 things you run
+  check_transform.py       proves [0] is correct (4 checks)
+  calibrate_traj_scale.py  measures the TRAJ_SCALE constant
+  overfit.py               step 2's test: can it memorise 2 clips?
+  visualize.py             writes the .rrd you open in rerun
+
+docs/map.html            this page
+docs/references.md       every paper/repo and why
+docs/ideas.md            deferred ideas
+data/ outputs/ refs/     gitignored</code></pre>
+    <p>Only two files are the actual model: <code>model.py</code> and
+    <code>layers.py</code>. Everything else is plumbing, verification, or notes.</p>
+  </div>
+</section>
+
+<!-- ══ stages ══════════════════════════════════════════════════════════ -->
+<section class="doc" id="stage-0">
+  <h2>[0] Data prep</h2>
+  <div class="body">
+    <p>Three operations, in order, then the inverse for turning predictions back
+    into metres. Verified by <code>scripts/check_transform.py</code>.</p>
+    <ol>
+      <li><strong>Reframe</strong> → the <em>frozen frame-0 camera</em> frame,
+      <code>rel[t] = E[t] @ inv(E[0])</code>.</li>
+      <li><strong>Normalise</strong> → per-clip, from observed frames only
+      (percentile depth clip, inlier centroid, max centred norm). Makes a
+      tabletop and a street land in the same box.</li>
+      <li><strong>Scale the target</strong> → one global <code>TRAJ_SCALE</code>,
+      so the denoising target has unit variance.</li>
+    </ol>
+  </div>
+</section>
+
+<section class="doc" id="stage-1">
+  <h2>[1] Visual encoder <em>— step 3</em></h2>
+  <div class="body">
+    <p>DINOv3-S, frozen, run on the whole frame at once — it never sees the query
+    points. Take multiple layers, concatenate, project to <code>D</code>,
+    upsample 2×.</p>
+    <p><strong>3D addition, the "feature cloud":</strong> each patch token also
+    gets its 3D position — downsample depth to the patch grid, unproject,
+    Fourier-encode, add. TAPIP3D's construction.</p>
+    <p>Because it is frozen <em>and</em> the mask is applied downstream, the
+    features never change: you can encode each clip once and reuse it for every
+    epoch and every cutoff. The catch is storage (features are far larger than
+    the video) and that it rules out per-epoch image augmentation.</p>
+  </div>
+</section>
+
+<section class="doc" id="masking">
+  <h2>Masking — the tracking/forecasting switch</h2>
+  <div class="body">
+    <p>We mask the video at a random frame and feed a null embedding to the
+    model. This happens <em>after</em> the encoder rather than by blanking
+    pixels, so we can run the visual encoder once per clip and reuse it across
+    every epoch and every cutoff.</p>
+    <p>A blanked frame is not the same as no frame: DINOv3 on black pixels
+    returns a real feature meaning "this is a black image", which the model
+    would have to learn to ignore — and which would break on a genuinely dark
+    scene. The learned <code>∅</code> means exactly "nothing here", and RoPE
+    still tells the model which frame it is, so one shared vector covers every
+    masked frame.</p>
+    <blockquote>Paper §4: "For unified model, we randomly select a frame index
+    and mask all visual input after it."</blockquote>
+    <p>Not training-only — at inference you mask too; that is <em>how</em> you
+    ask for a forecast. Training picks <code>T_C</code> randomly, inference
+    picks it deliberately.</p>
+  </div>
+</section>
+
+<section class="doc" id="stage-2">
+  <h2>[2] Point tokeniser</h2>
+  <div class="body">
+    <p><code>nn.Linear(3, D)</code> on the noisy 3D position. Point-space
+    diffusion — positions go in and out directly, no VAE, no grid. That is the
+    whole stage.</p>
+  </div>
+</section>
+
+<section class="doc" id="stage-3">
+  <h2>[3] Conditioning vector <code>c</code></h2>
+  <div class="body">
+    <p>One vector per query point, constant across frames and blocks:</p>
+<pre><code>c = [DINOv3 feature at Q]  +  [pos-emb of Q]  +  [emb of noise level k]
+         step 3                  ── have these now ──</code></pre>
+    <p>Enters through <strong>AdaLN</strong> (<code>AdaRMSNorm</code>): it
+    predicts a per-channel scale for the norm inside every block. Differs from
+    vanilla DiT, where one <em>global</em> vector conditions all tokens — ours is
+    <strong>per point</strong>.</p>
+    <blockquote><code>c</code> is the point's fixed <strong>ID card</strong> —
+    <em>what</em> we track. It cannot say <em>where</em> the point is in frame t;
+    that is what we are predicting. Finding "where" is [4c]'s job.</blockquote>
+  </div>
+</section>
+
+<section class="doc" id="stage-4">
+  <h2>[4] DiT blocks</h2>
+  <div class="body">
+    <p>Tokens form a <code>(T frames) × (N points)</code> grid, so attention is
+    factorised into two cheap slices instead of one <code>T·N</code> blob:</p>
+    <table>
+      <tr><th></th><th>Attention</th><th>Who talks to whom</th><th>Reshape</th></tr>
+      <tr><td>a</td><td><strong>temporal</strong>, causal</td><td>one point across time; frame <code>t</code> sees only <code>t' ≤ t</code></td><td><code>(B·N, T, D)</code></td></tr>
+      <tr><td>b</td><td><strong>spatial</strong></td><td>all <code>N</code> points within one frame</td><td><code>(B·T, N, D)</code></td></tr>
+      <tr><td>c</td><td><strong>cross-attn</strong> <em>— step 3</em></td><td>each point queries its frame's feature map</td><td>—</td></tr>
+    </table>
+    <p>RMSNorm, QK-norm, GEGLU FFN. RoPE on time; axial RoPE on query xyz.</p>
+    <p><strong>[4c] is the tracking↔forecasting switch.</strong> Masked frames
+    get the learned null embedding <code>∅</code> instead of <code>C_t</code>.
+    Same machinery, no branching.</p>
+    <blockquote>Why cross-attention and not correlation features: correlation
+    needs a template matched against a real image. In forecasting there
+    <em>is</em> no image. Cross-attention just swaps in <code>∅</code> and keeps
+    running.</blockquote>
+    <p>Paper sizes: 6 blocks / dim 384 (main), 12 / 768 (Kinetics). Ours: 11.93M
+    params at dim 256 / depth 6 / 4 heads.</p>
+  </div>
+</section>
+
+<section class="doc" id="stage-5">
+  <h2>[5] Output heads</h2>
+  <div class="body">
+    <p>A "head" is a small output layer converting a hidden vector into the
+    format we want.</p>
+    <ul>
+      <li><strong>Position</strong> <code>Linear(D → 3)</code> — predicts the
+      velocity <code>x1 − x0</code>, L2 loss.</li>
+      <li><strong>Visibility</strong> <code>Linear(D → 1)</code> — predicts clean
+      <code>V1</code>, BCE loss. <em>Step 4.</em></li>
+    </ul>
+    <p>Visibility means <strong>geometric</strong> occluded/off-screen, predicted
+    for <em>every</em> frame including forecast frames. A forecast point is not
+    automatically invisible.</p>
+  </div>
+</section>
+
+<!-- ══ the rest ════════════════════════════════════════════════════════ -->
+<section class="doc" id="training">
+  <h2>Training</h2>
+  <div class="body">
+    <p><strong>Conditional flow matching.</strong>
+    <code>x_k = (1−k)·x0 + k·x1</code>, <code>x0 ~ N(0,I)</code>; predict
+    <code>x1 − x0</code>. <code>k</code> comes from a
+    <strong>logit-normal (loc −1, scale 1.5)</strong> — <em>not</em> uniform. The
+    paper reports this as critical, and SD3 found the same.</p>
+    <p><strong>The switch that controls everything</strong> is whether frame
+    <code>t</code> has visual conditioning. <code>t &lt; T_C</code> → tracking
+    (conditional). <code>t ≥ T_C</code> → features replaced by <code>∅</code> →
+    forecasting (unconditional). <code>T_C = T</code> is pure tracking,
+    <code>T_C = 1</code> pure forecasting. No architectural change, just a mask.</p>
+    <p>Deferred past step 4: diffusion forcing (independent <code>k</code> per
+    frame), autoregressive sliding window, point-count factorization.</p>
+  </div>
+</section>
+
+<section class="doc" id="decisions">
+  <h2>Current decisions</h2>
+  <div class="body">
+    <p><strong>Frozen frame-0 camera frame.</strong> Everything expressed in
+    frame 0's camera, never re-anchored. Static like a world frame (ego-motion
+    removed), but constructible from <em>relative</em> poses alone — which is all
+    real video gives you. Costs the gravity prior ("down" is no longer a fixed
+    axis). MotionForesight freezes the <em>last observed</em> frame instead; we
+    use frame 0 because our <code>T_C</code> is random per sample and a moving
+    origin would make targets depend on the mask.</p>
+    <p><strong>Camera pose is an input, never predicted, never a token.</strong>
+    Used only as geometry: unproject depth → 3D, project 3D → 2D for feature
+    sampling.</p>
+    <p><strong>Absolute positions, not residuals.</strong> Tried
+    MotionForesight's residual parameterisation and dropped it — they get away
+    with it because they denoise in VAE latent space. The anchor is kept as
+    conditioning instead.</p>
+    <p><strong>Two scales.</strong> Per-clip scene scale for geometry; one global
+    <code>TRAJ_SCALE</code> for the denoising target. Global, not per-clip, so a
+    fast clip stays genuinely faster than a slow one.</p>
+    <p><strong>Query = 2D pixel + source frame index.</strong> The pixel is a
+    <em>pointer</em> — used to sample the DINOv3 ID card and look up depth for
+    the 3D anchor. The tokens the model denoises are 3D.</p>
+    <p><strong>Feature-cloud conditioning in from the first real test.</strong>
+    Free on Kubric (GT depth + pose). "Remove pointmap conditioning" is a planned
+    ablation.</p>
+  </div>
+</section>
+
+<section class="doc" id="sources">
+  <h2>Where the code comes from</h2>
+  <div class="body">
+    <p>The paper's own repo is <strong>empty</strong> ("coming soon"), so:</p>
+    <table>
+      <tr><th>Piece</th><th>Source</th></tr>
+      <tr><td>DiT block, AdaRMSNorm, RoPE, QK-norm, GEGLU, zero-init, temporal/spatial factorization</td><td><strong><code>tesfaldet/genpt</code></strong> <code>src/models/networks/transformer_genpt.py</code></td></tr>
+      <tr><td>feature cloud / 3D lifting</td><td><strong><code>TAPIP3D</code></strong></td></tr>
+      <tr><td>cross-check only</td><td><code>facebookresearch/DiT</code> (ICCV'23), <code>co-tracker</code></td></tr>
+    </table>
+    <p><strong>On genpt:</strong> arXiv 2510.20951 — authors include Adam Harley
+    (PIPs / PointOdyssey, who defined modern point tracking) and Chris Pal
+    (Mila). Its transformer descends from HDiT (Crowson et al.,
+    <strong>ICML 2024</strong>). We take <em>engineering</em> from it, not
+    claims — every mechanism was chosen from the CVPR spec first.</p>
+    <p><strong>Not reused:</strong> genpt injects image info as
+    correlation-pyramid features through AdaRMSNorm. We need cross-attention so
+    <code>∅</code> works for forecasting.</p>
+  </div>
+</section>
+
+<section class="doc" id="open">
+  <h2>Still open</h2>
+  <div class="body">
+    <ol>
+      <li>Exact config for the first real test (currently dim 256 / depth 6 /
+      4 heads).</li>
+      <li>Spatial attention <strong>per block</strong> (our paper, current
+      choice) vs <strong>once at the end</strong> (genpt, cheaper). Ablate
+      later.</li>
+      <li>Virtual points on/off (CoTracker3's <code>O(N²)</code> saver).
+      Currently off.</li>
+      <li>Recalibrate <code>TRAJ_SCALE</code> — 0.2136 came from only 2 clips.</li>
+    </ol>
+  </div>
+</section>
+
+  </div>
+</section>
+</main>
+
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.esm.min.mjs";
+
+const css = getComputedStyle(document.documentElement);
+const tok = n => css.getPropertyValue(n).trim();
+
+mermaid.initialize({
+  startOnLoad: false,
+  securityLevel: "loose",
+  theme: "base",
+  flowchart: { wrappingWidth: 240, useMaxWidth: true },
+  themeVariables: {
+    fontFamily: '"IBM Plex Sans", system-ui, sans-serif',
+    fontSize: "14px",
+    lineColor: tok("--ink-faint"),
+    textColor: tok("--ink-soft"),
+    edgeLabelBackground: tok("--ground"),
+  },
+});
+
+const pane   = document.getElementById("panel-pane");
+const navBtns = [...document.querySelectorAll("#nav button")];
+const docs   = [...document.querySelectorAll("#panel .doc")];
+
+function open(id) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  docs.forEach(d => d.classList.toggle("active", d === target));
+  navBtns.forEach(b => b.setAttribute("aria-current", String(b.dataset.doc === id)));
+  document.querySelectorAll("#diagram g.node.is-active")
+          .forEach(n => n.classList.remove("is-active"));
+  pane.scrollTop = 0;
+}
+
+navBtns.forEach(b => b.addEventListener("click", () => open(b.dataset.doc)));
+
+const holder = document.querySelector("pre.mermaid");
+const { svg } = await mermaid.render("map-graph", holder.textContent);
+const wrap = document.createElement("div");
+wrap.id = "diagram";
+wrap.innerHTML = svg;
+holder.replaceWith(wrap);
+
+// Mermaid turns `click x href "#id"` into an <a>. Intercept it so the panel
+// swaps in place instead of the page jumping.
+wrap.addEventListener("click", e => {
+  const a = e.target.closest("a");
+  if (!a) return;
+  const href = a.getAttribute("href") || a.getAttribute("xlink:href") || "";
+  if (!href.startsWith("#")) return;
+  e.preventDefault();
+  open(href.slice(1));
+  a.closest("g.node")?.classList.add("is-active");
+});
+
+open("build-order");
+</script>
+</body>
+</html>

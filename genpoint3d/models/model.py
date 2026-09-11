@@ -1,7 +1,7 @@
 """
 THE ARCHITECTURE. Open this file to see the design.
 
-This is stages 2-5 of `docs/MAP.md`, in order. The transformer machinery it
+This is stages 2-5 of `docs/map.html`, in order. The transformer machinery it
 uses (RMSNorm, RoPE, Attention, ...) lives in `layers.py` -- you should not
 need to read that to understand what happens here.
 

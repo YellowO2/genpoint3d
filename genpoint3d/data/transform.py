@@ -2,7 +2,7 @@
 Step 1 -- input preparation.
 
 Turns a raw `KubricSample` into the tensors the model actually eats. Three
-operations, in this order (see `docs/MAP.md`):
+operations, in this order (see `docs/map.html`):
 
 1. **Reframe** -- move everything from Kubric world coordinates into the
    *frozen frame-0 camera* frame. Origin sits at frame 0's camera and never
