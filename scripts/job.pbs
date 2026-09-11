@@ -11,7 +11,7 @@
 #
 #PBS -N genpoint3d
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
-#PBS -l walltime=02:30:00
+#PBS -l walltime=08:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe

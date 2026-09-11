@@ -144,7 +144,7 @@ So we can size walltime and plan runs instead of guessing.
 | preprocess | Mac CPU (MPS) | 4.7 s/clip |
 | cache size | - | **7.3 MB/clip** -> 463 clips = 3.4 GB |
 | raw Kubric on disk | - | 13 MB/clip -> 500 clips = 6.5 GB |
-| train step, 17.9M, batch 16, N=128 | A100 | *TBD -- read `s/it` from the log* |
+| train step, 17.9M, batch 16, N=128 | A100 **shared** | **0.8 s/it** -> 20k steps = 4.4 h |
 | validation (50 sampling steps) | A100 | *TBD -- printed in seconds after each VAL* |
 
 Useful conversions:
