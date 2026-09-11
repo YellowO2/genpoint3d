@@ -72,14 +72,14 @@ flowchart LR
     query["Query points"]
     noisy["Noisy trajectory"]
 
-    prep["0 — Data prep<br/>reframe + normalise"]
-    enc["1 — Visual encoder<br/>DINOv3-S, frozen"]
-    sample(["sample at query<br/>once, at frame 0"])
+    prep["Data prep<br/>reframe + normalise"]
+    enc["Visual encoder<br/>DINOv3-S, frozen"]
+    sample(["sample at query point<br/>once, at frame 0"])
     mask(["switch: features or null<br/>tracking vs forecasting"])
-    tok["2 — Trajectory tokeniser"]
-    cond["3 — Conditioning<br/>appearance + position<br/>+ noise level"]
-    blocks["4 — DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
-    heads["5 — Output heads<br/>position + visibility"]
+    tok["Trajectory tokeniser"]
+    cond["Conditioning<br/>appearance + position<br/>+ noise level"]
+    blocks["DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
+    heads["Output heads<br/>position + visibility"]
 
     video --> prep --> enc
     noisy --> tok
