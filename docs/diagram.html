@@ -77,6 +77,7 @@ flowchart LR
     tok["Trajectory tokeniser"]
     cond["Query + timestep conditioning<br/>appearance and position at query<br/>+ noise level"]
     blocks["DiT blocks x6<br/>temporal + spatial<br/>+ point-image"]
+    cutoff["Conditioning cutoff<br/>features before, null after<br/>tracking vs forecasting"]
     heads["Output heads<br/>position + visibility"]
 
     video --> prep --> enc
@@ -84,7 +85,8 @@ flowchart LR
     query --> cond
     tok ~~~ cond
     enc -->|"feature map"| cond
-    enc -->|"features, or null after cutoff"| blocks
+    enc -->|"feature map"| cutoff
+    cutoff -->|"features or null"| blocks
     tok --> blocks
     cond -.->|AdaLN| blocks
     blocks --> heads
@@ -95,7 +97,7 @@ flowchart LR
 
     class video,query,noisy input
     class prep,enc,tok,cond,blocks done
-    class heads partial
+    class cutoff,heads partial
 </pre>
   </div>
 
