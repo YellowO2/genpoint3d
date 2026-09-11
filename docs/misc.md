@@ -145,7 +145,11 @@ So we can size walltime and plan runs instead of guessing.
 | cache size | - | **7.3 MB/clip** -> 463 clips = 3.4 GB |
 | raw Kubric on disk | - | 13 MB/clip -> 500 clips = 6.5 GB |
 | train step, 17.9M, batch 16, N=128 | A100 **shared** | **0.8 s/it** -> 20k steps = 4.4 h |
-| validation (50 sampling steps) | A100 | *TBD -- printed in seconds after each VAL* |
+| validation (50 sampling steps, 56 clips) | A100 | **35 s** per VAL |
+
+First real result, 2026-09-12: 17.9M model, 322 train / 56 val clips, 500
+steps -> **val ratio 0.309** (rmse 0.267 vs 0.864 baseline). Generalises to
+unseen clips, tracking mode.
 
 Useful conversions:
 - 460 clips at batch 16 = ~29 steps per epoch, so 3000 steps = ~104 epochs.
