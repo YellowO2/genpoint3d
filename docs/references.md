@@ -179,3 +179,45 @@ pose is an input (Kubric GT for us), the model does NOT predict it.** The 4D
 reconstruction family (D4RT, 4RC) makes the frame a query parameter and estimates
 the camera, but that is a bigger/different task (full 4D reconstruction from bare
 monocular video) and out of scope.
+
+---
+
+## Benchmark numbers — what "good" looks like
+
+**TAPVid-3D** (TAPIP3D paper, Table 1). Averaged over Aria / DriveTrack /
+PStudio, monocular RGB with *estimated* depth:
+
+| method | AJ3D | APD3D | OA |
+| --- | --- | --- | --- |
+| TAPIP3D | 18.8 | 27.4 | 86.4 |
+| DELTA | 17.8 | 26.3 | 86.4 |
+| CoTracker3 + M-SaM | 17.3 | 25.9 | 87.8 |
+| SpatialTracker | 13.0 | 20.8 | 84.5 |
+
+**State of the art is AJ3D ~19 / 100.** The task is far from solved; do not
+expect high numbers.
+
+**Not comparable to us** as things stand: those subsets are real video with
+estimated depth. We are on Kubric with ground-truth depth, which is much
+easier, so our numbers should be higher and mean something different.
+
+**Gen-points** (our paper) reports Kubric *2D pixel* tracking: delta_avg ~64,
+AJ ~53, OA ~85-88. Also not comparable -- 2D, different split, 200k steps.
+
+### The metrics, defined
+From `TAPIP3D/evaluation/tapvid3d_metrics.py`:
+- `pts_within_{1,2,4,8,16}` -- fraction of points within a threshold. The
+  thresholds are the 2D TAP pixel thresholds **back-projected into 3D using
+  depth and intrinsics**, so a distant point gets a larger tolerance. NOT
+  fixed metric distances.
+- `average_pts_within_thresh` = APD3D (a.k.a. delta_avg).
+- `jaccard_{x}` -> `average_jaccard` = AJ3D. Counts a point only if it is both
+  within threshold AND correctly predicted visible.
+- `occlusion_accuracy` = OA.
+- Predictions are rescaled to the GT scale first (`scaling="median"`) because
+  monocular depth is scale-ambiguous. With Kubric GT depth we would use
+  `scaling="none"`.
+
+**TODO:** port this implementation so our results become comparable. Our
+current `delta_avg` in `scripts/train.py` uses arbitrary fixed thresholds and
+is NOT the same measure.
