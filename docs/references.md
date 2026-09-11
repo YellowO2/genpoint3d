@@ -7,7 +7,7 @@
   - Official code: https://github.com/Charles-Lu/Generative-Point-Tracking-and-Forecasting
     (EMPTY as of 2026-09-10 — "code & weights coming soon"; re-check periodically)
   - Local copy of full text: `../Generative Point Tracking and Forecasting.txt`
-  - Architecture spec extracted: `architecture_spec.md`
+  - Architecture spec extracted: `MAP.md`
 
 ## Closest concurrent work (has full code — read, don't clone)
 - **Generative Point Tracking with Flow Matching** — Tesfaldet, Harley, Derpanis,
