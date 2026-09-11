@@ -82,12 +82,22 @@ def split(cache: str, val_frac: float, seed: int) -> tuple[list[dict], list[dict
     Also returns the cache's feature width, which the model needs: the encoder
     chooses its own width and it need not equal the model's.
     """
-    blob = torch.load(cache, weights_only=False)
-    clips = blob["clips"]
+    path = Path(cache)
+    if path.is_dir():
+        # one .pt per clip -- written incrementally so preprocessing resumes
+        files = sorted(path.glob("*.pt"))
+        if not files:
+            raise SystemExit(f"no cached clips in {path} -- run scripts/preprocess.py first")
+        clips = [torch.load(f, weights_only=False) for f in files]
+    else:
+        clips = torch.load(path, weights_only=False)["clips"]  # legacy single file
+
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(clips), generator=g).tolist()
     n_val = max(1, int(len(clips) * val_frac))
-    return [clips[i] for i in perm[n_val:]], [clips[i] for i in perm[:n_val]], blob.get("feat_dim")
+    return ([clips[i] for i in perm[n_val:]],
+            [clips[i] for i in perm[:n_val]],
+            clips[0].get("feat_dim"))
 
 
 def to_device(batch, device):
@@ -125,7 +135,7 @@ def evaluate(model, loader, device, steps: int = 50) -> dict:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--cache", required=True, help="output of scripts/preprocess.py")
+    p.add_argument("--cache", required=True, help="cache DIRECTORY from scripts/preprocess.py")
     p.add_argument("--out", default="outputs/run")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--batch", type=int, default=8)

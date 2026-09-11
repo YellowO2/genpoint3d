@@ -9,6 +9,10 @@ than it computes.
 
 So: do it once, write tensors, train from those.
 
+One file per clip, written as it goes. A run that dies partway keeps
+everything finished so far and resumes on the next submission, and training
+can start on a partial set.
+
 Caveat: the cached normalisation uses statistics from the WHOLE clip, not just
 the observed frames. That is a small future-leak. It is acceptable right now
 because the first experiment is pure TRACKING -- every frame keeps its image,
@@ -19,8 +23,7 @@ Visual features are cached in fp16 at 384px (the resolution the paper's own
 ablations use, §3.4), which is ~10 MB per clip -- about 5 GB for 500 clips.
 Re-encoding them every epoch would dominate training time.
 
-Run:  python scripts/preprocess.py --root DATA --out cache/kubric.pt
-      python scripts/preprocess.py --root DATA --out cache/k.pt --features
+Run:  python scripts/preprocess.py --root DATA --out cache/kubric --features
 """
 
 import argparse
@@ -67,7 +70,7 @@ def _complete(root: Path, seq_ids: list[str]) -> list[str]:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--root", required=True)
-    p.add_argument("--out", default="cache/kubric.pt")
+    p.add_argument("--out", default="cache/kubric", help="DIRECTORY, one .pt per clip")
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--features", action="store_true", help="also cache DINOv3 features")
     p.add_argument("--image-size", type=int, default=384)
@@ -97,10 +100,13 @@ def main() -> int:
         print(f"encoding on {dev} at {args.image_size}px"
               f"{' (STUB backbone)' if args.stub else ''}", flush=True)
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
 
-    clips, t0 = [], time.time()
-    for i in range(len(ds)):
+    out.mkdir(parents=True, exist_ok=True)
+    todo = [i for i in range(len(ds)) if not (out / f"{ds.seq_ids[i]}.pt").exists()]
+    print(f"{len(ds) - len(todo)} already cached, {len(todo)} to do", flush=True)
+
+    t0 = time.time()
+    for n, i in enumerate(todo, 1):
         raw = ds[i]
         x = transform(raw, num_context_frames=raw.frames.shape[0])
         entry = {
@@ -122,20 +128,25 @@ def main() -> int:
             entry["context"] = encoder.tokens(feat).half().cpu()             # (T, P, D)
             entry["id_card"] = id_card.half().cpu()                          # (N, D)
 
-        clips.append(entry)
-        if (i + 1) % 25 == 0 or i + 1 == len(ds):
-            rate = (time.time() - t0) / (i + 1)
-            print(f"  {i + 1}/{len(ds)}  {rate:.2f}s/clip"
-                  f"  eta {rate * (len(ds) - i - 1) / 60:.1f} min", flush=True)
+        entry["points"] = args.points
+        entry["feat_dim"] = args.feat_dim if args.features else None
+        entry["image_size"] = args.image_size if args.features else None
 
-    torch.save({
-        "clips": clips,
-        "points": args.points,
-        "feat_dim": args.feat_dim if args.features else None,
-        "image_size": args.image_size if args.features else None,
-    }, out)
-    mb = out.stat().st_size / 1e6
-    print(f"\n{len(clips)} clips -> {out}  ({mb:.1f} MB, {mb / max(len(clips),1):.2f} MB/clip)")
+        # write to a temp name first so a kill mid-write cannot leave a
+        # half-file that the resume check would mistake for finished
+        tmp = out / f".{entry['seq_id']}.tmp"
+        torch.save(entry, tmp)
+        tmp.rename(out / f"{entry['seq_id']}.pt")
+
+        if n % 25 == 0 or n == len(todo):
+            rate = (time.time() - t0) / n
+            print(f"  {n}/{len(todo)}  {rate:.2f}s/clip"
+                  f"  eta {rate * (len(todo) - n) / 60:.1f} min", flush=True)
+
+    files = sorted(out.glob("*.pt"))
+    mb = sum(f.stat().st_size for f in files) / 1e6
+    print(f"\n{len(files)} clips cached in {out}"
+          f"  ({mb:.1f} MB, {mb / max(len(files),1):.2f} MB/clip)")
     return 0
 
 

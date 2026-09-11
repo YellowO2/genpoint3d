@@ -36,10 +36,10 @@ echo "=== node ==="
 nvidia-smi
 python -c "import torch; print('torch', torch.__version__, '| cuda available', torch.cuda.is_available())"
 
-CACHE=$ROOT/cache/kubric.pt
+CACHE=$ROOT/cache/kubric
 
 # --- preprocess: only if the cache is not already built -------------------
-if [ ! -f "$CACHE" ]; then
+if [ ! -d "$CACHE" ] || [ -z "$(ls -A $CACHE 2>/dev/null)" ]; then
   echo "=== preprocess (DINOv3 features) ==="
   python scripts/preprocess.py \
     --root $ROOT/kubric \
