@@ -1,15 +1,17 @@
 #!/bin/bash
 # NSCC ASPIRE 2A -- preprocess (DINOv3) then train, in one job.
 #
-# FILL IN the two lines marked TODO, then:   qsub scripts/job.pbs
-# Find them with:  qstat -Q          (queue names)
-#                  check your NSCC welcome email for the project code
+# Submit with:  qsub scripts/job.pbs
+#
+# Queue routing is automatic from the resources requested. "-q ai" + ngpus=1
+# lands in aiq1, which allows any walltime from 1s to 24h. Do NOT use
+# "-q normal" for a GPU job shorter than 2h -- g1 has a 2-hour MINIMUM and a
+# job under it is rejected rather than queued.
 #
 #PBS -N genpoint3d
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
 #PBS -l walltime=06:00:00
-#PBS -q normal
-#PBS -P TODO_PROJECT_CODE
+#PBS -q ai
 #PBS -j oe
 #PBS -o /home/users/ntu/yhuang01/scratch/genpoint3d/outputs/
 
