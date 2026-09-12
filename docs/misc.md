@@ -37,6 +37,14 @@ files, so "DINOv3 downloaded OK" does not mean the dataset will.
 
 ---
 
+## The dataset has 11,000 clips, not 1,000
+
+The HF API caps a directory listing at 1000 entries, so `zbww/tapip3d-kubric`
+looks like it has 1000 sequences. It goes up to `010999`. Probe directly
+rather than trusting the listing.
+
+---
+
 ## Never pass hundreds of `allow_patterns`
 
 `huggingface_hub` matches every file against every pattern. 500 patterns x
