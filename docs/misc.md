@@ -39,9 +39,13 @@ files, so "DINOv3 downloaded OK" does not mean the dataset will.
 
 ## The dataset has 11,000 clips, not 1,000
 
-The HF API caps a directory listing at 1000 entries, so `zbww/tapip3d-kubric`
-looks like it has 1000 sequences. It goes up to `010999`. Probe directly
-rather than trusting the listing.
+Listing `zbww/tapip3d-kubric` via the HF tree API returns exactly 1000 folders
+ending at `000999`, which looks like the whole dataset. It is not -- sequences
+exist up to `010999`. Verified by requesting `001000`, `004999`, `009999`
+directly and binary-searching the upper bound.
+
+Whatever the cause (pagination, most likely), do not trust a listing that
+comes back at a suspiciously round number. Probe past it.
 
 ---
 
