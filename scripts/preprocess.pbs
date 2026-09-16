@@ -6,7 +6,10 @@
 #
 #PBS -N preprocess
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
-#PBS -l walltime=00:30:00
+# 4.0 s/clip measured on a shared A100, so 3500 clips is ~4h. Walltime is a cap,
+# not a reservation -- the job ends when the script does. Over 2h routes to the
+# g1 queue rather than gdev, which can mean a longer wait to start.
+#PBS -l walltime=06:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe

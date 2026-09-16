@@ -145,6 +145,26 @@ This is why `TRAJ_SCALE` exists in `data/transform.py`, and why
 
 ---
 
+## Disk and inode quota on NSCC — not a constraint, stop checking
+
+`df -h ~/scratch` shows the **shared** filesystem (9.5 PB), which says nothing
+about your own limit. Lustre quotas are per-user:
+
+```bash
+lfs quota -h -u $USER /scratch
+```
+
+Measured 2026-09-16: **100 TB block quota, 200M inode quota** (default
+settings, not something we requested). Usage at the time was 19 GB / 61k files.
+
+At 13 MB and ~49 files per raw clip, the entire 11,000-clip dataset would be
+~143 GB and ~540k files — **0.14% of the block quota and 0.27% of the inodes**.
+
+So: disk is never the reason to download fewer clips. Preprocessing time and
+training time are.
+
+---
+
 ## Measured timings — fill these in as we learn them
 
 So we can size walltime and plan runs instead of guessing.

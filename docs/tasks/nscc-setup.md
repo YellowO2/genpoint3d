@@ -17,6 +17,7 @@ DINOv3 is gated. Without this, step 3 cannot run.
 Then on NSCC:
 
 ```bash
+cd ~/scratch/genpoint3d
 module load python/3.11.7-gcc11
 source ~/scratch/venvs/fyp/bin/activate
 pip install -U huggingface_hub
