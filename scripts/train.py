@@ -217,14 +217,23 @@ def main() -> int:
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--depth", type=int, default=6)
     p.add_argument("--heads", type=int, default=4)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--warmup", type=int, default=500)
+    # 5e-4 is what both references use on Kubric -- CoTracker3's
+    # launch_training_kubric_offline.sh and genpt's train_tracker_tapvid_kubric.
+    p.add_argument("--lr", type=float, default=5e-4)
+    # A FRACTION, not a step count. 500 fixed steps was 20% of a 2500-step run
+    # and 2.5% of a 20000-step one -- the same flag meaning two different
+    # things. CoTracker3 uses OneCycleLR with pct_start=0.05.
+    p.add_argument("--warmup-frac", type=float, default=0.05)
+    p.add_argument("--wdecay", type=float, default=1e-4,
+                   help="CoTracker3 uses 5e-4 on Kubric; ours was 0.01, 20x more")
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--val-every", type=int, default=2000)
     # Non-zero by default: clips are loaded lazily now, so with 0 workers the
     # GPU sits idle while the main process reads 7.3 MB/clip off Lustre and
     # converts the fp16 features to fp32. 4 is enough to stay ahead at batch 16.
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                   help="bf16 autocast on CUDA; roughly halves memory and time")
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"],
                    help="scene normalisation; see genpoint3d/data/cache.py")
@@ -258,10 +267,17 @@ def main() -> int:
                      cross_attn=has_feats, feat_dim=feat_dim).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    warm = torch.optim.lr_scheduler.LinearLR(opt, 0.01, 1.0, args.warmup)
-    cos = torch.optim.lr_scheduler.CosineAnnealingLR(opt, args.steps - args.warmup)
-    sched = torch.optim.lr_scheduler.SequentialLR(opt, [warm, cos], [args.warmup])
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
+    warmup = max(1, int(args.steps * args.warmup_frac))
+    warm = torch.optim.lr_scheduler.LinearLR(opt, 0.01, 1.0, warmup)
+    cos = torch.optim.lr_scheduler.CosineAnnealingLR(opt, args.steps - warmup)
+    sched = torch.optim.lr_scheduler.SequentialLR(opt, [warm, cos], [warmup])
+
+    # bf16 rather than fp16: it has the same exponent range as fp32, so no loss
+    # scaler is needed and nothing silently underflows. A100 and newer only.
+    amp = args.amp and device.type == "cuda" and torch.cuda.is_bf16_supported()
+    print(f"lr {args.lr:.1e} | warmup {warmup} steps ({args.warmup_frac:.0%})"
+          f" | wdecay {args.wdecay:g} | amp {'bf16' if amp else 'off'}", flush=True)
 
     log, step, t0, running = [], 0, time.time(), 0.0
     best = float('inf')
@@ -274,8 +290,9 @@ def main() -> int:
                                            b["context"], b["id_card"])
             # All-True: pure tracking. Every frame keeps its image.
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
-            loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
-                                         context=ctx, visual_mask=vm, id_card=idc)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
+                                             context=ctx, visual_mask=vm, id_card=idc)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
