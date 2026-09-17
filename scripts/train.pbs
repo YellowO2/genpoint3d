@@ -28,7 +28,8 @@ module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
 
 nvidia-smi --query-gpu=name,memory.total --format=csv
-git log --oneline -1
+# Compute nodes have no git on PATH, and `set -e` turns that into a dead job.
+git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 
 # batch 16 is the measured limit on a 40GB A100: it peaked at 23.9 GB and 32
 # went out of memory. Features now stay fp16 so there should be headroom, but
