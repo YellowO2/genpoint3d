@@ -223,7 +223,9 @@ So we can size walltime and plan runs instead of guessing.
 | what | hardware | measured |
 | --- | --- | --- |
 | download 500 clips (24.5k files) | NSCC login | ~45 min, throttled to ~10 files/s |
-| preprocess (PNG decode + DINOv3) | A100 shared (`gdev`) | **4.0 s/clip** -> 463 clips = ~31 min |
+| download 3500 clips (171k files) | NSCC login | **8 h** at 6 files/s (2026-09-16 overnight) |
+| preprocess, serial reads | A100 shared | 46 s/clip (job 90% idle -- see above) |
+| preprocess, 16 threaded reads | A100 shared (`g1`) | **3.7 s/clip** -> 2712 clips = ~2.7 h |
 | preprocess | Mac CPU (MPS) | 4.7 s/clip |
 | cache size | - | **7.3 MB/clip** -> 463 clips = 3.4 GB |
 | raw Kubric on disk | - | 13 MB/clip -> 500 clips = 6.5 GB |
