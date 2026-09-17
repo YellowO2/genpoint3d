@@ -59,7 +59,7 @@ def build_comparison_recording(root_dir: str, seq_id: str, out_path: str, num_qu
 
 
 if __name__ == "__main__":
-    root = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/scratch/data/kubric_test")
+    root = sys.argv[1] if len(sys.argv) > 1 else "local/data/kubric_test"
     seq_id = sys.argv[2] if len(sys.argv) > 2 else "000000"
-    out_path = sys.argv[3] if len(sys.argv) > 3 else "comparison.rrd"
+    out_path = sys.argv[3] if len(sys.argv) > 3 else "local/outputs/comparison.rrd"
     build_comparison_recording(root, seq_id, out_path)

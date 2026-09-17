@@ -1,7 +1,6 @@
-# Datasets and model outputs — large, regenerable, never committed
-/data/
-/outputs/
-/checkpoints/
+# Everything machine-local: datasets, caches, run outputs. Large, regenerable,
+# never committed. One directory so the tracked/untracked line is obvious.
+/local/
 
 
 # Python
@@ -15,6 +14,3 @@ __pycache__/
 .idea/
 .vscode/
 
-# Copyrighted paper text — kept local, not redistributed
-/refs/
-/cache/

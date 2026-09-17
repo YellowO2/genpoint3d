@@ -24,7 +24,7 @@ echo "cached clips: $(ls $ROOT/cache/kubric | wc -l)"
 
 python scripts/train.py \
   --cache $ROOT/cache/kubric \
-  --out outputs/quick \
+  --out local/outputs/quick \
   --steps 3000 --batch 16 --points 128 \
   --val-frac 0.15 --val-every 500 --warmup 200
 

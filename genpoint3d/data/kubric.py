@@ -178,7 +178,7 @@ class KubricSequenceDataset:
 
 if __name__ == "__main__":
     import sys
-    root = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/scratch/data/kubric_test")
+    root = sys.argv[1] if len(sys.argv) > 1 else "local/data/kubric_test"
     ds = KubricSequenceDataset(root, num_query_points=256)
     print(f"Found {len(ds)} sequences: {ds.seq_ids}")
     sample = ds[0]

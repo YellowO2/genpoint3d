@@ -60,7 +60,7 @@ def regress(model, anchor, num_frames: int) -> torch.Tensor:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default="data/kubric_test")
+    p.add_argument("--root", default="local/data/kubric_test")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--points", type=int, default=128)
     p.add_argument("--dim", type=int, default=256)

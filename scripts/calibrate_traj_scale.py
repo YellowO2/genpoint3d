@@ -26,7 +26,7 @@ from genpoint3d.data.transform import TRAJ_SCALE, transform
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "data/kubric_test"
+    root = sys.argv[1] if len(sys.argv) > 1 else "local/data/kubric_test"
     ds = KubricSequenceDataset(root, num_query_points=256)
 
     residuals = []

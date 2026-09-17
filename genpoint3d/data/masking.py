@@ -81,7 +81,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(__file__))
     from dataset import KubricSequenceDataset
 
-    root = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/scratch/data/kubric_test")
+    root = sys.argv[1] if len(sys.argv) > 1 else "local/data/kubric_test"
     ds = KubricSequenceDataset(root, num_query_points=256)
     sample = ds[0]
 

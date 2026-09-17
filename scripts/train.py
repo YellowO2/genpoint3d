@@ -19,8 +19,8 @@ tracking does not work, forecasting never would. Turn it on with
 Without a feature cache this falls back to the step-2 model, which sees no
 images at all -- a pure motion prior rather than tracking.
 
-Run:  python scripts/preprocess.py --root DATA --out cache/kubric.pt
-      python scripts/train.py --cache cache/kubric.pt --steps 20000 --batch 8
+Run:  python scripts/preprocess.py --root DATA --out local/cache/kubric
+      python scripts/train.py --cache local/cache/kubric --steps 20000 --batch 8
 """
 
 import argparse
@@ -178,7 +178,7 @@ def evaluate(model, loader, device, steps: int = 50) -> dict:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--cache", required=True, help="cache DIRECTORY from scripts/preprocess.py")
-    p.add_argument("--out", default="outputs/run")
+    p.add_argument("--out", default="local/outputs/run")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--points", type=int, default=128)

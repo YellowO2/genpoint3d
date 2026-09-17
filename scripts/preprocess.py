@@ -23,7 +23,7 @@ Visual features are cached in fp16 at 384px (the resolution the paper's own
 ablations use, §3.4), which is ~10 MB per clip -- about 5 GB for 500 clips.
 Re-encoding them every epoch would dominate training time.
 
-Run:  python scripts/preprocess.py --root DATA --out cache/kubric --features
+Run:  python scripts/preprocess.py --root DATA --out local/cache/kubric --features
 """
 
 import argparse
@@ -42,7 +42,7 @@ from genpoint3d.data.transform import scene_pointmap, transform
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--root", required=True)
-    p.add_argument("--out", default="cache/kubric", help="DIRECTORY, one .pt per clip")
+    p.add_argument("--out", default="local/cache/kubric", help="DIRECTORY, one .pt per clip")
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--features", action="store_true", help="also cache DINOv3 features")
     p.add_argument("--image-size", type=int, default=384)

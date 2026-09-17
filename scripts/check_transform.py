@@ -86,7 +86,7 @@ def check_scale(inputs) -> bool:
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "data/kubric_test"
+    root = sys.argv[1] if len(sys.argv) > 1 else "local/data/kubric_test"
     ds = KubricSequenceDataset(root, num_query_points=256)
     print(f"{len(ds)} sequence(s) in {root}\n")
 
