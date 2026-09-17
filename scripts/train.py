@@ -116,7 +116,7 @@ def split(cache: str, val_frac: float, seed: int):
         clips: list[Path | dict] = sorted(path.glob("*.pt"))
         if not clips:
             raise SystemExit(f"no cached clips in {path} -- run scripts/preprocess.py first")
-        probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False))
+        probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False, mmap=True))
     else:
         clips = torch.load(path, weights_only=False)["clips"]  # legacy single file
         probe = CachedClip.from_dict(clips[0])
@@ -279,7 +279,11 @@ def main() -> int:
     print(f"lr {args.lr:.1e} | warmup {warmup} steps ({args.warmup_frac:.0%})"
           f" | wdecay {args.wdecay:g} | amp {'bf16' if amp else 'off'}", flush=True)
 
+    # `running` is the 100-step print window; `since_val` spans a whole
+    # validation interval so the log holds train and val loss on the same
+    # steps -- the gap between them IS the overfitting measurement.
     log, step, t0, running = [], 0, time.time(), 0.0
+    since_val, since_val_n = 0.0, 0
     best = float('inf')
     while step < args.steps:
         for batch in train_loader:
@@ -301,6 +305,7 @@ def main() -> int:
             sched.step()
 
             running += loss.item()
+            since_val += loss.item(); since_val_n += 1
             step += 1
 
             if step % 100 == 0:
@@ -312,11 +317,14 @@ def main() -> int:
             if step % args.val_every == 0 or step == args.steps:
                 tv = time.time()
                 m = evaluate(model, val_loader, device)
-                print(f"  VAL step {step}  val_loss {m['val_loss']:.4f}"
+                print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
+                      f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
                       f"  ratio {m['ratio']:.3f}"
                       f"  ({time.time() - tv:.0f}s)", flush=True)
-                log.append({"step": step, **m})
+                log.append({"step": step,
+                            "train_loss": since_val / max(since_val_n, 1), **m})
+                since_val, since_val_n = 0.0, 0
                 (out / "log.json").write_text(json.dumps(log, indent=2))
                 ckpt = {"model": model.state_dict(), "step": step,
                         "args": vars(args), "val": m}

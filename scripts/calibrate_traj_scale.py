@@ -23,6 +23,7 @@ Then paste the printed value into `TRAJ_SCALE`.
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -51,8 +52,12 @@ def main() -> int:
     # memory does not grow with the dataset.
     total = sq_total = n = 0.0
     per_clip = []
-    for f in files:
-        clip = CachedClip.from_dict(torch.load(f, weights_only=False))
+    t0 = time.time()
+    for i, f in enumerate(files, 1):
+        # mmap: a cached clip is ~7.3 MB and almost all of it is DINOv3
+        # features we never touch here. Without this every clip ships its
+        # whole context tensor across the network for four numbers.
+        clip = CachedClip.from_dict(torch.load(f, weights_only=False, mmap=True))
         # traj_scale=1.0 leaves the trajectory in raw scene-normalised units,
         # which is exactly the spread we are trying to measure.
         traj, _ = clip.normalised(args.norm_mode, traj_scale=1.0)
@@ -61,6 +66,9 @@ def main() -> int:
         sq_total += v.pow(2).sum().item()
         n += v.numel()
         per_clip.append(v.std().item())
+        if i % 250 == 0 or i == len(files):
+            print(f"  {i}/{len(files)}  {(time.time() - t0) / i * 1000:.0f} ms/clip",
+                  flush=True)
 
     mean = total / n
     scale = (sq_total / n - mean ** 2) ** 0.5
