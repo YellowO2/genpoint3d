@@ -101,8 +101,10 @@ def main() -> int:
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--depth", type=int, default=6)
     p.add_argument("--heads", type=int, default=4)
-    p.add_argument("--steps", type=int, default=30, help="timed steps per setting")
-    p.add_argument("--warmup", type=int, default=5, help="untimed steps first")
+    # A median over 10 steps is already stable, and when a step takes ten
+    # seconds the extra samples cost more than the precision is worth.
+    p.add_argument("--steps", type=int, default=10, help="timed steps per setting")
+    p.add_argument("--warmup", type=int, default=3, help="untimed steps first")
     args = p.parse_args()
 
     clips, _, feat_dim, has_feats = split(args.cache, 0.02, 0)

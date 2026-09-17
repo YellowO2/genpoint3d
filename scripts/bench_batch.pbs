@@ -7,7 +7,7 @@
 #
 #PBS -N benchbatch
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
-#PBS -l walltime=00:40:00
+#PBS -l walltime=01:30:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
@@ -27,9 +27,16 @@ nvidia-smi --query-gpu=name,memory.total --format=csv
 
 # workers first, then batch: fixing the input pipeline moves where the batch
 # wall sits, so sweeping batch against a starved loader measures the wrong thing.
+# workers=0 is measured only at batch 16 -- it is slow enough that sweeping it
+# across every batch size eats the walltime for a baseline we already expect.
 python scripts/bench_batch.py \
   --cache $ROOT/cache/kubric \
-  --workers 0 4 8 \
+  --workers 0 --batches 16 \
+  --points 128 --dim 256 --depth 6 --heads 4
+
+python scripts/bench_batch.py \
+  --cache $ROOT/cache/kubric \
+  --workers 4 8 16 \
   --batches 16 32 64 128 \
   --points 128 --dim 256 --depth 6 --heads 4
 
