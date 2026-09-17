@@ -44,9 +44,15 @@ class ClipDataset(Dataset):
     Reads from `scripts/preprocess.py`'s output rather than decoding PNGs.
     Resampling which points are used each epoch is free augmentation and makes
     the model robust to the point count, which the paper does deliberately.
+
+    Clips are held as PATHS and loaded in `__getitem__`, not up front. At 7.3 MB
+    per cached clip an eager load is 25 GB for 3500 clips -- and every dataloader
+    worker gets its own copy, so it OOMs the moment `--workers` is non-zero.
+    Lazily, only the clips in flight are resident. This is what makes workers
+    affordable, which is what keeps the GPU fed.
     """
 
-    def __init__(self, clips: list[dict], num_points: int, resample: bool = True):
+    def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True):
         self.clips, self.num_points, self.resample = clips, num_points, resample
 
     def __len__(self) -> int:
@@ -54,6 +60,8 @@ class ClipDataset(Dataset):
 
     def __getitem__(self, i: int):
         c = self.clips[i]
+        if isinstance(c, Path):
+            c = torch.load(c, weights_only=False)
         traj, anchor, vis = c["traj"], c["anchor"], c["visibility"]
         id_card = c.get("id_card")
         n = traj.shape[1]
@@ -73,31 +81,35 @@ class ClipDataset(Dataset):
         )
 
 
-def split(cache: str, val_frac: float, seed: int) -> tuple[list[dict], list[dict], int | None]:
+def split(cache: str, val_frac: float, seed: int):
     """Deterministic train/val split over whole clips -- never over points.
 
     Splitting by point would put the same scene in both halves and the val
     number would be meaningless.
 
-    Also returns the cache's feature width, which the model needs: the encoder
-    chooses its own width and it need not equal the model's.
+    Returns paths, not loaded clips -- see `ClipDataset`. Also returns the
+    cache's feature width and whether it has features, both read from a single
+    probe clip, since the encoder chooses its own width and it need not equal
+    the model's.
     """
     path = Path(cache)
     if path.is_dir():
         # one .pt per clip -- written incrementally so preprocessing resumes
-        files = sorted(path.glob("*.pt"))
-        if not files:
+        clips: list[Path | dict] = sorted(path.glob("*.pt"))
+        if not clips:
             raise SystemExit(f"no cached clips in {path} -- run scripts/preprocess.py first")
-        clips = [torch.load(f, weights_only=False) for f in files]
+        probe = torch.load(clips[0], weights_only=False)
     else:
         clips = torch.load(path, weights_only=False)["clips"]  # legacy single file
+        probe = clips[0]
 
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(clips), generator=g).tolist()
     n_val = max(1, int(len(clips) * val_frac))
     return ([clips[i] for i in perm[n_val:]],
             [clips[i] for i in perm[:n_val]],
-            clips[0].get("feat_dim"))
+            probe.get("feat_dim"),
+            "context" in probe)
 
 
 def to_device(batch, device):
@@ -177,7 +189,10 @@ def main() -> int:
     p.add_argument("--warmup", type=int, default=500)
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--val-every", type=int, default=2000)
-    p.add_argument("--workers", type=int, default=0)
+    # Non-zero by default: clips are loaded lazily now, so with 0 workers the
+    # GPU sits idle while the main process reads 7.3 MB/clip off Lustre and
+    # converts the fp16 features to fp32. 4 is enough to stay ahead at batch 16.
+    p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -190,8 +205,7 @@ def main() -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    train_clips, val_clips, feat_dim = split(args.cache, args.val_frac, args.seed)
-    has_feats = "context" in train_clips[0]
+    train_clips, val_clips, feat_dim, has_feats = split(args.cache, args.val_frac, args.seed)
     print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips"
           f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
 
