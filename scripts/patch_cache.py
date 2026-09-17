@@ -1,20 +1,22 @@
 """
-Backfill `norm` and `intrinsics` into a cache written before they were stored.
+Migrate an older cache to the current format, in place.
 
-The cached trajectory is in model units, and the per-clip mean/scale that turn
-it back into metres were computed during preprocessing and then thrown away.
-Without them no distance metric means anything, because one threshold is a
-different physical distance in every clip.
+The cache now stores METRES plus every candidate scale statistic, so the
+normalisation scheme is chosen when a clip is loaded rather than baked into the
+data. Older caches stored normalised coordinates instead, which meant every
+change to the scheme threw the whole cache away.
 
-Rebuilding the whole cache would work, but it redoes the DINOv3 pass for
-nothing and re-draws the random point subset, so the cache would no longer
-match the one the current checkpoint was trained on. This only reads what the
-statistics actually need:
+Recovering the metres needs no images at all -- the old `norm` makes the
+transform exactly invertible. Only the scale statistics need the depth maps:
 
     <seq>.npy        intrinsics, extrinsics, depth_range   (small)
     frames/*_depth.png                                     (24 files, no RGB)
 
-so it is CPU-only and touches half the images preprocessing does.
+so this is CPU-only, reads half the images preprocessing does, and leaves the
+DINOv3 features and the point subset untouched.
+
+A cache too old to carry `norm` cannot be converted -- there is nothing to
+invert with -- and must be rebuilt with scripts/preprocess.py.
 
 Run:  python scripts/patch_cache.py --cache local/cache/kubric --root local/data/kubric
 """
@@ -31,12 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import torch
 
-from genpoint3d.data.cache import CachedClip
+from genpoint3d.data.cache import CachedClip, ScaleStats, scale_stats
 from genpoint3d.data.kubric import _AXIS_FLIP, _distance_to_depth, _imread
-from genpoint3d.data.transform import (
-    compute_norm_stats,
-    relative_extrinsics,
-)
+from genpoint3d.data.transform import NormStats, relative_extrinsics
 from genpoint3d.geometry import batch_unproject
 
 import cv2
@@ -78,27 +77,56 @@ def _depths_and_intrinsics(seq_dir: Path, seq_id: str, hw: tuple[int, int]):
             torch.from_numpy(extrinsics_world).float())
 
 
-def patch_one(pt_path: Path, root: Path) -> str | None:
-    """Add `norm` and `intrinsics` to one cached clip. Returns a reason if skipped."""
-    clip = CachedClip.from_dict(torch.load(pt_path, weights_only=False))
-    if clip.norm is not None and clip.intrinsics is not None:
-        return "already patched"
+def _to_metres(d: dict) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Recover metric traj/anchor from an older cache, exactly.
 
-    seq_dir = root / clip.seq_id
+    Two older formats exist. The first stored only normalised coordinates and
+    is unrecoverable. The second also stored `norm`, which makes the transform
+    invertible -- no images needed, just arithmetic.
+    """
+    if "traj_metric" in d:                       # already current
+        return d["traj_metric"], d["anchor_metric"]
+    if "norm_mean" not in d:                     # nothing to invert with
+        return None
+    n = NormStats(d["norm_mean"], d["norm_scale"], d["norm_traj_scale"])
+    return n.invert_traj(d["traj"]), n.invert(d["anchor"])
+
+
+def patch_one(pt_path: Path, root: Path) -> str | None:
+    """Bring one cached clip up to the current format. Reason string if skipped."""
+    d = torch.load(pt_path, weights_only=False)
+    if "traj_metric" in d and "stats_median_dist" in d:
+        return "already current"
+
+    metric = _to_metres(d)
+    if metric is None:
+        return "normalised-only cache, cannot recover metres -- rebuild instead"
+    traj, anchor = metric
+
+    seq_dir = root / d["seq_id"]
     if not seq_dir.is_dir():
         return "raw clip missing"
 
     depths, intrinsics, extrinsics_world = _depths_and_intrinsics(
-        seq_dir, clip.seq_id, clip.hw
+        seq_dir, d["seq_id"], d["hw"]
     )
     extrinsics = relative_extrinsics(extrinsics_world)
 
     # The cache was built in pure tracking mode, so every frame is observed and
-    # the statistics see the whole clip -- matching how `transform` computed
+    # the statistics see the whole clip -- matching how `transform` measured
     # them originally. Revisit alongside the random-cutoff work.
     pointmap = batch_unproject(depths, intrinsics, extrinsics)
-    clip.norm = compute_norm_stats(pointmap)
-    clip.intrinsics = intrinsics
+
+    clip = CachedClip(
+        seq_id=d["seq_id"],
+        traj=traj, anchor=anchor,
+        visibility=d["visibility"], query_uv=d["query_uv"], hw=d["hw"],
+        intrinsics=intrinsics, extrinsics=extrinsics,
+        stats=scale_stats(pointmap),
+        context=d.get("context"), id_card=d.get("id_card"),
+        points=d.get("points"), feat_dim=d.get("feat_dim"),
+        image_size=d.get("image_size"),
+    )
 
     tmp = pt_path.with_name(f".{pt_path.stem}.tmp")
     torch.save(clip.to_dict(), tmp)

@@ -35,9 +35,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from genpoint3d.data.cache import CachedClip
+from genpoint3d.data.cache import CachedClip, scale_stats
 from genpoint3d.data.kubric import KubricSequenceDataset
 from genpoint3d.data.transform import scene_pointmap, transform
+from genpoint3d.geometry import batch_unproject
 
 
 def main() -> int:
@@ -98,17 +99,19 @@ def main() -> int:
             continue
 
         x = transform(raw, num_context_frames=raw.frames.shape[0])
+        # METRES, not model units. Normalisation is applied when a clip is
+        # loaded, so changing the scheme never invalidates the cache again.
+        pointmap = batch_unproject(x.depths, x.intrinsics, x.extrinsics)
         clip = CachedClip(
             seq_id=x.seq_id,
-            traj=x.traj.clone(),              # (T, N, 3) model units, the target
-            anchor=x.anchor.clone(),          # (N, 3) conditioning
+            traj=x.traj_metric.clone(),       # (T, N, 3) metres <- TARGET
+            anchor=x.traj_metric[0].clone(),  # (N, 3) frame-0 position, metres
             visibility=x.visibility.clone(),  # (T, N) bool
             query_uv=x.query_uv.clone(),      # (N, 2) where to read the ID card
             hw=tuple(x.frames.shape[1:3]),    # needed to map uv into the grid
-            # Keep what turns model units back into metres. Training never reads
-            # these; every distance-based metric is meaningless without them.
-            norm=x.norm,
             intrinsics=x.intrinsics.clone(),  # (T, 3, 3) pixel units
+            extrinsics=x.extrinsics.clone(),  # (T, 4, 4) cam_0 -> cam_t
+            stats=scale_stats(pointmap),      # every candidate scale, measured once
             points=args.points,
             feat_dim=args.feat_dim if args.features else None,
             image_size=args.image_size if args.features else None,

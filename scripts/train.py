@@ -53,8 +53,12 @@ class ClipDataset(Dataset):
     affordable, which is what keeps the GPU fed.
     """
 
-    def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True):
+    def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
+                 norm_mode: str = "median"):
         self.clips, self.num_points, self.resample = clips, num_points, resample
+        # The cache holds metres; normalisation happens here, so switching
+        # scheme is a flag rather than hours of reprocessing.
+        self.norm_mode = norm_mode
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -65,7 +69,8 @@ class ClipDataset(Dataset):
             c = torch.load(c, weights_only=False)
         clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
 
-        traj, anchor, vis = clip.traj, clip.anchor, clip.visibility
+        traj, anchor = clip.normalised(self.norm_mode)
+        vis = clip.visibility
         id_card = clip.id_card
         n = traj.shape[1]
         if self.num_points < n:
@@ -105,13 +110,13 @@ def split(cache: str, val_frac: float, seed: int):
     else:
         clips = torch.load(path, weights_only=False)["clips"]  # legacy single file
         probe = CachedClip.from_dict(clips[0])
+    if probe.stats is None:
+        raise SystemExit(f"cache in {path} has no scale statistics -- "
+                         "run scripts/patch_cache.py")
 
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(clips), generator=g).tolist()
     n_val = max(1, int(len(clips) * val_frac))
-    if probe.norm is None:
-        print("WARNING: cache has no `norm` -- metrics cannot be reported in "
-              "metres. Re-run scripts/preprocess.py to fix.", flush=True)
     return ([clips[i] for i in perm[n_val:]],
             [clips[i] for i in perm[:n_val]],
             probe.feat_dim,
@@ -199,6 +204,9 @@ def main() -> int:
     # GPU sits idle while the main process reads 7.3 MB/clip off Lustre and
     # converts the fp16 features to fp32. 4 is enough to stay ahead at batch 16.
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--norm-mode", default="median",
+                   choices=["median", "mean", "centroid_max"],
+                   help="scene normalisation; see genpoint3d/data/cache.py")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -216,12 +224,12 @@ def main() -> int:
           f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
 
     train_loader = DataLoader(
-        ClipDataset(train_clips, args.points),
+        ClipDataset(train_clips, args.points, norm_mode=args.norm_mode),
         batch_size=args.batch, shuffle=True, num_workers=args.workers,
         drop_last=True, persistent_workers=args.workers > 0,
     )
     val_loader = DataLoader(
-        ClipDataset(val_clips, args.points, resample=False),
+        ClipDataset(val_clips, args.points, resample=False, norm_mode=args.norm_mode),
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     )
 
