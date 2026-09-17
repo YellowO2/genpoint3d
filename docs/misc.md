@@ -181,6 +181,41 @@ training time are.
 
 ---
 
+## Preprocessing was 90% idle: 48 serial file reads per clip
+
+**Symptom:** preprocessing ran at **46 s/clip** on NSCC, against 4.0 s/clip
+measured earlier on the same hardware with the same code.
+
+**Diagnosis** -- `qstat -f <jobid> | grep resources_used` settles it in one line:
+
+```
+cput       = 00:27:44     <- actual CPU work
+walltime   = 04:49:21     <- time elapsed
+cpupercent = 112          <- ~1.1 cores busy of the 16 requested
+```
+
+28 minutes of work in 4h49m. The job was **waiting**, not computing.
+
+**Cause:** `/scratch` is Lustre, a network filesystem. Each clip needs 48 small
+files and `_load_frames_and_depths` read them in a plain `for` loop, so 48
+round trips happened one after another with the GPU idle throughout.
+
+The earlier 4.0 s/clip was not a fair baseline -- those clips had just been
+downloaded, so they were still in page cache.
+
+**Fix:** a `ThreadPoolExecutor` over the frame loop (`data/kubric.py`).
+Threads, not processes: the time is spent waiting on I/O, and both the file
+read and `cv2.imdecode` release the GIL. Tune with `KUBRIC_READ_WORKERS`.
+
+Verified byte-identical output; 4x faster even on a local SSD, where there is
+no network latency to hide.
+
+**General lesson:** when a job is far slower than its own past self, check
+`cput` against `walltime` BEFORE optimising anything. Idle time and slow
+compute need opposite fixes.
+
+---
+
 ## Measured timings — fill these in as we learn them
 
 So we can size walltime and plan runs instead of guessing.

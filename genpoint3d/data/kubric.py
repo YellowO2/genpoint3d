@@ -20,7 +20,9 @@ via the pinhole model after loading.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -43,16 +45,38 @@ class KubricSample:
     query_points_3d: np.ndarray  # (N, 3) float32 -- 3D position at each point's first frame
 
 
+# A clip is 48 small files, and on a network filesystem (NSCC's Lustre) each
+# read is a round trip that dominates the decode. Read them concurrently:
+# threads are the right tool because the time is spent *waiting*, and both
+# file reads and cv2.imdecode release the GIL.
+#
+# Measured on NSCC: serial reads gave 46 s/clip with the job 90% idle
+# (cput 28 min against 4h49m walltime). Locally, where files are on a real
+# disk, this changes nothing much -- it is the network latency that parallelises.
+_READ_WORKERS = int(os.environ.get("KUBRIC_READ_WORKERS", "16"))
+
+
+def _imread(path: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
+    """Read and decode one image, raising a useful error on a truncated file."""
+    buf = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
+    img = cv2.imdecode(buf, flags)
+    if img is None:
+        raise ValueError(f"could not decode {path} -- truncated or corrupt")
+    return img
+
+
 def _load_frames_and_depths(frames_dir: str, num_frames: int, depth_range: np.ndarray):
-    frames, depths = [], []
-    for t in range(num_frames):
-        rgb = cv2.imread(os.path.join(frames_dir, f"{t:03d}.png"))
-        frames.append(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
-
-        depth_png = cv2.imread(os.path.join(frames_dir, f"{t:03d}_depth.png"), cv2.IMREAD_UNCHANGED)
+    def one(t: int):
+        rgb = _imread(os.path.join(frames_dir, f"{t:03d}.png"))
+        depth_png = _imread(os.path.join(frames_dir, f"{t:03d}_depth.png"), cv2.IMREAD_UNCHANGED)
         distance = depth_range[0] + depth_png.astype(np.float32) * (depth_range[1] - depth_range[0]) / 65535.0
-        depths.append(distance)
+        return cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB), distance
 
+    # `map` preserves order, so frame t stays at index t.
+    with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
+        pairs = list(ex.map(one, range(num_frames)))
+
+    frames, depths = zip(*pairs)
     return np.stack(frames), np.stack(depths)  # depths here are still *distance*, converted to z-depth by caller
 
 
