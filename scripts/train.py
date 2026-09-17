@@ -35,6 +35,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from genpoint3d.data.cache import CachedClip
+from genpoint3d.eval.metrics import tapvid3d_metrics
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
 
@@ -80,13 +81,22 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
-        # Empty tensors rather than None so the default collate still works.
+        # A dict rather than a tuple: evaluation needs the geometry that scoring
+        # in metres depends on, and a positional tuple of eight was already
+        # hard to read. Empty tensors rather than None so default collate works.
         ctx = clip.context
-        return (
-            traj, anchor, vis,
-            ctx.float() if ctx is not None else torch.zeros(0),
-            id_card.float() if id_card is not None else torch.zeros(0),
-        )
+        norm = clip.norm(self.norm_mode)
+        return {
+            "traj": traj, "anchor": anchor, "visibility": vis,
+            "context": ctx.float() if ctx is not None else torch.zeros(0),
+            "id_card": id_card.float() if id_card is not None else torch.zeros(0),
+            # metrics only -- the model never sees these
+            "intrinsics": clip.intrinsics,
+            "extrinsics": clip.extrinsics,
+            "norm_mean": norm.mean,
+            "norm_scale": norm.scale,
+            "norm_traj_scale": norm.traj_scale,
+        }
 
 
 def split(cache: str, val_frac: float, seed: int):
@@ -123,20 +133,24 @@ def split(cache: str, val_frac: float, seed: int):
             probe.context is not None)
 
 
-def to_device(batch, device):
-    """Move a batch and normalise the optional feature tensors to None."""
-    traj, anchor, vis, ctx, idc = (t.to(device) for t in batch)
-    return (
-        traj, anchor, vis,
-        ctx if ctx.numel() else None,
-        idc if idc.numel() else None,
-    )
+def to_device(batch: dict, device) -> dict:
+    """Move a batch and turn the empty placeholder tensors back into None."""
+    b = {k: v.to(device) for k, v in batch.items()}
+    for k in ("context", "id_card"):
+        if b[k].numel() == 0:
+            b[k] = None
+    return b
 
 
-# Distance thresholds for delta_avg, in model units. TAP-Vid uses pixel
-# thresholds; ours are metric-ish, so these are indicative only until we
-# calibrate them against a published protocol.
-DELTA_THRESHOLDS = (0.05, 0.1, 0.2, 0.4, 0.8)
+def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
+    """(B, T, N, 3) model units -> metres, using each clip's own normalisation.
+
+    The inverse of `NormStats.invert_traj`, batched: every clip in the batch has
+    its own scale, which is exactly why a threshold in model units meant a
+    different physical distance per clip.
+    """
+    scale = (b["norm_scale"] * b["norm_traj_scale"])[:, None, None, None]
+    return pts * scale + b["norm_mean"][:, None, None, :]
 
 
 @torch.no_grad()
@@ -147,19 +161,22 @@ def evaluate(model, loader, device, steps: int = 50) -> dict:
               Plot it against training loss: the gap is overfitting. This is
               the standard figure and the only one comparable to our own
               training curve.
-    delta_avg fraction of predicted points within a distance threshold of the
-              truth. The TAP-Vid-3D style metric; the closest thing we have to
-              something other papers report.
+    APD       `average_pts_within_thresh` from the TAP-Vid-3D benchmark, scored
+              in METRES -- see genpoint3d/eval/metrics.py. The number other
+              papers report. AJ and OA need a visibility prediction, so they
+              appear only once the visibility head exists.
     ratio     sampled RMSE / mean-trajectory RMSE. Homemade sanity check --
               1.0 means nothing was learnt. NOT comparable to any paper.
     """
     model.eval()
     err_sq = base_sq = n = 0.0
     loss_sum = loss_n = 0.0
-    hits = {t: 0.0 for t in DELTA_THRESHOLDS}
+    metric_sums, metric_n = {}, 0
 
     for batch in loader:
-        traj, anchor, vis, ctx, idc = to_device(batch, device)
+        b = to_device(batch, device)
+        traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
+                                       b["context"], b["id_card"])
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
 
         l, _ = flow_matching_loss(model, traj, anchor, mask=vis,
@@ -173,16 +190,20 @@ def evaluate(model, loader, device, steps: int = 50) -> dict:
         base_sq += (mean_traj - traj).pow(2).mean(-1)[vis].sum().item()
         n += vis.sum().item()
 
-        dist = (pred - traj).norm(dim=-1)[vis]          # model units
-        for t in DELTA_THRESHOLDS:
-            hits[t] += (dist < t).sum().item()
+        # Scored in metres, per clip -- a threshold in model units would mean a
+        # different physical distance in every clip.
+        m = tapvid3d_metrics(
+            to_metres(pred, b), to_metres(traj, b), vis,
+            b["intrinsics"], b["extrinsics"],
+        )
+        for k, v in m.items():
+            metric_sums[k] = metric_sums.get(k, 0.0) + v
+        metric_n += 1
 
     model.train()
     rmse, base = (err_sq / max(n, 1)) ** 0.5, (base_sq / max(n, 1)) ** 0.5
-    deltas = {f"d{t}": hits[t] / max(n, 1) for t in DELTA_THRESHOLDS}
     return {"val_loss": loss_sum / max(loss_n, 1),
-            "delta_avg": sum(deltas.values()) / len(deltas),
-            **deltas,
+            **{k: v / max(metric_n, 1) for k, v in metric_sums.items()},
             "rmse": rmse, "baseline": base, "ratio": rmse / max(base, 1e-9)}
 
 
@@ -248,7 +269,9 @@ def main() -> int:
         for batch in train_loader:
             if step >= args.steps:
                 break
-            traj, anchor, vis, ctx, idc = to_device(batch, device)
+            b = to_device(batch, device)
+            traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
+                                           b["context"], b["id_card"])
             # All-True: pure tracking. Every frame keeps its image.
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
             loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
@@ -273,7 +296,7 @@ def main() -> int:
                 tv = time.time()
                 m = evaluate(model, val_loader, device)
                 print(f"  VAL step {step}  val_loss {m['val_loss']:.4f}"
-                      f"  delta_avg {m['delta_avg']:.3f}"
+                      f"  APD {m['average_pts_within_thresh']:.3f}"
                       f"  ratio {m['ratio']:.3f}"
                       f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step, **m})
