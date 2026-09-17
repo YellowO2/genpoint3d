@@ -39,7 +39,7 @@ from genpoint3d.geometry import batch_project, batch_unproject
 # per-clip, so no sample's own motion leaks into its normalisation (and so a
 # fast clip stays genuinely faster than a slow one). Recalibrate with
 # `scripts/calibrate_motion_scale.py` whenever the training set changes.
-TRAJ_SCALE = 0.6819  # calibrated on 2 clips -- redo on the full training set
+TRAJ_SCALE = 0.8344  # 200 Kubric clips, 3.2M visible coords, --norm-mode median
 
 
 @dataclass
