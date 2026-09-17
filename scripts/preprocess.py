@@ -45,14 +45,26 @@ def _complete(root: Path, seq_ids: list[str]) -> list[str]:
     A finished clip has its .npy plus a frames/ dir holding one RGB and one
     depth PNG per frame. Preprocessing a half-written clip crashes on a
     missing file, so this makes it safe to run while a download is in flight.
+
+    Only ever call this on clips you actually intend to process -- verifying a
+    clip costs one .npy read plus a directory listing, and doing that for clips
+    that are already cached is pure waste on a resumed run.
     """
+    import os
+
     import numpy as np
 
     ok = []
     for s in seq_ids:
         d = root / s
         npy, frames = d / f"{s}.npy", d / "frames"
-        if not (npy.exists() and frames.is_dir()):
+        try:
+            # One listing beats 2*T separate exists() calls -- on a network
+            # filesystem each of those is a round trip.
+            present = {e.name for e in os.scandir(frames)}
+        except OSError:
+            continue  # frames/ missing or unreadable
+        if not npy.exists():
             continue
         try:
             # The .npy is the authority on how many frames the clip has.
@@ -61,8 +73,8 @@ def _complete(root: Path, seq_ids: list[str]) -> list[str]:
             t = int(np.load(npy, allow_pickle=True).item()["intrinsics"].shape[0])
         except Exception:
             continue  # .npy itself truncated or unreadable
-        if all((frames / f"{i:03d}.png").exists()
-               and (frames / f"{i:03d}_depth.png").exists() for i in range(t)):
+        if all(f"{i:03d}.png" in present and f"{i:03d}_depth.png" in present
+               for i in range(t)):
             ok.append(s)
     return ok
 
@@ -79,11 +91,27 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=None, help="only the first N complete clips")
     args = p.parse_args()
 
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
     ds = KubricSequenceDataset(args.root, num_query_points=args.points)
-    ds.seq_ids = _complete(Path(args.root), ds.seq_ids)
+    found = len(ds.seq_ids)
+
+    # Drop already-cached clips BEFORE verifying the rest. Verification reads
+    # each clip's .npy, so checking clips we are about to skip is the single
+    # most expensive pointless thing this script could do -- and it gets worse
+    # on every resume, exactly when there is least work left to justify it.
+    cached = {p.stem for p in out.glob("*.pt")}
+    pending = [s for s in ds.seq_ids if s not in cached]
+    print(f"{found} clips on disk, {len(cached)} already cached,"
+          f" verifying {len(pending)}...", flush=True)
+
+    t_scan = time.time()
+    ds.seq_ids = _complete(Path(args.root), pending)
+    print(f"  {len(ds.seq_ids)} complete and pending"
+          f"  ({time.time() - t_scan:.0f}s to verify)", flush=True)
     if args.limit:
         ds.seq_ids = ds.seq_ids[: args.limit]
-    print(f"{len(ds)} complete clips to process", flush=True)
     if not ds.seq_ids:
         print("nothing to do")
         return 1
@@ -99,11 +127,9 @@ def main() -> int:
         ).to(dev).eval()
         print(f"encoding on {dev} at {args.image_size}px"
               f"{' (STUB backbone)' if args.stub else ''}", flush=True)
-    out = Path(args.out)
-
-    out.mkdir(parents=True, exist_ok=True)
-    todo = [i for i in range(len(ds)) if not (out / f"{ds.seq_ids[i]}.pt").exists()]
-    print(f"{len(ds) - len(todo)} already cached, {len(todo)} to do", flush=True)
+    # ds.seq_ids already excludes everything cached, so this is all of it.
+    todo = list(range(len(ds)))
+    print(f"{len(todo)} to encode", flush=True)
 
     t0 = time.time()
     for n, i in enumerate(todo, 1):
