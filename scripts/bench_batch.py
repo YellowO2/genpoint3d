@@ -69,7 +69,7 @@ def time_one(clips, feat_dim, has_feats, args, batch, workers) -> dict:
             torch.cuda.synchronize()
         t0 = time.time()
 
-        b = to_device(batch_data, device)
+        b = to_device(batch_data, device, amp)
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
         ctx, idc = b["context"], b["id_card"]
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None

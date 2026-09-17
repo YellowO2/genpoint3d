@@ -84,12 +84,17 @@ class ClipDataset(Dataset):
         # A dict rather than a tuple: evaluation needs the geometry that scoring
         # in metres depends on, and a positional tuple of eight was already
         # hard to read. Empty tensors rather than None so default collate works.
+        #
+        # Features stay in the fp16 they were cached in. Upcasting here cost
+        # 452 MB per batch of 16 -- the single largest tensor in the step --
+        # only for autocast to cast it straight back down. `to_device` restores
+        # fp32 when autocast is off.
         ctx = clip.context
         norm = clip.norm(self.norm_mode)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis,
-            "context": ctx.float() if ctx is not None else torch.zeros(0),
-            "id_card": id_card.float() if id_card is not None else torch.zeros(0),
+            "context": ctx if ctx is not None else torch.zeros(0),
+            "id_card": id_card if id_card is not None else torch.zeros(0),
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
             "extrinsics": clip.extrinsics,
@@ -133,12 +138,19 @@ def split(cache: str, val_frac: float, seed: int):
             probe.context is not None)
 
 
-def to_device(batch: dict, device) -> dict:
-    """Move a batch and turn the empty placeholder tensors back into None."""
+def to_device(batch: dict, device, amp: bool = False) -> dict:
+    """Move a batch, and turn the empty placeholder tensors back into None.
+
+    Cached features are fp16. Under autocast that is what the matmuls want
+    anyway; without it they have to be widened, since an fp16 input to an fp32
+    Linear raises.
+    """
     b = {k: v.to(device) for k, v in batch.items()}
     for k in ("context", "id_card"):
         if b[k].numel() == 0:
             b[k] = None
+        elif not amp:
+            b[k] = b[k].float()
     return b
 
 
@@ -154,7 +166,7 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, steps: int = 50) -> dict:
+def evaluate(model, loader, device, steps: int = 50, amp: bool = False) -> dict:
     """Three numbers, deliberately distinct -- see docs/misc.md for the naming.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
@@ -174,7 +186,7 @@ def evaluate(model, loader, device, steps: int = 50) -> dict:
     metric_sums, metric_n = {}, 0
 
     for batch in loader:
-        b = to_device(batch, device)
+        b = to_device(batch, device, amp)
         traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
                                        b["context"], b["id_card"])
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
@@ -289,7 +301,7 @@ def main() -> int:
         for batch in train_loader:
             if step >= args.steps:
                 break
-            b = to_device(batch, device)
+            b = to_device(batch, device, amp)
             traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
                                            b["context"], b["id_card"])
             # All-True: pure tracking. Every frame keeps its image.
@@ -316,7 +328,7 @@ def main() -> int:
 
             if step % args.val_every == 0 or step == args.steps:
                 tv = time.time()
-                m = evaluate(model, val_loader, device)
+                m = evaluate(model, val_loader, device, amp=amp)
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
