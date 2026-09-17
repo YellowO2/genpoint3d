@@ -6,9 +6,12 @@
 #
 #PBS -N patchcache
 #PBS -l select=1:ncpus=16:mem=32gb
-# ~1 s/clip measured locally; 3493 clips is well under an hour, but Lustre
-# latency is the whole cost here so leave room.
-#PBS -l walltime=02:00:00
+# Measured 5.35 s/clip on a LOADED LOGIN NODE with only 10 clips, which is a
+# pessimistic sample; full preprocessing managed 2.07 s/clip on a compute node
+# doing strictly more work. Somewhere in between is likely, so allow for the
+# bad case -- walltime is a cap, not a reservation, and the job ends when the
+# script does.
+#PBS -l walltime=06:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
