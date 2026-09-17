@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
+from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.kubric import KubricSequenceDataset
 from genpoint3d.data.transform import scene_pointmap, transform
 
@@ -97,14 +98,21 @@ def main() -> int:
             continue
 
         x = transform(raw, num_context_frames=raw.frames.shape[0])
-        entry = {
-            "seq_id": x.seq_id,
-            "traj": x.traj.clone(),              # (T, N, 3) normalised, the target
-            "anchor": x.anchor.clone(),          # (N, 3) conditioning
-            "visibility": x.visibility.clone(),  # (T, N) bool
-            "query_uv": x.query_uv.clone(),      # (N, 2) where to read the ID card
-            "hw": tuple(x.frames.shape[1:3]),    # needed to map uv into the grid
-        }
+        clip = CachedClip(
+            seq_id=x.seq_id,
+            traj=x.traj.clone(),              # (T, N, 3) model units, the target
+            anchor=x.anchor.clone(),          # (N, 3) conditioning
+            visibility=x.visibility.clone(),  # (T, N) bool
+            query_uv=x.query_uv.clone(),      # (N, 2) where to read the ID card
+            hw=tuple(x.frames.shape[1:3]),    # needed to map uv into the grid
+            # Keep what turns model units back into metres. Training never reads
+            # these; every distance-based metric is meaningless without them.
+            norm=x.norm,
+            intrinsics=x.intrinsics.clone(),  # (T, 3, 3) pixel units
+            points=args.points,
+            feat_dim=args.feat_dim if args.features else None,
+            image_size=args.image_size if args.features else None,
+        )
 
         if encoder is not None:
             with torch.no_grad():
@@ -112,19 +120,15 @@ def main() -> int:
                 # The ID card is sampled ONCE, at the query's own frame (frame 0),
                 # per the paper's "unique starting context" -- not per frame.
                 uv0 = x.query_uv[None].to(dev)
-                id_card = encoder.sample_at(feat[:1], uv0, entry["hw"])[0]   # (N, D)
-            entry["context"] = encoder.tokens(feat).half().cpu()             # (T, P, D)
-            entry["id_card"] = id_card.half().cpu()                          # (N, D)
-
-        entry["points"] = args.points
-        entry["feat_dim"] = args.feat_dim if args.features else None
-        entry["image_size"] = args.image_size if args.features else None
+                id_card = encoder.sample_at(feat[:1], uv0, clip.hw)[0]       # (N, D)
+            clip.context = encoder.tokens(feat).half().cpu()                 # (T, P, D)
+            clip.id_card = id_card.half().cpu()                              # (N, D)
 
         # write to a temp name first so a kill mid-write cannot leave a
         # half-file that the resume check would mistake for finished
-        tmp = out / f".{entry['seq_id']}.tmp"
-        torch.save(entry, tmp)
-        tmp.rename(out / f"{entry['seq_id']}.pt")
+        tmp = out / f".{clip.seq_id}.tmp"
+        torch.save(clip.to_dict(), tmp)
+        tmp.rename(out / f"{clip.seq_id}.pt")
 
         if n % 25 == 0 or n == len(todo):
             rate = (time.time() - t0) / n

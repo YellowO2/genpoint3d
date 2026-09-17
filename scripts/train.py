@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from genpoint3d.data.cache import CachedClip
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
 
@@ -62,8 +63,10 @@ class ClipDataset(Dataset):
         c = self.clips[i]
         if isinstance(c, Path):
             c = torch.load(c, weights_only=False)
-        traj, anchor, vis = c["traj"], c["anchor"], c["visibility"]
-        id_card = c.get("id_card")
+        clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
+
+        traj, anchor, vis = clip.traj, clip.anchor, clip.visibility
+        id_card = clip.id_card
         n = traj.shape[1]
         if self.num_points < n:
             idx = (torch.randperm(n)[: self.num_points] if self.resample
@@ -73,7 +76,7 @@ class ClipDataset(Dataset):
                 id_card = id_card[idx]
 
         # Empty tensors rather than None so the default collate still works.
-        ctx = c.get("context")
+        ctx = clip.context
         return (
             traj, anchor, vis,
             ctx.float() if ctx is not None else torch.zeros(0),
@@ -98,18 +101,21 @@ def split(cache: str, val_frac: float, seed: int):
         clips: list[Path | dict] = sorted(path.glob("*.pt"))
         if not clips:
             raise SystemExit(f"no cached clips in {path} -- run scripts/preprocess.py first")
-        probe = torch.load(clips[0], weights_only=False)
+        probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False))
     else:
         clips = torch.load(path, weights_only=False)["clips"]  # legacy single file
-        probe = clips[0]
+        probe = CachedClip.from_dict(clips[0])
 
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(clips), generator=g).tolist()
     n_val = max(1, int(len(clips) * val_frac))
+    if probe.norm is None:
+        print("WARNING: cache has no `norm` -- metrics cannot be reported in "
+              "metres. Re-run scripts/preprocess.py to fix.", flush=True)
     return ([clips[i] for i in perm[n_val:]],
             [clips[i] for i in perm[:n_val]],
-            probe.get("feat_dim"),
-            "context" in probe)
+            probe.feat_dim,
+            probe.context is not None)
 
 
 def to_device(batch, device):
