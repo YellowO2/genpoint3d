@@ -39,7 +39,7 @@ from genpoint3d.geometry import batch_project, batch_unproject
 # per-clip, so no sample's own motion leaks into its normalisation (and so a
 # fast clip stays genuinely faster than a slow one). Recalibrate with
 # `scripts/calibrate_motion_scale.py` whenever the training set changes.
-TRAJ_SCALE = 0.2136  # calibrated on 2 clips -- redo on the full training set
+TRAJ_SCALE = 0.6819  # calibrated on 2 clips -- redo on the full training set
 
 
 @dataclass
@@ -125,32 +125,44 @@ def to_frame0(points_world: torch.Tensor, extrinsics: torch.Tensor) -> torch.Ten
 def compute_norm_stats(
     pointmap: torch.Tensor,
     traj_scale: float = TRAJ_SCALE,
-    lo: float = 2.0,
-    hi: float = 98.0,
+    mode: str = "median",
 ) -> NormStats:
-    """Normalisation statistics from an observed pointmap. (MotionForesight.)
+    """Normalisation statistics from an observed pointmap. (DUSt3R.)
 
     `pointmap`: (T_obs, 3, H, W) unprojected scene points, frame-0 frame.
 
-    Trims the far/near tails by depth percentile before measuring, so a few
-    skybox pixels at 10000 m cannot dominate the scale.
+    Scale only -- the origin stays on the frame-0 camera and is NOT moved to the
+    scene centroid. That matters because depth is measured from the camera and
+    projection needs it; shifting the origin throws that away. This follows
+    DUSt3R's `normalize_pointcloud` (`dust3r/utils/geometry.py`, `norm_mode`
+    `avg_dis`), which divides by the distance to the origin and never centres.
+    MotionForesight centres as well; we deliberately do not.
+
+    `mode` picks the statistic, as DUSt3R's does:
+      median  robust to a skybox at 10 km with no threshold to tune (default)
+      mean    DUSt3R's own default; survives a long tail but is dragged by it
+      max     the previous behaviour -- ONE far pixel sets the scale for the
+              whole scene, which is why it needed a percentile trim to work
     """
     ts = torch.as_tensor(traj_scale, dtype=torch.float32)
     pts = pointmap.permute(0, 2, 3, 1).reshape(-1, 3)
     pts = pts[torch.isfinite(pts).all(dim=-1)]
+    mean = torch.zeros(3)                      # origin stays on the camera
     if pts.numel() == 0:
-        return NormStats(torch.zeros(3), torch.ones(()), ts)
+        return NormStats(mean, torch.ones(()), ts)
 
-    z = pts[:, 2]
-    z_lo, z_hi = torch.quantile(z, torch.tensor([lo / 100.0, hi / 100.0], dtype=z.dtype))
-    inliers = pts[(z >= z_lo) & (z <= z_hi)]
-    if inliers.numel() == 0:
-        inliers = pts
+    dist = pts.norm(dim=-1)                    # distance to the camera
+    if mode == "median":
+        scale = dist.median()
+    elif mode == "mean":
+        scale = dist.mean()
+    elif mode == "max":
+        scale = dist.max()
+    else:
+        raise ValueError(f"bad norm mode {mode!r}")
 
-    mean = inliers.mean(dim=0)
-    scale = (inliers - mean).norm(dim=-1).max()
     if not torch.isfinite(scale) or scale < 1e-6:
-        scale = torch.ones_like(scale)
+        scale = torch.ones(())
     return NormStats(mean=mean, scale=scale, traj_scale=ts)
 
 
