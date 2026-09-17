@@ -1,0 +1,43 @@
+#!/bin/bash
+# The real training run: 3493 Kubric clips, pure tracking, APD reported in metres.
+#
+#   qsub -q normal -P personal-yhuang01 scripts/train.pbs
+#
+#PBS -N train
+#PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
+# Measured 0.35 s/it at batch 16 with bf16, so 30k steps is ~3h, plus ~1h of
+# validation (349 val clips x 50 sampling steps, every 2000). 8h leaves room
+# for a shared GPU being slower than the benchmark. Walltime is a cap, not a
+# reservation -- the job ends when the script does.
+#PBS -l walltime=08:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/train.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+# PBS only writes its -o file when the job ENDS. Tee to scratch so progress can
+# be watched live with: tail -f ~/scratch/train.live.log
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+
+nvidia-smi --query-gpu=name,memory.total --format=csv
+git log --oneline -1
+
+# batch 16 is the measured limit on a 40GB A100: it peaked at 23.9 GB and 32
+# went out of memory. Features now stay fp16 so there should be headroom, but
+# an unattended overnight run is the wrong place to gamble on that.
+python scripts/train.py \
+  --cache $ROOT/cache/kubric \
+  --out outputs/run3493 \
+  --steps 30000 --batch 16 --points 128 \
+  --dim 256 --depth 6 --heads 4 \
+  --val-every 2000 --workers 4
+
+echo "=== TRAIN DONE ==="
