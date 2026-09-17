@@ -6,14 +6,22 @@ Flow matching mixes the denoising target with `x0 ~ N(0, I)`, so the target
 must have roughly unit variance -- otherwise the interpolant is nearly pure
 noise and the model learns only to output `-x0`.
 
-Scene normalisation makes geometry O(1) but leaves trajectories around 0.26.
-This measures that spread, pooled over the whole training set. One global number -- not per-clip -- so no
-individual sample's future leaks into its own normalisation.
+Scene normalisation makes geometry O(1) but leaves trajectories well below
+that. This measures the remaining spread, pooled over the whole training set.
+One global number, not per-clip, so no individual sample's own motion leaks
+into its normalisation -- and so a fast clip stays genuinely faster than a slow
+one.
 
-Run:  .venv/bin/python scripts/calibrate_traj_scale.py [data_root]
+Reads the CACHE, which already holds metres and every scale statistic, so this
+is arithmetic over small tensors rather than a second pass over the images.
+The answer depends on `--norm-mode`, because a different scale divisor leaves a
+different spread behind.
+
+Run:  python scripts/calibrate_traj_scale.py --cache local/cache/kubric
 Then paste the printed value into `TRAJ_SCALE`.
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -21,33 +29,52 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from genpoint3d.data.kubric import KubricSequenceDataset
-from genpoint3d.data.transform import TRAJ_SCALE, transform
+from genpoint3d.data.cache import CachedClip
+from genpoint3d.data.transform import TRAJ_SCALE
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "local/data/kubric_test"
-    ds = KubricSequenceDataset(root, num_query_points=256)
+    p = argparse.ArgumentParser()
+    p.add_argument("--cache", required=True, help="cache DIRECTORY from scripts/preprocess.py")
+    p.add_argument("--norm-mode", default="median",
+                   choices=["median", "mean", "centroid_max"])
+    p.add_argument("--limit", type=int, default=None)
+    args = p.parse_args()
 
-    residuals = []
-    for i in range(len(ds)):
-        sample = ds[i]
-        T = sample.frames.shape[0]
-        # traj_scale=1.0 -> `traj` stays in raw scene-normalised units,
-        # which is exactly the quantity we are trying to measure.
-        inputs = transform(sample, num_context_frames=T, traj_scale=1.0)
-        residuals.append(inputs.traj[inputs.visibility])
-        print(f"  {sample.seq_id}: traj std {inputs.traj.std():.4f}")
+    files = sorted(Path(args.cache).glob("*.pt"))
+    if not files:
+        raise SystemExit(f"no cached clips in {args.cache}")
+    if args.limit:
+        files = files[: args.limit]
 
-    pooled = torch.cat(residuals)
-    scale = pooled.std().item()
+    # Accumulate sum and sum-of-squares rather than keeping every point, so the
+    # memory does not grow with the dataset.
+    total = sq_total = n = 0.0
+    per_clip = []
+    for f in files:
+        clip = CachedClip.from_dict(torch.load(f, weights_only=False))
+        # traj_scale=1.0 leaves the trajectory in raw scene-normalised units,
+        # which is exactly the spread we are trying to measure.
+        traj, _ = clip.normalised(args.norm_mode, traj_scale=1.0)
+        v = traj[clip.visibility]
+        total += v.sum().item()
+        sq_total += v.pow(2).sum().item()
+        n += v.numel()
+        per_clip.append(v.std().item())
 
-    print(f"\npooled over {len(ds)} clip(s), {pooled.shape[0]} visible point-frames")
-    print(f"  TRAJ_SCALE = {scale:.4f}      (current: {TRAJ_SCALE})")
-    print(f"  -> target std after scaling: {pooled.std().item() / scale:.3f}")
+    mean = total / n
+    scale = (sq_total / n - mean ** 2) ** 0.5
+    per_clip = torch.tensor(per_clip)
+
+    print(f"pooled over {len(files)} clips, {int(n):,} visible coordinates"
+          f"  (--norm-mode {args.norm_mode})")
+    print(f"  per-clip std: median {per_clip.median():.4f}"
+          f"  min {per_clip.min():.4f}  max {per_clip.max():.4f}")
+    print(f"\n  TRAJ_SCALE = {scale:.4f}      (current: {TRAJ_SCALE})")
     print("\nPaste that into TRAJ_SCALE in genpoint3d/data/transform.py.")
-    print("NOTE: 2 clips is far too few for a real constant -- recalibrate")
-    print("      once the full training set is downloaded.")
+    if len(files) < 100:
+        print("NOTE: too few clips for a real constant -- this is a sanity "
+              "check, not a calibration.")
     return 0
 
 
