@@ -39,14 +39,20 @@ def main() -> int:
     p.add_argument("--cache", required=True, help="cache DIRECTORY from scripts/preprocess.py")
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"])
-    p.add_argument("--limit", type=int, default=None)
+    # A standard deviation over a few hundred clips is already ~1M visible
+    # coordinates. Reading all 3500 buys no precision and costs minutes.
+    p.add_argument("--sample", type=int, default=400,
+                   help="clips to sample; 0 uses every clip")
+    p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     files = sorted(Path(args.cache).glob("*.pt"))
     if not files:
         raise SystemExit(f"no cached clips in {args.cache}")
-    if args.limit:
-        files = files[: args.limit]
+    if args.sample and args.sample < len(files):
+        g = torch.Generator().manual_seed(args.seed)
+        idx = torch.randperm(len(files), generator=g)[: args.sample].tolist()
+        files = [files[i] for i in sorted(idx)]   # random, not the first N
 
     # Accumulate sum and sum-of-squares rather than keeping every point, so the
     # memory does not grow with the dataset.
@@ -66,7 +72,7 @@ def main() -> int:
         sq_total += v.pow(2).sum().item()
         n += v.numel()
         per_clip.append(v.std().item())
-        if i % 250 == 0 or i == len(files):
+        if i % 100 == 0 or i == len(files):
             print(f"  {i}/{len(files)}  {(time.time() - t0) / i * 1000:.0f} ms/clip",
                   flush=True)
 
@@ -80,7 +86,7 @@ def main() -> int:
           f"  min {per_clip.min():.4f}  max {per_clip.max():.4f}")
     print(f"\n  TRAJ_SCALE = {scale:.4f}      (current: {TRAJ_SCALE})")
     print("\nPaste that into TRAJ_SCALE in genpoint3d/data/transform.py.")
-    if len(files) < 100:
+    if len(files) < 50:
         print("NOTE: too few clips for a real constant -- this is a sanity "
               "check, not a calibration.")
     return 0
