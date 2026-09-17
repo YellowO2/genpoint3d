@@ -39,46 +39,6 @@ from genpoint3d.data.kubric import KubricSequenceDataset
 from genpoint3d.data.transform import scene_pointmap, transform
 
 
-def _complete(root: Path, seq_ids: list[str]) -> list[str]:
-    """Drop clips that are still downloading.
-
-    A finished clip has its .npy plus a frames/ dir holding one RGB and one
-    depth PNG per frame. Preprocessing a half-written clip crashes on a
-    missing file, so this makes it safe to run while a download is in flight.
-
-    Only ever call this on clips you actually intend to process -- verifying a
-    clip costs one .npy read plus a directory listing, and doing that for clips
-    that are already cached is pure waste on a resumed run.
-    """
-    import os
-
-    import numpy as np
-
-    ok = []
-    for s in seq_ids:
-        d = root / s
-        npy, frames = d / f"{s}.npy", d / "frames"
-        try:
-            # One listing beats 2*T separate exists() calls -- on a network
-            # filesystem each of those is a round trip.
-            present = {e.name for e in os.scandir(frames)}
-        except OSError:
-            continue  # frames/ missing or unreadable
-        if not npy.exists():
-            continue
-        try:
-            # The .npy is the authority on how many frames the clip has.
-            # Counting PNGs against each other is not enough: a clip stopped
-            # halfway has equal RGB and depth counts and would pass.
-            t = int(np.load(npy, allow_pickle=True).item()["intrinsics"].shape[0])
-        except Exception:
-            continue  # .npy itself truncated or unreadable
-        if all(f"{i:03d}.png" in present and f"{i:03d}_depth.png" in present
-               for i in range(t)):
-            ok.append(s)
-    return ok
-
-
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--root", required=True)
@@ -89,8 +49,6 @@ def main() -> int:
     p.add_argument("--feat-dim", type=int, default=256, help="must match the model's dim")
     p.add_argument("--stub", action="store_true", help="random backbone, for testing without DINOv3 access")
     p.add_argument("--limit", type=int, default=None, help="only the first N complete clips")
-    p.add_argument("--no-verify", action="store_true",
-                   help="trust that every clip is fully downloaded (skips the scan)")
     args = p.parse_args()
 
     out = Path(args.out)
@@ -99,26 +57,15 @@ def main() -> int:
     ds = KubricSequenceDataset(args.root, num_query_points=args.points)
     found = len(ds.seq_ids)
 
-    # Drop already-cached clips BEFORE verifying the rest. Verification reads
-    # each clip's .npy, so checking clips we are about to skip is the single
-    # most expensive pointless thing this script could do -- and it gets worse
-    # on every resume, exactly when there is least work left to justify it.
+    # No up-front completeness scan. A half-downloaded clip raises when we try
+    # to read it, and the loop below skips it -- so the cost is proportional to
+    # the number of BROKEN clips, not to the size of the dataset. Scanning 3500
+    # clips to find the zero-or-two bad ones was the wrong trade.
     cached = {p.stem for p in out.glob("*.pt")}
-    pending = [s for s in ds.seq_ids if s not in cached]
+    ds.seq_ids = [s for s in ds.seq_ids if s not in cached]
     print(f"{found} clips on disk, {len(cached)} already cached,"
-          f" verifying {len(pending)}...", flush=True)
+          f" {len(ds.seq_ids)} to encode", flush=True)
 
-    if args.no_verify:
-        # Only safe once the download has finished. A clip missing even one PNG
-        # raises mid-run -- but every clip already encoded is still on disk, so
-        # the cost is a crash and a resubmit, not lost work.
-        ds.seq_ids = pending
-        print("  --no-verify: skipping the scan", flush=True)
-    else:
-        t_scan = time.time()
-        ds.seq_ids = _complete(Path(args.root), pending)
-        print(f"  {len(ds.seq_ids)} complete and pending"
-              f"  ({time.time() - t_scan:.0f}s to verify)", flush=True)
     if args.limit:
         ds.seq_ids = ds.seq_ids[: args.limit]
     if not ds.seq_ids:
@@ -136,13 +83,19 @@ def main() -> int:
         ).to(dev).eval()
         print(f"encoding on {dev} at {args.image_size}px"
               f"{' (STUB backbone)' if args.stub else ''}", flush=True)
-    # ds.seq_ids already excludes everything cached, so this is all of it.
     todo = list(range(len(ds)))
-    print(f"{len(todo)} to encode", flush=True)
 
-    t0 = time.time()
+    t0, skipped = time.time(), []
     for n, i in enumerate(todo, 1):
-        raw = ds[i]
+        try:
+            raw = ds[i]
+        except Exception as e:
+            # Almost always an incomplete download. Nothing is written for this
+            # clip, so a later run retries it for free once the files arrive.
+            skipped.append(ds.seq_ids[i])
+            print(f"  SKIP {ds.seq_ids[i]}: {type(e).__name__}: {e}", flush=True)
+            continue
+
         x = transform(raw, num_context_frames=raw.frames.shape[0])
         entry = {
             "seq_id": x.seq_id,
@@ -177,6 +130,10 @@ def main() -> int:
             rate = (time.time() - t0) / n
             print(f"  {n}/{len(todo)}  {rate:.2f}s/clip"
                   f"  eta {rate * (len(todo) - n) / 60:.1f} min", flush=True)
+
+    if skipped:
+        print(f"\nskipped {len(skipped)} unreadable clips: {' '.join(skipped[:20])}"
+              f"{' ...' if len(skipped) > 20 else ''}", flush=True)
 
     files = sorted(out.glob("*.pt"))
     mb = sum(f.stat().st_size for f in files) / 1e6
