@@ -62,6 +62,28 @@ allow_patterns=["000[0-4]*/*"]     # sequences 000000-000499
 
 ---
 
+## NSCC: everything computational goes through the scheduler
+
+From the login MOTD:
+
+> All computational jobs must run via scheduler, including pre- and
+> post-processing jobs.
+
+That covers more than training. Cache patching, preprocessing, format
+conversion -- anything that runs for minutes and uses real CPU belongs in a
+job, not on the login node. Login nodes are shared, and a long multi-threaded
+run there gets killed.
+
+The exceptions are genuinely interactive: `git pull`, a `--limit 10` smoke
+test, `ls`, editing files. Downloads are the awkward case -- compute nodes may
+have no internet, so `download_kubric.py` runs on the login node out of
+necessity.
+
+A CPU-only job (no `ngpus=`) routes to the CPU queue and does not wait behind
+GPU work.
+
+---
+
 ## NSCC: how to submit a job
 
 **Always submit like this:**

@@ -1,0 +1,33 @@
+#!/bin/bash
+# Backfill norm + intrinsics into an existing cache. CPU only -- no GPU is
+# requested, so this routes to the CPU queue rather than queueing behind GPU work.
+#
+#   qsub -q normal -P personal-yhuang01 scripts/patch_cache.pbs
+#
+#PBS -N patchcache
+#PBS -l select=1:ncpus=16:mem=32gb
+# ~1 s/clip measured locally; 3493 clips is well under an hour, but Lustre
+# latency is the whole cost here so leave room.
+#PBS -l walltime=02:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/patchcache.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+# PBS only writes its -o file when the job ENDS. Tee to scratch so
+# progress can be watched live with: tail -f ~/scratch/patchcache.live.log
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+
+python scripts/patch_cache.py \
+  --cache $ROOT/cache/kubric \
+  --root  $ROOT/kubric \
+  --workers 16
+
+echo "=== PATCH DONE ==="
