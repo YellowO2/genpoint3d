@@ -145,6 +145,22 @@ This is why `TRAJ_SCALE` exists in `data/transform.py`, and why
 
 ---
 
+## Checking SU usage: `myprojects`, not `glsproject`
+
+`myprojects` is the command that reports project codes and Service Unit usage.
+
+```bash
+myprojects                                   # balance
+myprojects -p personal-yhuang01 -l           # per-user breakdown
+myprojects -p personal-yhuang01 -l -s 2026-09-01 -e 2026-09-30
+```
+
+Budget: 100,000 SU on `personal-yhuang01`, GPU billed at **64 SU/hour**, so
+~1,560 GPU-hours total. A 4-hour preprocessing job is ~256 SU -- about 0.25%.
+Cost is not the constraint; walltime and queue waits are.
+
+---
+
 ## Disk and inode quota on NSCC — not a constraint, stop checking
 
 `df -h ~/scratch` shows the **shared** filesystem (9.5 PB), which says nothing

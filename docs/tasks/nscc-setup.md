@@ -119,7 +119,7 @@ Find your project code and the GPU queue first — these are account-specific:
 
 ```bash
 qstat -Q                    # queue names
-glsproject 2>/dev/null || echo "check your NSCC welcome email for the -P code"
+myprojects                  # project codes and SU balance
 ```
 
 Then `job.pbs` (fill in `-P` and `-q`):
