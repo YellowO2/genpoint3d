@@ -240,3 +240,6 @@ Useful conversions:
 - 460 clips at batch 16 = ~29 steps per epoch, so 3000 steps = ~104 epochs.
 - 500 clips x 24 frames at 24 fps = **8 minutes of video total**. It is a small
   dataset; do not over-read a weak result.
+
+
+Kubrics Data is from tappid
