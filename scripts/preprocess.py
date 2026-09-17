@@ -89,6 +89,8 @@ def main() -> int:
     p.add_argument("--feat-dim", type=int, default=256, help="must match the model's dim")
     p.add_argument("--stub", action="store_true", help="random backbone, for testing without DINOv3 access")
     p.add_argument("--limit", type=int, default=None, help="only the first N complete clips")
+    p.add_argument("--no-verify", action="store_true",
+                   help="trust that every clip is fully downloaded (skips the scan)")
     args = p.parse_args()
 
     out = Path(args.out)
@@ -106,10 +108,17 @@ def main() -> int:
     print(f"{found} clips on disk, {len(cached)} already cached,"
           f" verifying {len(pending)}...", flush=True)
 
-    t_scan = time.time()
-    ds.seq_ids = _complete(Path(args.root), pending)
-    print(f"  {len(ds.seq_ids)} complete and pending"
-          f"  ({time.time() - t_scan:.0f}s to verify)", flush=True)
+    if args.no_verify:
+        # Only safe once the download has finished. A clip missing even one PNG
+        # raises mid-run -- but every clip already encoded is still on disk, so
+        # the cost is a crash and a resubmit, not lost work.
+        ds.seq_ids = pending
+        print("  --no-verify: skipping the scan", flush=True)
+    else:
+        t_scan = time.time()
+        ds.seq_ids = _complete(Path(args.root), pending)
+        print(f"  {len(ds.seq_ids)} complete and pending"
+              f"  ({time.time() - t_scan:.0f}s to verify)", flush=True)
     if args.limit:
         ds.seq_ids = ds.seq_ids[: args.limit]
     if not ds.seq_ids:
