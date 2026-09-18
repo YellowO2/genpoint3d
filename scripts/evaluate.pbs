@@ -32,7 +32,7 @@ source $ROOT/venvs/fyp/bin/activate
 CKPT=${CKPT:-outputs/run3493/best.pt}
 
 python scripts/evaluate.py \
-  --ckpt "$CKPT" \
+  --ckpt "$CKPT" --per-frame \
   --cache $ROOT/cache/kubric_test \
   --out "$(dirname "$CKPT")/test_metrics.json"
 

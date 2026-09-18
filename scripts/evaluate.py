@@ -25,9 +25,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 from torch.utils.data import DataLoader
 
+from genpoint3d.eval.metrics import tapvid3d_metrics
 from genpoint3d.models.model import PointDiT
 from genpoint3d.data.cache import CachedClip
-from train import ClipDataset, evaluate
+from train import ClipDataset, evaluate, to_device, to_metres
+from genpoint3d.models.flow import sample as flow_sample
+
+
+@torch.no_grad()
+def per_frame_apd(model, loader, device, steps: int, amp: bool) -> list[float]:
+    """APD for each frame index separately.
+
+    The model is handed frame 0's true position as `anchor`, but still has to
+    generate frame 0 from noise like every other frame -- nothing pins it. If
+    frame 0 scores no better than the rest, the model is failing to reproduce a
+    position it was given, and clamping it during sampling is worth doing. If
+    frame 0 is clearly the best and the score decays with time, the error is
+    accumulating drift instead and clamping would not address it.
+    """
+    model.eval()
+    totals, n = None, 0
+    for batch in loader:
+        b = to_device(batch, device, amp)
+        traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
+        ctx, idc = b["context"], b["id_card"]
+        vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                               context=ctx, visual_mask=vm, id_card=idc)
+        pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
+
+        if totals is None:
+            totals = [0.0] * traj.shape[1]
+        for t in range(traj.shape[1]):
+            # One frame at a time, so each score is that frame's alone.
+            m = tapvid3d_metrics(
+                pred_m[:, t : t + 1], gt_m[:, t : t + 1], vis[:, t : t + 1],
+                b["intrinsics"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
+            )
+            totals[t] += m["average_pts_within_thresh"]
+        n += 1
+    model.train()
+    return [v / max(n, 1) for v in totals]
 
 
 def main() -> int:
@@ -41,6 +80,9 @@ def main() -> int:
                    help="Euler steps when sampling; the published protocol is not"
                         " prescriptive, so report whatever you use")
     p.add_argument("--out", default=None, help="write the metrics as JSON here")
+    p.add_argument("--per-frame", action="store_true",
+                   help="also report APD per frame index, which separates a bad"
+                        " start from accumulating drift")
     args = p.parse_args()
 
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
@@ -74,6 +116,8 @@ def main() -> int:
     )
 
     t0 = time.time()
+    per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp) \
+        if args.per_frame else None
     m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
@@ -82,6 +126,20 @@ def main() -> int:
     print()
     for t in (1, 2, 4, 8, 16):
         print(f"  pts_within_{t:<15} {m[f'pts_within_{t}']:.4f}")
+
+    if per_frame is not None:
+        print("\n  APD by frame -- does error start at frame 0 or accumulate?")
+        for t, v in enumerate(per_frame):
+            bar = "#" * int(round(v / max(max(per_frame), 1e-9) * 40))
+            print(f"    frame {t:>2}  {v:.4f}  {bar}")
+        print(f"\n    frame 0 {per_frame[0]:.4f}  ->  frame {len(per_frame)-1}"
+              f" {per_frame[-1]:.4f}")
+        if per_frame[0] < 0.5 * max(per_frame):
+            print("    frame 0 is NOT the best frame -- the model is failing to"
+                  " reproduce a position it was given, so anchoring should help.")
+        else:
+            print("    frame 0 is already the most accurate -- error accumulates"
+                  " over time rather than starting wrong, so anchoring buys little.")
 
     if m["average_pts_within_thresh"] <= m["apd_baseline"]:
         print("\n  APD is at or below the mean-trajectory baseline -- nothing"
