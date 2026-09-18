@@ -83,13 +83,9 @@ flowchart TD
 
       <div id="right">
         <nav>
-          <button data-doc="build-order">Build order</button>
-          <button data-doc="files">File layout</button>
           <button data-doc="training">Training</button>
           <button data-doc="decisions">Decisions</button>
           <button data-doc="sources">Code sources</button>
-          <button data-doc="open">Still open</button>
-          <button data-doc="todo">Not built yet</button>
         </nav>
 
         <!-- ═══ the stages — these match the boxes in the diagram above ═══ -->
@@ -185,47 +181,7 @@ Then at inference, we mask it deliberately too (like pass the null embedding) to
 
         <!-- ═══ everything else — reached from the nav buttons ═══ -->
 
-        <section id="build-order">
-          <h2>Build order</h2>
-          Extend Gen-points (Lu, Cao, Feng, Owens, CVPR 2026 — generative point
-          tracking and forecasting) from 2D to 3D. Step 1 — data prep [0] —
-          DONE. Four checks pass: round-trip 0.00e+00 m, static-scene drift
-          0.34%, reprojection 0.000 px, target std ≈ 1. Step 2 — backbone + flow
-          matching, no images [2][4a][4b][5-position] — written, unproven. Step
-          3 — DINOv3 + cross-attention [1][3-ID card][4c] — not started. Step 4
-          — visibility head [5-visibility] — not started. Step 2 is the de-risk:
-          an unconditional trajectory generator. If it cannot memorise 2 clips,
-          the fault is the backbone or the flow-matching code, and finding that
-          out with an encoder attached would be miserable. Step 2 remaining: run
-          scripts/overfit.py and confirm the loss falls to ~0. Blocked on
-          compute. Already verified: 11.93M params, causal masking exact,
-          gradients flow. Only [2]–[5] are trained. [1] is frozen off-the-shelf.
-          The training objective lives in models/flow.py — not a stage, it
-          scores the output.
-        </section>
 
-        <section id="files">
-          <h2>File layout</h2>
-          <span class="mono"
-            >genpoint3d/ the package data/ [0] data prep kubric.py reads Kubric
-            files -> raw numpy transform.py raw -> model-ready (reframe,
-            normalise, scale) masking.py THE SWITCH: which frames get hidden
-            models/ [1]-[5] the network model.py THE ARCHITECTURE — open this
-            one layers.py the machinery (RMSNorm, RoPE, Attention, ...) flow.py
-            training objective + sampler encoder.py [1] DINOv3 — step 3
-            geometry.py 3D&lt;-&gt;2D maths (project / unproject)
-            viz/rerun_log.py 3D visualisation scripts/ things you run
-            check_transform.py proves [0] is correct (4 checks)
-            calibrate_traj_scale.py measures the TRAJ_SCALE constant overfit.py
-            step 2's test: can it memorise 2 clips? visualize.py writes the .rrd
-            you open in rerun docs/map.html this page docs/references.md every
-            paper/repo and why docs/ideas.md deferred ideas data/ outputs/ refs/
-            gitignored</span
-          >
-
-          Only two files are the actual model: model.py and layers.py.
-          Everything else is plumbing, verification, or notes.
-        </section>
 
         <section id="training">
           <h2>Training</h2>
@@ -280,56 +236,7 @@ Then at inference, we mask it deliberately too (like pass the null embedding) to
           cross-attention so ∅ works for forecasting.
         </section>
 
-        <section id="todo">
-          <h2>Not built yet</h2>
-          <pre>
-Parts of the paper we have deliberately not implemented. Listed so none of
-them is quietly forgotten.
 
-FROM THE PAPER
-  Visibility head        Linear(D -> 1) + BCE, predicting whether a point is
-                         occluded or off-screen at each frame. model.py only
-                         has Linear(dim, 3) -- position. Needed before any
-                         TAP-Vid-3D metric works, since AJ and OA both score
-                         occlusion.
-
-  Autoregressive         Generate a window of W frames, slide by stride S,
-  sliding window         feed the previous window back as a causal prefix.
-                         This is how the paper handles video longer than one
-                         window. We do all 24 frames in one shot, which only
-                         works because Kubric clips are exactly 24 frames.
-
-  Diffusion forcing      Independent noise level per frame during training.
-                         flow.py already accepts per_frame_k, it is just off.
-                         Needed for stable autoregressive rollout.
-
-  Point-count            Reshape N points into random factor pairs each step
-  factorization          so the model handles any number of query points.
-
-EVALUATION
-  APD3D / AJ3D / OA      The standard TAP-Vid-3D metrics. Ours is a homemade
-                         ratio against a mean-path baseline, comparable to
-                         nothing. TAPIP3D has a working implementation to
-                         port. Thresholds are pixel distances back-projected
-                         through depth and intrinsics, not fixed metres.
-
-OURS, NOT IN THE PAPER
-  dt conditioning        The model sees frame INDEX, never elapsed time, so
-                         frame rate is baked into the learnt motion prior.
-                         Feeding dt alongside the noise level would make it
-                         frame-rate agnostic. Nobody in the papers we read
-                         does this.
-          </pre>
-        </section>
-
-        <section id="open">
-          <h2>Still open</h2>
-          1. Exact config for the first real test (currently dim 256 / depth 6 /
-          4 heads). 2. Spatial attention per block (our paper, current choice)
-          versus once at the end (genpt, cheaper). Ablate later. 3. Virtual
-          points on or off — CoTracker3's O(N²) saver. Currently off. 4.
-          Recalibrate TRAJ_SCALE. 0.2136 came from only 2 clips.
-        </section>
       </div>
     </main>
 
@@ -396,7 +303,7 @@ OURS, NOT IN THE PAPER
         a.closest("g.node")?.classList.add("on");
       });
 
-      show("build-order");
+      show("decisions");
     </script>
   </body>
 </html>
