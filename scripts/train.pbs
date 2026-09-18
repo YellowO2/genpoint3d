@@ -25,7 +25,11 @@ cd $ROOT/genpoint3d
 
 # PBS only writes its -o file when the job ENDS. Tee to scratch so progress can
 # be watched live with: tail -f ~/scratch/train.live.log
-exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+# Defined before the tee below, which names the log after the run.
+OUT=${OUT:-run3493_apdloss}
+ARGS=${ARGS:-}
+
+exec > >(tee -a $ROOT/${OUT}.live.log) 2>&1
 
 module load python/3.11.7-gcc11
 module load cuda/12.2.2
@@ -38,11 +42,14 @@ git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 # batch 16 is the measured limit on a 40GB A100: it peaked at 23.9 GB and 32
 # went out of memory. Features now stay fp16 so there should be headroom, but
 # an unattended overnight run is the wrong place to gamble on that.
+# Overridable so a variant does not need the file edited, which is how two jobs
+# ended up writing to the same output directory once:
+#   qsub -v OUT=run3493_disp,ARGS="--target displacement" ... scripts/train.pbs
 python scripts/train.py \
   --cache $ROOT/cache/kubric \
-  --out outputs/run3493_apdloss \
+  --out outputs/$OUT \
   --steps 30000 --batch 16 --points 128 \
   --dim 256 --depth 6 --heads 4 \
-  --val-every 2000 --workers 4
+  --val-every 2000 --workers 4 $ARGS
 
 echo "=== TRAIN DONE ==="
