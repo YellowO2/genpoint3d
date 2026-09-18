@@ -121,7 +121,7 @@ class CachedClip:
     stats: Optional[ScaleStats] = None
 
     # --- visual conditioning, absent for the step-2 (no-image) model ---
-    context: Optional[torch.Tensor] = None      # (T, P, D) fp16 DINOv3 tokens
+    context: Optional[torch.Tensor] = None      # (T, P, D) fp16 DINOv3 tokens + depth features
     id_card: Optional[torch.Tensor] = None      # (N, D) fp16, sampled at frame 0
 
     points: Optional[int] = None

@@ -47,9 +47,16 @@ def main() -> int:
     ax1.set_title("loss -- a widening gap is overfitting")
     ax1.legend(); ax1.grid(alpha=0.3)
 
-    apd = pick("average_pts_within_thresh")
+    apd, base = pick("average_pts_within_thresh"), pick("apd_baseline")
     if apd:
-        ax2.plot(steps[-len(apd):], apd, marker="o", ms=3, color="tab:green")
+        ax2.plot(steps[-len(apd):], apd, marker="o", ms=3, color="tab:green",
+                 label="model")
+    if base:
+        # The same metric on the mean trajectory: the model has to clear this
+        # line to have learnt anything at all.
+        ax2.plot(steps[-len(base):], base, ls="--", color="tab:grey",
+                 label="mean-trajectory baseline")
+        ax2.legend()
     ax2.set_xlabel("step"); ax2.set_ylabel("APD")
     ax2.set_title("APD (TAP-Vid-3D) -- higher is better")
     ax2.set_ylim(0, 1); ax2.grid(alpha=0.3)
@@ -61,7 +68,7 @@ def main() -> int:
     # Also say it in words, since the figure needs copying off the cluster.
     last = entries[-1]
     print(f"\nlast validation, step {last['step']}:")
-    for k in ("train_loss", "val_loss", "average_pts_within_thresh", "ratio"):
+    for k in ("train_loss", "val_loss", "average_pts_within_thresh", "apd_baseline"):
         if k in last:
             print(f"  {k:<26} {last[k]:.4f}")
     if len(entries) >= 2 and "train_loss" in last:

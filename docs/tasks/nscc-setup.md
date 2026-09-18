@@ -148,13 +148,16 @@ python scripts/train.py \
   --out outputs/run500
 ```
 
-Watch the `VAL ... ratio` line. That is the whole experiment: sampled RMSE
-divided by the RMSE of just predicting the mean trajectory. 1.0 means nothing
-generalised. Below 1.0 is real learning on clips the model has never seen.
+Watch the `VAL ... APD` line. That is the whole experiment: the TAP-Vid-3D
+`average_pts_within_thresh`, scored in metres, which is what other papers
+report. `baseline` beside it is the same measure applied to the mean
+trajectory -- if APD is not clearly above it, nothing generalised.
 
 ```bash
-qsub job.pbs
+qsub -q normal -P personal-yhuang01 scripts/train.pbs
 qstat -u $USER              # watch it
+tail -f ~/scratch/train.live.log
+python scripts/plot_log.py outputs/run3493/log.json
 ```
 
 ---
@@ -162,11 +165,11 @@ qstat -u $USER              # watch it
 ## Notes
 
 - `$SCRATCH` is unset on this system; use `~/scratch` explicitly.
-- `/scratch` is usually purged periodically — keep checkpoints you care about
+- `/scratch` is usually purged periodically -- keep checkpoints you care about
   somewhere durable.
 - Section 5 trains pure **tracking**: every frame keeps its image, so the
   tracking/forecasting mask is off. That is deliberate -- forecasting is much
   harder, and training both at once splits the signal. Turn masking on only
   once tracking is learning.
 - DINOv3 is cached, not run during training, so the GPU only ever sees the
-  12M-parameter model. The 21M encoder is frozen and already spent.
+  17.9M-parameter model. The 21M encoder is frozen and already spent.

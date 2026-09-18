@@ -5,9 +5,10 @@ Real training run: many clips, held-out validation, checkpoints.
 This is the opposite question -- does the model learn anything that transfers
 to clips it has never seen?
 
-The metric that matters is `ratio` on the VAL split: RMSE of sampled
-trajectories divided by the RMSE of the mean trajectory. 1.0 means nothing was
-learnt. Below 1.0 means real signal.
+The metric that matters is APD on the VAL split -- `average_pts_within_thresh`
+from the TAP-Vid-3D benchmark, scored in metres. `apd_baseline` is the same
+measure applied to the mean trajectory, so a model that has learnt nothing
+scores about the same as its baseline.
 
 With a feature cache this trains pure TRACKING: every frame keeps its image, so
 `visual_mask` is all-True and the null embedding is never used. Masking is
@@ -166,23 +167,23 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False) -> dict:
-    """Three numbers, deliberately distinct -- see docs/misc.md for the naming.
+    """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
-              Plot it against training loss: the gap is overfitting. This is
-              the standard figure and the only one comparable to our own
-              training curve.
+              Plot it against training loss: the gap is overfitting.
     APD       `average_pts_within_thresh` from the TAP-Vid-3D benchmark, scored
               in METRES -- see genpoint3d/eval/metrics.py. The number other
               papers report. AJ and OA need a visibility prediction, so they
               appear only once the visibility head exists.
-    ratio     sampled RMSE / mean-trajectory RMSE. Homemade sanity check --
-              1.0 means nothing was learnt. NOT comparable to any paper.
+
+    `apd_baseline` scores the mean trajectory with the SAME metric, which
+    answers the question the old homemade `ratio` existed for -- is this better
+    than predicting nothing -- without inventing a second unit that no paper
+    shares and that is easy to report by mistake.
     """
     model.eval()
-    err_sq = base_sq = n = 0.0
     loss_sum = loss_n = 0.0
-    metric_sums, metric_n = {}, 0
+    sums, n_batches = {}, 0
 
     for batch in loader:
         b = to_device(batch, device, amp)
@@ -196,26 +197,23 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False) -> dict:
 
         pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                       context=ctx, visual_mask=vm, id_card=idc)
-        mean_traj = traj.mean(dim=(1, 2), keepdim=True)
-        err_sq += (pred - traj).pow(2).mean(-1)[vis].sum().item()
-        base_sq += (mean_traj - traj).pow(2).mean(-1)[vis].sum().item()
-        n += vis.sum().item()
 
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
-        m = tapvid3d_metrics(
-            to_metres(pred, b), to_metres(traj, b), vis,
-            b["intrinsics"], b["extrinsics"],
-        )
+        gt_m = to_metres(traj, b)
+        score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"], b["extrinsics"])
+        m = score(to_metres(pred, b))
+        m["apd_baseline"] = score(
+            gt_m.mean(dim=(1, 2), keepdim=True).expand_as(gt_m)
+        )["average_pts_within_thresh"]
+
         for k, v in m.items():
-            metric_sums[k] = metric_sums.get(k, 0.0) + v
-        metric_n += 1
+            sums[k] = sums.get(k, 0.0) + v
+        n_batches += 1
 
     model.train()
-    rmse, base = (err_sq / max(n, 1)) ** 0.5, (base_sq / max(n, 1)) ** 0.5
     return {"val_loss": loss_sum / max(loss_n, 1),
-            **{k: v / max(metric_n, 1) for k, v in metric_sums.items()},
-            "rmse": rmse, "baseline": base, "ratio": rmse / max(base, 1e-9)}
+            **{k: v / max(n_batches, 1) for k, v in sums.items()}}
 
 
 def main() -> int:
@@ -295,7 +293,7 @@ def main() -> int:
     # steps -- the gap between them IS the overfitting measurement.
     log, step, t0, running = [], 0, time.time(), 0.0
     since_val, since_val_n = 0.0, 0
-    best = float('inf')
+    best = -float('inf')
     while step < args.steps:
         for batch in train_loader:
             if step >= args.steps:
@@ -331,7 +329,7 @@ def main() -> int:
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
-                      f"  ratio {m['ratio']:.3f}"
+                      f"  (baseline {m['apd_baseline']:.3f})"
                       f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step,
                             "train_loss": since_val / max(since_val_n, 1), **m})
@@ -343,10 +341,12 @@ def main() -> int:
                 # Keep the best separately: val typically bottoms out and then
                 # drifts up as the model overfits, so the LAST checkpoint is
                 # not the one you want.
-                if m["ratio"] < best:
-                    best = m["ratio"]
+                # Maximise APD, as genpt's model_checkpoint does
+                # (monitor: val/d_all_avg/avg, mode: max).
+                if m["average_pts_within_thresh"] > best:
+                    best = m["average_pts_within_thresh"]
                     torch.save(ckpt, out / "best.pt")
-                    print(f"       new best ratio {best:.3f}", flush=True)
+                    print(f"       new best APD {best:.3f}", flush=True)
 
     print(f"\ndone in {(time.time() - t0) / 60:.1f} min -> {out}", flush=True)
     return 0

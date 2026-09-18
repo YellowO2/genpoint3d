@@ -255,7 +255,7 @@ So we can size walltime and plan runs instead of guessing.
 | validation (50 sampling steps, 56 clips) | A100 | **35 s** per VAL |
 
 First real result, 2026-09-12: 17.9M model, 322 train / 56 val clips, 500
-steps -> **val ratio 0.309** (rmse 0.267 vs 0.864 baseline). Generalises to
+steps -> val ratio 0.309 (the homemade metric, since removed). Generalises to
 unseen clips, tracking mode.
 
 Useful conversions:
