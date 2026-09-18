@@ -158,6 +158,30 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     return b
 
 
+def git_commit() -> str:
+    """The commit this run is from, so a number can always be traced to code.
+
+    train.pbs prints this to the live log, but that log lives on scratch and is
+    purged. A result whose code cannot be identified is not reproducible, so it
+    goes in the log and the checkpoint too.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5,
+                             cwd=Path(__file__).resolve().parent.parent)
+        dirty = subprocess.run(["git", "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=5,
+                               cwd=Path(__file__).resolve().parent.parent)
+        if out.returncode:
+            return "unknown"
+        return out.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
+    except Exception:
+        # Compute nodes have no git on PATH; an unknown commit is not worth
+        # killing a run over.
+        return "unknown"
+
+
 class EMA:
     """A slowly-following copy of the weights, used for evaluation.
 
@@ -346,6 +370,7 @@ def main() -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    commit = git_commit()
     train_clips, val_clips, feat_dim, has_feats = split(args.cache, args.val_frac, args.seed)
     print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips"
           f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
@@ -438,8 +463,14 @@ def main() -> int:
                             "train_loss": since_val / max(since_val_n, 1), **m})
                 since_val, since_val_n = 0.0, 0
                 (out / "log.json").write_text(json.dumps(log, indent=2))
+                # Config and commit alongside the curve, in their own file so
+                # log.json stays a plain list that plot_log.py can read.
+                (out / "run.json").write_text(json.dumps(
+                    {"commit": commit, "args": vars(args),
+                     "clips": {"train": len(train_clips), "val": len(val_clips)}},
+                    indent=2))
                 ckpt = {"model": model.state_dict(), "step": step,
-                        "args": vars(args), "val": m}
+                        "args": vars(args), "val": m, "commit": commit}
                 torch.save(ckpt, out / "ckpt.pt")
                 # Keep the best separately: val typically bottoms out and then
                 # drifts up as the model overfits, so the LAST checkpoint is
