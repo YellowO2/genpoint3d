@@ -39,6 +39,13 @@ def main() -> int:
     p.add_argument("--cache", required=True, help="cache DIRECTORY from scripts/preprocess.py")
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"])
+    # A displacement target is much smaller than an absolute one -- the scene's
+    # position cancels and only motion is left -- so it needs its own constant.
+    # Reusing the absolute one would leave the target far below unit variance,
+    # which is the failure check_transform.py's scale sanity test exists to catch.
+    p.add_argument("--target", default="absolute",
+                   choices=["absolute", "displacement"],
+                   help="displacement measures traj - traj[0]")
     # A standard deviation over a few hundred clips is already ~1M visible
     # coordinates. Reading all 3500 buys no precision and costs minutes.
     p.add_argument("--sample", type=int, default=400,
@@ -67,6 +74,8 @@ def main() -> int:
         # traj_scale=1.0 leaves the trajectory in raw scene-normalised units,
         # which is exactly the spread we are trying to measure.
         traj, _ = clip.normalised(args.norm_mode, traj_scale=1.0)
+        if args.target == "displacement":
+            traj = traj - traj[:1]
         v = traj[clip.visibility]
         total += v.sum().item()
         sq_total += v.pow(2).sum().item()
@@ -81,7 +90,7 @@ def main() -> int:
     per_clip = torch.tensor(per_clip)
 
     print(f"pooled over {len(files)} clips, {int(n):,} visible coordinates"
-          f"  (--norm-mode {args.norm_mode})")
+          f"  (--norm-mode {args.norm_mode}, --target {args.target})")
     print(f"  per-clip std: median {per_clip.median():.4f}"
           f"  min {per_clip.min():.4f}  max {per_clip.max():.4f}")
     print(f"\n  TRAJ_SCALE = {scale:.4f}      (current: {TRAJ_SCALE})")
