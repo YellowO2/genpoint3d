@@ -28,14 +28,26 @@ Decided to skip for now, with the reason.
 - Walk through what the model actually sees at each denoising step -- which
   tensors enter, through which path (tokens, AdaLN, cross-attention), and what
   is shared across the 50 steps versus recomputed. Requested 2026-09-18.
-- Displacement target instead of absolute. TRAJ_SCALE would be 0.0992 rather
-  than 0.8344, measured on 200 clips. Read how TAPIP3D and MotionForesight
-  parameterise and scale it rather than deriving it again. Caveat: per-clip
-  motion std spans 0.021 to 0.320, a 15x range, so a single global scale leaves
-  the slowest clips below check_transform's 0.3 floor.
-- Verify the claim that MolmoMotion's autoregressive variant beats its
-  flow-matching one. If true it is a big deal; it may also be specific to
-  having an LLM backbone and 1.16M videos.
+- Displacement target instead of absolute, measured from ONE anchor rather than
+  per point. MolmoMotion uses `delta[t][n] = p[t][n] - p_anc`, where `p_anc` is
+  the first query point at frame 0 -- a single reference for the whole clip.
+  Subtracting each point's own start instead would move every point to the
+  origin and destroy the spatial layout, so the model could no longer tell a
+  compact object from a spread-out scene. Scene position goes, geometry stays.
+  TRAJ_SCALE would be 0.0992 rather than 0.8344, measured on 200 clips.
+  Caveat: per-clip motion std spans 0.021 to 0.320, a 15x range, so one global
+  scale leaves the slowest clips under check_transform's 0.3 floor -- absolute
+  targets hide that spread because scene position dominates them.
+- Temporal consistency. MolmoMotion's autoregressive variant beats its own
+  flow-matching one (HOT3D: ADE 0.109 vs 0.135, FDE 0.217 vs 0.255, PWT 0.444
+  vs 0.382), and their stated reason is that conditioning on previously
+  generated coordinates encourages temporally smooth predictions. Note the
+  hedge: this holds "under deterministic trajectory metrics", and forecasting
+  is multimodal, which is what a generative model is for -- switching to
+  autoregression would abandon the thesis. The transferable point is that our
+  frames are denoised independently with nothing enforcing consistency between
+  them. Rollout training inside flow matching addresses the same gap; genpt
+  does it with `num_refinement_steps_train: 4`.
 
 ## Open questions
 
