@@ -5,12 +5,15 @@
 #
 #PBS -N train
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
-# Measured 0.44 s/it at batch 16 with bf16, so 50k steps is ~6h, plus ~1.5h of
-# validation (349 val clips x 50 sampling steps, every 2000). 12h leaves room
+# 30000 steps deliberately matches run3493, so this is an A/B on the loss
+# changes alone. A longer run would stretch the cosine schedule too, and then a
+# better result would not say which change caused it.
+#
+# Measured 0.44 s/it at batch 16 with bf16, so 30k steps is ~4h, plus ~1h of
+# validation (349 val clips x 50 sampling steps, every 2000). 8h leaves room
 # for a shared GPU being slower than the benchmark. Walltime is a cap, not a
-# reservation -- the job ends when the script does, and every validation writes
-# a checkpoint, so a run that hits the cap is still usable.
-#PBS -l walltime=12:00:00
+# reservation -- the job ends when the script does.
+#PBS -l walltime=08:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
@@ -38,7 +41,7 @@ git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 python scripts/train.py \
   --cache $ROOT/cache/kubric \
   --out outputs/run3493_apdloss \
-  --steps 50000 --batch 16 --points 128 \
+  --steps 30000 --batch 16 --points 128 \
   --dim 256 --depth 6 --heads 4 \
   --val-every 2000 --workers 4
 
