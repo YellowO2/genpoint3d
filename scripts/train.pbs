@@ -5,11 +5,12 @@
 #
 #PBS -N train
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
-# Measured 0.35 s/it at batch 16 with bf16, so 30k steps is ~3h, plus ~1h of
-# validation (349 val clips x 50 sampling steps, every 2000). 8h leaves room
+# Measured 0.44 s/it at batch 16 with bf16, so 50k steps is ~6h, plus ~1.5h of
+# validation (349 val clips x 50 sampling steps, every 2000). 12h leaves room
 # for a shared GPU being slower than the benchmark. Walltime is a cap, not a
-# reservation -- the job ends when the script does.
-#PBS -l walltime=08:00:00
+# reservation -- the job ends when the script does, and every validation writes
+# a checkpoint, so a run that hits the cap is still usable.
+#PBS -l walltime=12:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
@@ -36,8 +37,8 @@ git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 # an unattended overnight run is the wrong place to gamble on that.
 python scripts/train.py \
   --cache $ROOT/cache/kubric \
-  --out outputs/run3493 \
-  --steps 30000 --batch 16 --points 128 \
+  --out outputs/run3493_apdloss \
+  --steps 50000 --batch 16 --points 128 \
   --dim 256 --depth 6 --heads 4 \
   --val-every 2000 --workers 4
 

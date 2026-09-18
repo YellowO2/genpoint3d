@@ -43,6 +43,7 @@ def flow_matching_loss(
     x1: torch.Tensor,
     anchor: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
     per_frame_k: bool = False,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
@@ -50,6 +51,9 @@ def flow_matching_loss(
     x1:     (B, T, N, 3) ground-truth trajectory, in model units
     anchor: (B, N, 3) conditioning
     mask:   (B, T, N) bool, True = include in the loss (e.g. visibility)
+    weight: (B, T, N) per-point weight. Used to measure error in units of the
+            metric's threshold rather than metres -- see `apd_weight` in
+            scripts/train.py. None weights every point equally.
     cond:   optional `context` / `visual_mask` / `id_card`, passed straight to
             the model. Absent means the model sees no images.
 
@@ -67,11 +71,10 @@ def flow_matching_loss(
     pred = model(x_k, k, anchor, **cond)
     err = (pred - target).pow(2).mean(dim=-1)  # (B, T, N)
 
-    if mask is not None:
-        denom = mask.sum().clamp(min=1)
-        loss = (err * mask).sum() / denom
-    else:
-        loss = err.mean()
+    w = mask.float() if mask is not None else torch.ones_like(err)
+    if weight is not None:
+        w = w * weight
+    loss = (err * w).sum() / w.sum().clamp(min=1e-8)
 
     return loss, {"loss": loss.detach(), "k_mean": k.mean().detach()}
 

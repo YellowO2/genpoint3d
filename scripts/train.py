@@ -36,9 +36,13 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from genpoint3d.data.cache import CachedClip
-from genpoint3d.eval.metrics import tapvid3d_metrics
+from genpoint3d.eval.metrics import _to_camera_t, tapvid3d_metrics
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
+
+# TAPIP3D clamps depth the same way before dividing, so a point behind the
+# camera or at zero depth cannot produce an enormous weight.
+DEPTH_MIN = 0.1
 
 
 class ClipDataset(Dataset):
@@ -154,6 +158,29 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     return b
 
 
+def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
+    """(B, T, N) weight that puts the loss in units of the APD threshold.
+
+    The metric allows a point an error of `thresh * depth / focal`, so a point
+    20 m away is given ten times the slack of one 2 m away. An unweighted loss
+    does not know that: it spends the same effort on a distant point that was
+    going to pass anyway as on a near point that was always going to fail.
+
+    Dividing the error by `depth / focal` measures it in threshold units
+    instead, which is what TAPIP3D's `scale_loss_by_depth` does
+    (`training/criterion.py:165`, "Normalize to match with the APD metric").
+
+    Normalised to mean 1 over the batch so the loss keeps its magnitude and the
+    learning rate stays comparable across runs -- only the RELATIVE weighting
+    of points is the point here.
+    """
+    gt_cam = _to_camera_t(to_metres(traj, b), b["extrinsics"])
+    depth = gt_cam[..., 2].abs().clamp(min=DEPTH_MIN)                  # (B, T, N)
+    focal = (b["intrinsics"][..., 0, 0] * b["intrinsics"][..., 1, 1]).sqrt()
+    w = focal[..., None] / depth
+    return w / w.mean().clamp(min=1e-8)
+
+
 def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     """(B, T, N, 3) model units -> metres, using each clip's own normalisation.
 
@@ -243,6 +270,9 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                    help="bf16 autocast on CUDA; roughly halves memory and time")
+    # On by default: an unweighted loss optimises something the metric does not
+    # measure. 0 reproduces every run before 2026-09-18.
+    p.add_argument("--depth-scaled-loss", type=int, default=1, choices=[0, 1])
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"],
                    help="scene normalisation; see genpoint3d/data/cache.py")
@@ -303,8 +333,9 @@ def main() -> int:
                                            b["context"], b["id_card"])
             # All-True: pure tracking. Every frame keeps its image.
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+            w = apd_weight(b, traj) if args.depth_scaled_loss else None
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
+                loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
                                              context=ctx, visual_mask=vm, id_card=idc)
 
             opt.zero_grad(set_to_none=True)
