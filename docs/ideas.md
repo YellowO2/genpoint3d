@@ -23,6 +23,20 @@ Decided to skip for now, with the reason.
   elapsed time, so frame rate is baked into the motion prior. Feeding dt
   alongside the noise level would make it frame-rate agnostic.
 
+## To do next
+
+- Walk through what the model actually sees at each denoising step -- which
+  tensors enter, through which path (tokens, AdaLN, cross-attention), and what
+  is shared across the 50 steps versus recomputed. Requested 2026-09-18.
+- Displacement target instead of absolute. TRAJ_SCALE would be 0.0992 rather
+  than 0.8344, measured on 200 clips. Read how TAPIP3D and MotionForesight
+  parameterise and scale it rather than deriving it again. Caveat: per-clip
+  motion std spans 0.021 to 0.320, a 15x range, so a single global scale leaves
+  the slowest clips below check_transform's 0.3 floor.
+- Verify the claim that MolmoMotion's autoregressive variant beats its
+  flow-matching one. If true it is a big deal; it may also be specific to
+  having an LLM backbone and 1.16M videos.
+
 ## Open questions
 
 Undecided. Each needs an experiment, not a discussion.
