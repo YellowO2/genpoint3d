@@ -44,6 +44,8 @@ def flow_matching_loss(
     anchor: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     weight: Optional[torch.Tensor] = None,
+    known_x0: Optional[torch.Tensor] = None,
+    loss_type: str = "l2",
     per_frame_k: bool = False,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
@@ -54,6 +56,14 @@ def flow_matching_loss(
     weight: (B, T, N) per-point weight. Used to measure error in units of the
             metric's threshold rather than metres -- see `apd_weight` in
             scripts/train.py. None weights every point equally.
+    known_x0: (B, N, 3) frame 0's true position, which is NOT unknown -- it is
+            the anchor. Given it, frame 0 is held fixed instead of denoised, and
+            its target velocity is zero, since a pinned coordinate does not
+            move. Every later frame then starts from a correct position rather
+            than inheriting frame 0's error.
+    loss_type: "l2" squares the error, so the worst points dominate; "l21"
+            uses the Euclidean distance, which is what the metric counts and
+            what TAPIP3D uses (`training/criterion.py`, `loss_type: l21`).
     cond:   optional `context` / `visual_mask` / `id_card`, passed straight to
             the model. Absent means the model sees no images.
 
@@ -68,8 +78,16 @@ def flow_matching_loss(
     x_k = (1.0 - k_b) * x0 + k_b * x1
     target = x1 - x0
 
+    if known_x0 is not None:
+        # Frame 0 is given, not inferred. Pin it and ask for zero velocity
+        # there; leaving the target at x1 - x0 would tell the model both "you
+        # are already there" and "move this far", which cannot both be met.
+        x_k = torch.cat([known_x0[:, None], x_k[:, 1:]], dim=1)
+        target = torch.cat([torch.zeros_like(target[:, :1]), target[:, 1:]], dim=1)
+
     pred = model(x_k, k, anchor, **cond)
-    err = (pred - target).pow(2).mean(dim=-1)  # (B, T, N)
+    d = pred - target
+    err = d.norm(dim=-1) if loss_type == "l21" else d.pow(2).mean(dim=-1)  # (B, T, N)
 
     w = mask.float() if mask is not None else torch.ones_like(err)
     if weight is not None:
@@ -86,18 +104,28 @@ def sample(
     num_frames: int,
     steps: int = 50,
     generator: Optional[torch.Generator] = None,
+    known_x0: Optional[torch.Tensor] = None,
     **cond,
 ) -> torch.Tensor:
     """Integrate the velocity field from noise (k=0) to data (k=1).
 
     Plain Euler. The path is straight by construction, so a first-order solver
     is already close to exact -- this is flow matching's main practical win.
+
+    `known_x0` pins frame 0 to its true position at every step, matching how
+    training saw it. Measured on run3493: frame 0 scored APD 0.028 despite the
+    model being handed that exact position as `anchor`, and every later frame
+    inherits the error.
     """
     B, N, _ = anchor.shape
     x = torch.randn(B, num_frames, N, 3, device=anchor.device, generator=generator)
+    if known_x0 is not None:
+        x = torch.cat([known_x0[:, None], x[:, 1:]], dim=1)
 
     dk = 1.0 / steps
     for i in range(steps):
         k = torch.full((B,), i * dk, device=anchor.device)
         x = x + model(x, k, anchor, **cond) * dk
+        if known_x0 is not None:
+            x = torch.cat([known_x0[:, None], x[:, 1:]], dim=1)
     return x

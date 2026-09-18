@@ -134,12 +134,14 @@ def main() -> int:
             print(f"    frame {t:>2}  {v:.4f}  {bar}")
         print(f"\n    frame 0 {per_frame[0]:.4f}  ->  frame {len(per_frame)-1}"
               f" {per_frame[-1]:.4f}")
-        if per_frame[0] < 0.5 * max(per_frame):
-            print("    frame 0 is NOT the best frame -- the model is failing to"
-                  " reproduce a position it was given, so anchoring should help.")
-        else:
-            print("    frame 0 is already the most accurate -- error accumulates"
-                  " over time rather than starting wrong, so anchoring buys little.")
+        # Two separate questions, and comparing frames only answers the second.
+        if per_frame[0] < 0.5:
+            print(f"    frame 0 scores {per_frame[0]:.3f} despite being handed its"
+                  " own position as `anchor`, so pinning it is worth doing --"
+                  " every later frame inherits that error.")
+        if per_frame[-1] < 0.5 * per_frame[0]:
+            print("    the score also decays with time, so error accumulates"
+                  " during the rollout on top of any bad start.")
 
     if m["average_pts_within_thresh"] <= m["apd_baseline"]:
         print("\n  APD is at or below the mean-trajectory baseline -- nothing"

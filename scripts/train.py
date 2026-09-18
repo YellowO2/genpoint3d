@@ -158,6 +158,16 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     return b
 
 
+def known_frame0(b: dict) -> torch.Tensor:
+    """(B, N, 3) frame 0 in model units.
+
+    `anchor` is the same point in scene-normalised units, so this is available
+    at inference exactly as it is in training -- no ground truth is used that a
+    deployed model would not have.
+    """
+    return b["anchor"] / b["norm_traj_scale"][:, None, None]
+
+
 def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     """(B, T, N) weight that puts the loss in units of the APD threshold.
 
@@ -193,7 +203,8 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, steps: int = 50, amp: bool = False) -> dict:
+def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
+             anchor_frame0: bool = False, loss_type: str = "l2") -> dict:
     """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
@@ -218,12 +229,14 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False) -> dict:
                                        b["context"], b["id_card"])
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
 
-        l, _ = flow_matching_loss(model, traj, anchor, mask=vis,
+        kx0 = known_frame0(b) if anchor_frame0 else None
+        l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
+                                  loss_type=loss_type,
                                   context=ctx, visual_mask=vm, id_card=idc)
         loss_sum += l.item(); loss_n += 1
 
         pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                      context=ctx, visual_mask=vm, id_card=idc)
+                      known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc)
 
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
@@ -273,6 +286,14 @@ def main() -> int:
     # On by default: an unweighted loss optimises something the metric does not
     # measure. 0 reproduces every run before 2026-09-18.
     p.add_argument("--depth-scaled-loss", type=int, default=1, choices=[0, 1])
+    # Frame 0 is handed to the model as `anchor` and was still its worst-scoring
+    # frame in absolute terms (APD 0.028 on run3493), so it is pinned rather
+    # than denoised. 0 reproduces the earlier behaviour.
+    p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
+    # l21 is the Euclidean distance, which is what the metric counts. l2 squares
+    # it, so a few catastrophic points dominate -- visible in run3493 as rmse
+    # sitting flat at 0.11 while APD tripled.
+    p.add_argument("--loss-type", default="l21", choices=["l2", "l21"])
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"],
                    help="scene normalisation; see genpoint3d/data/cache.py")
@@ -334,8 +355,10 @@ def main() -> int:
             # All-True: pure tracking. Every frame keeps its image.
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
             w = apd_weight(b, traj) if args.depth_scaled_loss else None
+            kx0 = known_frame0(b) if args.anchor_frame0 else None
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
+                                             known_x0=kx0, loss_type=args.loss_type,
                                              context=ctx, visual_mask=vm, id_card=idc)
 
             opt.zero_grad(set_to_none=True)
@@ -356,7 +379,9 @@ def main() -> int:
 
             if step % args.val_every == 0 or step == args.steps:
                 tv = time.time()
-                m = evaluate(model, val_loader, device, amp=amp)
+                m = evaluate(model, val_loader, device, amp=amp,
+                             anchor_frame0=args.anchor_frame0,
+                             loss_type=args.loss_type)
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
