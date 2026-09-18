@@ -141,16 +141,15 @@ def split(cache: str, val_frac: float, seed: int):
 def to_device(batch: dict, device, amp: bool = False) -> dict:
     """Move a batch, and turn the empty placeholder tensors back into None.
 
-    Cached features are fp16. Under autocast that is what the matmuls want
-    anyway; without it they have to be widened, since an fp16 input to an fp32
-    Linear raises.
+    Cached features are fp16 and are widened here. Leaving them narrow looks
+    like free memory under autocast, but autocast does not reach every module:
+    AdaRMSNorm returns `.to(x.dtype)`, so a half tensor survives into a Linear
+    holding fp32 weights and raises "mat1 and mat2 have different dtype".
+    Revisit only with a measurement, not by reasoning about autocast.
     """
     b = {k: v.to(device) for k, v in batch.items()}
     for k in ("context", "id_card"):
-        if b[k].numel() == 0:
-            b[k] = None
-        elif not amp:
-            b[k] = b[k].float()
+        b[k] = None if b[k].numel() == 0 else b[k].float()
     return b
 
 
