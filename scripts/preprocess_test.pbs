@@ -1,0 +1,38 @@
+#!/bin/bash
+# Build the HELD-OUT TEST cache from sequences 3500+, which training has never
+# seen. Identical settings to preprocess.pbs -- a test set processed differently
+# from the training set would measure the difference, not the model.
+#
+#   qsub -q normal -P personal-yhuang01 scripts/preprocess_test.pbs
+#
+#PBS -N preprocess_test
+#PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
+# 4.0 s/clip measured on a shared A100, so 3500 clips is ~4h. Walltime is a cap,
+# not a reservation -- the job ends when the script does. Over 2h routes to the
+# g1 queue rather than gdev, which can mean a longer wait to start.
+#PBS -l walltime=02:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/preprocess_test.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+# PBS only writes its -o file when the job ENDS. Tee to scratch so
+# progress can be watched live with: tail -f ~/scratch/<name>.live.log
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+mkdir -p $ROOT/cache
+
+python -c "import torch; print('cuda ok:', torch.cuda.is_available())"
+
+python scripts/preprocess.py \
+  --root $ROOT/kubric_test \
+  --out  $ROOT/cache/kubric_test \
+  --features --feat-dim 256 --image-size 384 --points 256
+
+echo "=== PREPROCESS TEST DONE ==="
