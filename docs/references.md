@@ -54,6 +54,34 @@ under the session scratchpad. Re-clone with `git clone --depth 1` if gone:
 ---
 
 
+## Published numbers, and why none is like-for-like
+
+Nobody publishes a sparse 3D point-tracking number on Kubric, so these are the
+nearest comparisons rather than targets we are directly behind.
+
+| | task | metric | score |
+| --- | --- | --- | --- |
+| 4RC | Kubric, DENSE per-pixel, Sim(3)-aligned | APD | 85.44 |
+| V-DPM | same | APD | 71.12 |
+| TraceAnything | same | APD | 59.98 |
+| St4RTrack | same | APD | 50.65 |
+| TAPIP3D | LSFOdyssey, synthetic | AJ3D | 72.2 |
+| TAPIP3D | TAPVid-3D, real | AJ3D | ~30 |
+| TAPIR | TAP-Vid-Kubric, 2D | delta_avg | 93.99 |
+
+4RC's Kubric protocol differs from ours in three ways that all favour it: dense
+per-pixel rather than sparse query points, global Sim(3) alignment by RANSAC
+rather than median rescaling, and a threshold their paper does not state. Use
+it to judge the scale of the number, not the size of the gap.
+
+AJ is stricter than APD -- it also requires the visibility prediction to be
+right -- so a method's APD is always at or above its AJ.
+
+sota2.com hosts a leaderboard for the 4RC Kubric benchmark but reports 4RC at
+APD 55.38 where the paper says 85.44. Do not cite it.
+
+---
+
 ## The FYP paper (target to extend to 3D)
 - **Generative Point Tracking and Forecasting** — Lu, Cao, Feng, Owens. CVPR 2026.
   - Paper: https://openaccess.thecvf.com/content/CVPR2026/html/Lu_Generative_Point_Tracking_and_Forecasting_CVPR_2026_paper.html
