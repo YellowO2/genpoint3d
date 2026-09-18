@@ -23,79 +23,62 @@
       <div id="left">
         <pre class="mermaid">
 flowchart TD
+    video["`RGB video
+    + depth + pose`"]
+    noisy["`Noisy trajectory
+    T x N x 3, pure noise at the start`"]
     query["`Query points
     2D pixel + frame index`"]
 
-    video["`RGB video
-    depth + camera pose`"]
-
-    noisy["`Noisy trajectory x
-    T x N x 3, pure noise at the start`"]
-
-    prep["`**✅ [0] Data prep** - /data
-    reframe, normalise, scale the Input data for easier model learning`"]
-
-    enc["`**⬜ [1] Encoder** - models/encoder.py
-    DINOv3-S for features + Depth model for depth
-    Returns a feature map containing the ID and 3D position of each patch.`"]
-
-    sample["`**⬜ Feature Map Sampled at Q Once**
-    bilinear lookup into C_t once at the query's own frame(i.e. the starting frame)`"]
-
-    mask["`**🟡 Random Masking**
-    C_t → tracking, ∅ → forecasting
-    data/masking.py`"]
-
-    tok["`**✅ [2] Path tokeniser**
-    3D positions → tokens
-    models/model.py`"]
-
-    cond["`**🟡 [3] Conditioning c**
-    🟡 ID card + ✅ Q pos-emb + ✅ noise level k
-    models/model.py`"]
-
-    blocks["`**🟡 [4] DiT blocks × depth ← you are here**
-    ✅ temporal, ✅ spatial, 🟡 cross-attn
-    models/model.py, models/layers.py`"]
-
-    heads["`**🟡 [5] Output heads**
-    🟡 position → xyz, ⬜ visibility
-    models/model.py`"]
+    prep["`**[0] Preprocessing**
+    reframe + normalise`"]
+    enc["`**[1] Visual encoder**
+    DINOv3-S, frozen`"]
+    tok["`**[2] Trajectory tokeniser**`"]
+    cond["`**[3] Query + timestep conditioning**
+    appearance and position at query
+    + noise level`"]
+    cutoff["`**Conditioning cutoff**
+    features before, null after
+    tracking vs forecasting`"]
+    blocks["`**[4] DiT blocks x6**
+    temporal + spatial
+    + point-image`"]
+    heads["`**[5] Output head**
+    position`"]
 
     video --> prep --> enc
-    query -->|"pos-emb of Q"| cond
     noisy --> tok
-    enc -->|"feature map C_t"| sample
-    query --> sample
-    sample -->|"ID card: what am I"| cond
-    enc -->|"feature map C_t"| mask
-    mask -->|"C_t or ∅"| blocks
+    query --> cond
+    enc -->|"feature map"| cond
+    enc -->|"feature map"| cutoff
+    cutoff -->|"features or null"| blocks
     tok --> blocks
-    cond -.->|"AdaLN"| blocks
+    cond -.->|AdaLN| blocks
     blocks --> heads
 
     click prep href "#stage-0"
     click enc href "#stage-1"
-    click sample href "#stage-3"
-    click mask href "#masking"
     click tok href "#stage-2"
     click cond href "#stage-3"
+    click cutoff href "#masking"
     click blocks href "#stage-4"
     click heads href "#stage-5"
 
-    classDef done fill:#c8e6c9,stroke:#4caf50,color:#000
-    classDef untested fill:#fff9c4,stroke:#fbc02d,color:#000
-    classDef todo fill:#eceff1,stroke:#b0bec5,color:#000
-    classDef input fill:#e1f5fe,stroke:#4fc3f7,color:#000
-    classDef switch fill:#f8bbd0,stroke:#e91e63,color:#000
+    classDef done    fill:#e7f3ec,stroke:#4a9d6e,stroke-width:1.5px,color:#153322
+    classDef partial fill:#fdf4e1,stroke:#d4a12c,stroke-width:1.5px,color:#3c2e0b
+    classDef input   fill:#fff,stroke:#c6ccd4,stroke-width:1.5px,stroke-dasharray:4 3,color:#555d68
 
     class video,query,noisy input
-    class prep,tok done
-    class cond,blocks,heads,mask untested
+    class prep,enc,tok,cond,blocks,heads done
+    class cutoff partial
+</pre>
 
-    class enc,sample untested
-</pre
-        >
+        <div class="legend">
+          <span><i class="sw in"></i>input</span>
+          <span><i class="sw ok"></i>implemented and in use</span>
+          <span><i class="sw off"></i>implemented, not in use</span>
+        </div>
       </div>
 
       <div id="right">
@@ -361,16 +344,23 @@ OURS, NOT IN THE PAPER
         securityLevel: "loose",
         theme: "base",
         flowchart: {
-          wrappingWidth: 260,
-          nodeSpacing: 45,
-          rankSpacing: 55,
-          padding: 14,
+          // htmlLabels false renders labels as real SVG text. With htmlLabels
+          // on, mermaid lays them out in a fixed-width foreignObject and long
+          // lines get clipped mid-word rather than widening the box.
+          htmlLabels: false,
+          nodeSpacing: 32,
+          rankSpacing: 52,
+          padding: 13,
         },
         themeVariables: {
           fontFamily: '"IBM Plex Sans", sans-serif',
           fontSize: "14px",
           lineColor: ink,
           textColor: ink,
+          // The nodes are light-filled in both themes (mermaid cannot read CSS
+          // variables), so edge labels must sit on white too or they render as
+          // grey pills against the dark page.
+          edgeLabelBackground: "#ffffff",
         },
       });
 

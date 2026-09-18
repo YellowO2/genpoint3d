@@ -70,3 +70,44 @@ h2 {
 }
 
 .mono { font: 400 12.5px/1.55 "IBM Plex Mono", ui-monospace, monospace; }
+
+/* Legend for the diagram's node colours. The swatch fills are the same
+   literals as the mermaid classDefs, which are light-only by necessity --
+   mermaid cannot read CSS variables -- so they are stated once here too. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  justify-content: center;
+  margin-top: 26px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.legend span { display: flex; align-items: center; gap: 8px; }
+.sw {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1.5px solid;
+}
+.sw.in  { background: #fff;     border-color: #c6ccd4; border-style: dashed; }
+.sw.ok  { background: #e7f3ec;  border-color: #4a9d6e; }
+.sw.off { background: #fdf4e1;  border-color: #d4a12c; }
+
+/* Some sections wrap their prose in <pre>. Left alone that is monospace and
+   never wraps, so a long line pushes the whole page sideways. Prose <pre>
+   should behave like the plain-text sections around it. */
+section pre {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  max-width: 68ch;
+}
+/* "Not built yet" is a deliberately aligned table, so it keeps monospace and
+   its own scrollbar rather than being reflowed. */
+#todo pre {
+  font: 400 12.5px/1.55 "IBM Plex Mono", ui-monospace, monospace;
+  white-space: pre;
+  max-width: none;
+  overflow-x: auto;
+}
