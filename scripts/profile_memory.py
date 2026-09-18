@@ -36,6 +36,73 @@ def gb() -> float:
     return torch.cuda.memory_allocated() / GB
 
 
+
+def peak_for(args, device, batch, depth, points, patches) -> float:
+    """Peak GB for one configuration. `patches` slices the context tensor, which
+    is what changing --image-size would do at preprocess time."""
+    clips, _, feat_dim, has_feats = split(args.cache, 0.02, 0)
+    loader = DataLoader(ClipDataset(clips, points), batch_size=batch,
+                        shuffle=True, num_workers=4, drop_last=True)
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    model = PointDiT(dim=args.dim, depth=depth, num_heads=args.heads,
+                     cross_attn=has_feats, feat_dim=feat_dim).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    amp = not args.no_amp and torch.cuda.is_bf16_supported()
+
+    it = iter(loader)
+    for _ in range(2):                       # first step allocates, second is real
+        b = to_device(next(it), device, amp)
+        traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
+        ctx, idc = b["context"], b["id_card"]
+        if ctx is not None and patches < ctx.shape[2]:
+            ctx = ctx[:, :, :patches].contiguous()
+        vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
+                                         context=ctx, visual_mask=vm, id_card=idc)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+
+    peak = torch.cuda.max_memory_allocated() / GB
+    del model, opt, loader
+    return peak
+
+
+def sweep(args, device) -> int:
+    """Halve one dimension at a time. Whatever memory follows is the driver.
+
+    If halving X halves memory, the cost is linear in X. If it barely moves,
+    X is not where the memory is -- which is a far more direct answer than
+    reading cumulative allocation totals, since those count every temporary
+    ever made rather than what is resident at the peak.
+    """
+    base = dict(batch=args.batch, depth=args.depth,
+                points=args.points, patches=576)
+    print(f"{torch.cuda.get_device_name(0)}\n")
+    print(f"{'config':<28} {'peak GB':>9} {'vs base':>9}")
+
+    ref = peak_for(args, device, **base)
+    print(f"{'base ' + str(base):<28} {ref:>9.2f} {'--':>9}")
+
+    for key in ("batch", "depth", "points", "patches"):
+        cfg = dict(base)
+        cfg[key] = max(1, base[key] // 2)
+        try:
+            pk = peak_for(args, device, **cfg)
+        except torch.OutOfMemoryError:
+            print(f"{'half ' + key:<28}   OOM")
+            torch.cuda.empty_cache()
+            continue
+        print(f"{'half ' + key + f' -> {cfg[key]}':<28} {pk:>9.2f} {pk / ref:>8.2f}x")
+
+    print("\n~0.50x means memory is linear in that dimension and it is a driver.")
+    print("~1.00x means it is not where the memory is.")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--cache", required=True)
@@ -47,12 +114,17 @@ def main() -> int:
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--trace", type=Path, default=None,
                    help="also write a chrome trace here")
+    p.add_argument("--sweep", action="store_true",
+                   help="halve one dimension at a time and report peak")
     args = p.parse_args()
 
     if not torch.cuda.is_available():
         raise SystemExit("needs a GPU -- submit this as a job")
 
     device = torch.device("cuda")
+    if args.sweep:
+        return sweep(args, device)
+
     clips, _, feat_dim, has_feats = split(args.cache, 0.02, 0)
     loader = DataLoader(ClipDataset(clips, args.points), batch_size=args.batch,
                         shuffle=True, num_workers=4, drop_last=True)
