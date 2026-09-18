@@ -1,0 +1,39 @@
+#!/bin/bash
+# Score a checkpoint on the held-out TEST cache (sequences 3500+).
+#
+#   qsub -q normal -P personal-yhuang01 scripts/evaluate.pbs
+#   qsub -v CKPT=outputs/run3493/ckpt.pt -q normal -P personal-yhuang01 scripts/evaluate.pbs
+#
+# Needs a GPU: scoring runs the 50-step sampler for every clip. Under 2h and one
+# GPU routes to gdev, which usually starts quickly.
+#
+#PBS -N evaluate
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+# 300 clips at batch 16 is ~19 batches of 50 sampling steps -- minutes, not
+# hours. Walltime is a cap, not a reservation.
+#PBS -l walltime=01:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/evaluate.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+
+# best.pt was selected on the VAL split, so its val APD is mildly optimistic.
+# This cache chose nothing, which is what makes its number reportable.
+CKPT=${CKPT:-outputs/run3493/best.pt}
+
+python scripts/evaluate.py \
+  --ckpt "$CKPT" \
+  --cache $ROOT/cache/kubric_test \
+  --out "$(dirname "$CKPT")/test_metrics.json"
+
+echo "=== EVALUATE DONE ==="
