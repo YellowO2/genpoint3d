@@ -158,6 +158,40 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     return b
 
 
+class EMA:
+    """A slowly-following copy of the weights, used for evaluation.
+
+    SGD leaves the weights jittering around a minimum rather than sitting in
+    it, and an average over recent steps lands closer to the middle than any
+    single step does. Diffusion models gain more from this than most, and the
+    paper lists EMA among its training ingredients (section 4.1).
+
+    `decay` warms up: averaging over 1000 steps is meaningless at step 10, when
+    the initialisation would still dominate.
+    """
+
+    def __init__(self, model, decay: float = 0.999):
+        self.decay = decay
+        self.n = 0
+        self.shadow = {k: v.detach().clone().float()
+                       for k, v in model.state_dict().items()
+                       if v.dtype.is_floating_point}
+
+    @torch.no_grad()
+    def update(self, model):
+        self.n += 1
+        d = min(self.decay, (1 + self.n) / (10 + self.n))
+        for k, v in model.state_dict().items():
+            if k in self.shadow:
+                self.shadow[k].lerp_(v.detach().float(), 1 - d)
+
+    def state_dict(self, model) -> dict:
+        """The averaged weights, in the model's own dtypes."""
+        sd = model.state_dict()
+        return {k: (self.shadow[k].to(v.dtype) if k in self.shadow else v.clone())
+                for k, v in sd.items()}
+
+
 def known_frame0(b: dict) -> torch.Tensor:
     """(B, N, 3) frame 0 in model units.
 
@@ -290,6 +324,9 @@ def main() -> int:
     # frame in absolute terms (APD 0.028 on run3493), so it is pinned rather
     # than denoised. 0 reproduces the earlier behaviour.
     p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
+    # Evaluate and checkpoint the averaged weights, not the jittering ones.
+    # 0 disables. The paper lists EMA among its training ingredients.
+    p.add_argument("--ema", type=float, default=0.999)
     # l21 is the Euclidean distance, which is what the metric counts. l2 squares
     # it, so a few catastrophic points dominate -- visible in run3493 as rmse
     # sitting flat at 0.11 while APD tripled.
@@ -328,6 +365,7 @@ def main() -> int:
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
+    ema = EMA(model, args.ema) if args.ema > 0 else None
     warmup = max(1, int(args.steps * args.warmup_frac))
     warm = torch.optim.lr_scheduler.LinearLR(opt, 0.01, 1.0, warmup)
     cos = torch.optim.lr_scheduler.CosineAnnealingLR(opt, args.steps - warmup)
@@ -365,6 +403,8 @@ def main() -> int:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            if ema is not None:
+                ema.update(model)
             sched.step()
 
             running += loss.item()
@@ -379,6 +419,13 @@ def main() -> int:
 
             if step % args.val_every == 0 or step == args.steps:
                 tv = time.time()
+                # Score the averaged weights, which are also what gets saved --
+                # evaluating the live weights and shipping the EMA ones would
+                # report a number for a checkpoint nobody has.
+                live = None
+                if ema is not None:
+                    live = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                    model.load_state_dict(ema.state_dict(model))
                 m = evaluate(model, val_loader, device, amp=amp,
                              anchor_frame0=args.anchor_frame0,
                              loss_type=args.loss_type)
@@ -403,6 +450,9 @@ def main() -> int:
                     best = m["average_pts_within_thresh"]
                     torch.save(ckpt, out / "best.pt")
                     print(f"       new best APD {best:.3f}", flush=True)
+
+                if live is not None:
+                    model.load_state_dict(live)   # training continues on the live weights
 
     print(f"\ndone in {(time.time() - t0) / 60:.1f} min -> {out}", flush=True)
     return 0
