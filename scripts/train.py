@@ -36,6 +36,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from genpoint3d.data.cache import CachedClip
+from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.eval.metrics import _to_camera_t, tapvid3d_metrics
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
@@ -60,11 +61,26 @@ class ClipDataset(Dataset):
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
-                 norm_mode: str = "median"):
+                 norm_mode: str = "median", target: str = "absolute"):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         # The cache holds metres; normalisation happens here, so switching
         # scheme is a flag rather than hours of reprocessing.
         self.norm_mode = norm_mode
+        # "absolute" denoises where each point IS. "displacement" denoises how
+        # far each point has moved from ITS OWN frame-0 position.
+        #
+        # Measured per clip: absolute std 0.59, one-shared-anchor 0.49,
+        # per-point 0.08. Only per-point removes the static layout, which is
+        # 86% of an absolute target's magnitude and which the model was already
+        # told via `anchor`. MolmoMotion subtracts one shared anchor instead,
+        # but it emits coordinates as text in a single frame and needs them
+        # mutually comparable; we do not. TAPIP3D and Tesfaldet's model both
+        # use per-point displacement from the query.
+        #
+        # The layout is not lost: `anchor` stays absolute and is what spatial
+        # RoPE reads, so where points sit relative to each other is unaffected.
+        self.target = target
+        self.traj_scale = TRAJ_SCALE_DISP if target == "displacement" else TRAJ_SCALE
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -75,7 +91,16 @@ class ClipDataset(Dataset):
             c = torch.load(c, weights_only=False)
         clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
 
-        traj, anchor = clip.normalised(self.norm_mode)
+        # traj_scale=1.0 leaves both in scene-normalised units, so the offset
+        # below is subtracted before the target is scaled, not after.
+        n = clip.norm(self.norm_mode, traj_scale=1.0)
+        traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
+        if self.target == "displacement":
+            offset = traj[:1].clone()          # (1, N, 3), each point's own start
+            traj = traj - offset
+        else:
+            offset = torch.zeros_like(traj[:1])
+        traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
         n = traj.shape[1]
@@ -83,6 +108,7 @@ class ClipDataset(Dataset):
             idx = (torch.randperm(n)[: self.num_points] if self.resample
                    else torch.arange(self.num_points))
             traj, anchor, vis = traj[:, idx], anchor[idx], vis[:, idx]
+            offset = offset[:, idx]
             if id_card is not None:
                 id_card = id_card[idx]
 
@@ -95,7 +121,7 @@ class ClipDataset(Dataset):
         # only for autocast to cast it straight back down. `to_device` restores
         # fp32 when autocast is off.
         ctx = clip.context
-        norm = clip.norm(self.norm_mode)
+        norm = clip.norm(self.norm_mode, traj_scale=self.traj_scale)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis,
             "context": ctx if ctx is not None else torch.zeros(0),
@@ -106,6 +132,10 @@ class ClipDataset(Dataset):
             "norm_mean": norm.mean,
             "norm_scale": norm.scale,
             "norm_traj_scale": norm.traj_scale,
+            # (1, N, 3) scene-normalised per-point origin; zeros when the
+            # target is absolute, so `to_metres` inverts both with one
+            # expression.
+            "norm_offset": offset,
         }
 
 
@@ -223,7 +253,9 @@ def known_frame0(b: dict) -> torch.Tensor:
     at inference exactly as it is in training -- no ground truth is used that a
     deployed model would not have.
     """
-    return b["anchor"] / b["norm_traj_scale"][:, None, None]
+    # With a per-point displacement target frame 0 is exactly zero, which this
+    # expression produces without special-casing: anchor IS each point's origin.
+    return (b["anchor"] - b["norm_offset"][:, 0]) / b["norm_traj_scale"][:, None, None]
 
 
 def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
@@ -256,8 +288,10 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     its own scale, which is exactly why a threshold in model units meant a
     different physical distance per clip.
     """
-    scale = (b["norm_scale"] * b["norm_traj_scale"])[:, None, None, None]
-    return pts * scale + b["norm_mean"][:, None, None, :]
+    ts = b["norm_traj_scale"][:, None, None, None]
+    scale = b["norm_scale"][:, None, None, None]
+    scene = pts * ts + b["norm_offset"]                    # undo the target offset
+    return scene * scale + b["norm_mean"][:, None, None, :]
 
 
 @torch.no_grad()
@@ -355,6 +389,9 @@ def main() -> int:
     # it, so a few catastrophic points dominate -- visible in run3493 as rmse
     # sitting flat at 0.11 while APD tripled.
     p.add_argument("--loss-type", default="l21", choices=["l2", "l21"])
+    p.add_argument("--target", default="absolute",
+                   choices=["absolute", "displacement"],
+                   help="what the model denoises towards; see ClipDataset")
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"],
                    help="scene normalisation; see genpoint3d/data/cache.py")
@@ -376,14 +413,31 @@ def main() -> int:
           f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
 
     train_loader = DataLoader(
-        ClipDataset(train_clips, args.points, norm_mode=args.norm_mode),
+        ClipDataset(train_clips, args.points, norm_mode=args.norm_mode,
+                    target=args.target),
         batch_size=args.batch, shuffle=True, num_workers=args.workers,
         drop_last=True, persistent_workers=args.workers > 0,
     )
     val_loader = DataLoader(
-        ClipDataset(val_clips, args.points, resample=False, norm_mode=args.norm_mode),
+        ClipDataset(val_clips, args.points, resample=False,
+                    norm_mode=args.norm_mode, target=args.target),
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     )
+
+    # The denoising target must sit near unit variance: flow matching mixes it
+    # with x0 ~ N(0, I), and a target far below 1 teaches the model to output
+    # -x0 while the loss still falls. That failure is silent, so check it once
+    # against a real batch rather than trusting the constant.
+    probe = next(iter(train_loader))
+    tstd = probe["traj"][probe["visibility"]].std().item()
+    print(f"target std {tstd:.3f} ({args.target}, TRAJ_SCALE"
+          f" {train_loader.dataset.traj_scale})", flush=True)
+    if not 0.3 < tstd < 3.0:
+        raise SystemExit(
+            f"target std {tstd:.3f} is outside [0.3, 3.0] -- recalibrate with\n"
+            f"  python scripts/calibrate_traj_scale.py --cache {args.cache}"
+            f" --target {args.target}")
+    del probe
 
     model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
                      cross_attn=has_feats, feat_dim=feat_dim).to(device)

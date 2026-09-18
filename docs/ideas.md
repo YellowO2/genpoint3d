@@ -28,16 +28,6 @@ Decided to skip for now, with the reason.
 - Walk through what the model actually sees at each denoising step -- which
   tensors enter, through which path (tokens, AdaLN, cross-attention), and what
   is shared across the 50 steps versus recomputed. Requested 2026-09-18.
-- Displacement target instead of absolute, measured from ONE anchor rather than
-  per point. MolmoMotion uses `delta[t][n] = p[t][n] - p_anc`, where `p_anc` is
-  the first query point at frame 0 -- a single reference for the whole clip.
-  Subtracting each point's own start instead would move every point to the
-  origin and destroy the spatial layout, so the model could no longer tell a
-  compact object from a spread-out scene. Scene position goes, geometry stays.
-  TRAJ_SCALE would be 0.0992 rather than 0.8344, measured on 200 clips.
-  Caveat: per-clip motion std spans 0.021 to 0.320, a 15x range, so one global
-  scale leaves the slowest clips under check_transform's 0.3 floor -- absolute
-  targets hide that spread because scene position dominates them.
 - Temporal consistency. MolmoMotion's autoregressive variant beats its own
   flow-matching one (HOT3D: ADE 0.109 vs 0.135, FDE 0.217 vs 0.255, PWT 0.444
   vs 0.382), and their stated reason is that conditioning on previously
