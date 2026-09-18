@@ -49,6 +49,16 @@ Decided to skip for now, with the reason.
   them. Rollout training inside flow matching addresses the same gap; genpt
   does it with `num_refinement_steps_train: 4`.
 
+## Tried and rejected
+
+- Caching cross-attention keys and values across denoising steps. The feature
+  map never changes, so the 6 blocks rebuild identical k/v on all 50 steps --
+  8% of a forward pass by micro-benchmark. Implemented, verified bit-identical,
+  and measured 9.4% SLOWER. The micro-benchmark counted the saved matmul and
+  ignored that caching keeps 6 x (k, v) resident, ~2.7 GB at batch 16. The
+  operation is memory-bandwidth-bound, not compute-bound. Reverted. Might win
+  on a GPU, but not worth the code or the VRAM without a measurement there.
+
 ## Open questions
 
 Undecided. Each needs an experiment, not a discussion.
