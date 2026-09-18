@@ -44,8 +44,21 @@ def zero_init(layer: nn.Linear, almost: bool = True) -> nn.Linear:
 
 
 def rms_norm(x: torch.Tensor, scale: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    mean_sq = x.float().pow(2).mean(dim=-1, keepdim=True)
-    return (x.float() * scale.float() * torch.rsqrt(mean_sq + eps)).to(x.dtype)
+    """RMSNorm that does not undo autocast.
+
+    The obvious spelling upcasts `x` itself -- `x.float() * scale.float() *
+    rsqrt(...)` -- which under bf16 autocast materialises three full-size fp32
+    copies of the input. On the context tensor, 226 MB per batch of 16, that ran
+    once per cross block and dominated the step's memory.
+
+    `mean(dtype=torch.float32)` accumulates the reduction in fp32 without
+    materialising an fp32 copy, which is the part that actually needs the
+    precision. The reciprocal is a single scalar per row, so scaling stays in
+    the input dtype.
+    """
+    mean_sq = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
+    inv = torch.rsqrt(mean_sq + eps).to(x.dtype)     # (..., 1), cheap
+    return x * inv * scale.to(x.dtype)
 
 
 class RMSNorm(nn.Module):
