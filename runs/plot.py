@@ -30,15 +30,11 @@ def main() -> int:
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
     colours = plt.cm.viridis([i / max(len(runs) - 1, 1) * 0.75 for i in range(len(runs))])
 
-    for i, ((name, e), c) in enumerate(zip(runs, colours)):
+    for (name, e), c in zip(runs, colours):
         s = [x["step"] for x in e]
         ax[0].plot(s, [x["average_pts_within_thresh"] for x in e],
                    marker="o", ms=3, color=c, label=name)
-        # The benchmark's Static Baseline, if the run recorded it: a flat line
-        # a tracker has to clear. Drawn once -- it does not depend on training.
-        if i == 0 and "apd_static" in e[0]:
-            ax[0].axhline(e[0]["apd_static"], ls=":", c="grey", lw=1,
-                          label="static baseline")
+
         # Solid train, dashed val: the gap between a pair is the overfitting.
         ax[1].plot(s, [x["train_loss"] for x in e], color=c, label=f"{name} train")
         ax[1].plot(s, [x["val_loss"] for x in e], color=c, ls="--", label=f"{name} val")
@@ -50,6 +46,18 @@ def main() -> int:
         a.set_xlabel("step")
         a.grid(alpha=.3)
         a.legend(fontsize=8)
+
+    # TAPVid-3D's Static Baseline: a flat line every run has to clear. Measured
+    # once by scripts/static_baseline.py -- it is a property of the data, not of
+    # training -- and read from a run's own log if it recorded one.
+    static = next((e[0]["apd_static"] for _, e in runs if "apd_static" in e[0]), None)
+    if static is None:
+        f = args.out.parent / "static_baseline.json"
+        if f.exists():
+            static = json.loads(f.read_text())["average_pts_within_thresh"]
+    if static is not None:
+        ax[0].axhline(static, ls=":", c="grey", lw=1.2, label="static baseline")
+        ax[0].legend(fontsize=8)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=140)
