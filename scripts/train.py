@@ -6,9 +6,9 @@ This is the opposite question -- does the model learn anything that transfers
 to clips it has never seen?
 
 The metric that matters is APD on the VAL split -- `average_pts_within_thresh`
-from the TAP-Vid-3D benchmark, scored in metres. `apd_baseline` is the same
-measure applied to the mean trajectory, so a model that has learnt nothing
-scores about the same as its baseline.
+from the TAP-Vid-3D benchmark, scored in metres. `apd_static` is the
+benchmark's own Static Baseline -- the query point assumed never to move --
+which is the bar a tracker has to clear.
 
 With a feature cache this trains pure TRACKING: every frame keeps its image, so
 `visual_mask` is all-True and the null embedding is never used. Masking is
@@ -306,10 +306,10 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
               papers report. AJ and OA need a visibility prediction, so they
               appear only once the visibility head exists.
 
-    `apd_baseline` scores the mean trajectory with the SAME metric, which
-    answers the question the old homemade `ratio` existed for -- is this better
-    than predicting nothing -- without inventing a second unit that no paper
-    shares and that is easy to report by mistake.
+    `apd_static` is the benchmark's own Static Baseline (TAPVid-3D, table 3):
+    take the query point's 3D position and assume it never moves. That is a
+    real bar rather than a formality -- it scores 9.4 there, above TAPIR-3D's
+    5.9 and not far below SpatialTracker's 15.5.
     """
     model.eval()
     loss_sum = loss_n = 0.0
@@ -335,8 +335,10 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         gt_m = to_metres(traj, b)
         score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"], b["extrinsics"])
         m = score(to_metres(pred, b))
-        m["apd_baseline"] = score(
-            gt_m.mean(dim=(1, 2), keepdim=True).expand_as(gt_m)
+        # Static Baseline: each point stays where it started. Free -- no
+        # sampling -- and the number a reader will ask for first.
+        m["apd_static"] = score(
+            gt_m[:, :1].expand_as(gt_m)
         )["average_pts_within_thresh"]
 
         for k, v in m.items():
@@ -511,7 +513,7 @@ def main() -> int:
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
-                      f"  (baseline {m['apd_baseline']:.3f})"
+                      f"  (static {m['apd_static']:.3f})"
                       f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step,
                             "train_loss": since_val / max(since_val_n, 1), **m})

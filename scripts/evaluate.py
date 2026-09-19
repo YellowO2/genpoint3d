@@ -121,7 +121,7 @@ def main() -> int:
     m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
-    for k in ("average_pts_within_thresh", "apd_baseline", "val_loss"):
+    for k in ("average_pts_within_thresh", "apd_static", "val_loss"):
         print(f"  {k:<26} {m[k]:.4f}")
     print()
     for t in (1, 2, 4, 8, 16):
@@ -143,9 +143,9 @@ def main() -> int:
             print("    the score also decays with time, so error accumulates"
                   " during the rollout on top of any bad start.")
 
-    if m["average_pts_within_thresh"] <= m["apd_baseline"]:
-        print("\n  APD is at or below the mean-trajectory baseline -- nothing"
-              " generalised to unseen clips.")
+    if m["average_pts_within_thresh"] <= m["apd_static"]:
+        print("\n  APD is at or below the static baseline -- assuming the points"
+              " never move would score as well as this model.")
 
     if args.out:
         Path(args.out).write_text(json.dumps(

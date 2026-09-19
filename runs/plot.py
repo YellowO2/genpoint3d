@@ -30,10 +30,15 @@ def main() -> int:
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
     colours = plt.cm.viridis([i / max(len(runs) - 1, 1) * 0.75 for i in range(len(runs))])
 
-    for (name, e), c in zip(runs, colours):
+    for i, ((name, e), c) in enumerate(zip(runs, colours)):
         s = [x["step"] for x in e]
         ax[0].plot(s, [x["average_pts_within_thresh"] for x in e],
                    marker="o", ms=3, color=c, label=name)
+        # The benchmark's Static Baseline, if the run recorded it: a flat line
+        # a tracker has to clear. Drawn once -- it does not depend on training.
+        if i == 0 and "apd_static" in e[0]:
+            ax[0].axhline(e[0]["apd_static"], ls=":", c="grey", lw=1,
+                          label="static baseline")
         # Solid train, dashed val: the gap between a pair is the overfitting.
         ax[1].plot(s, [x["train_loss"] for x in e], color=c, label=f"{name} train")
         ax[1].plot(s, [x["val_loss"] for x in e], color=c, ls="--", label=f"{name} val")
