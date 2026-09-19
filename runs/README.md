@@ -9,5 +9,6 @@ better.
 | --- | --- | --- | --- | --- | --- |
 | `run3493` | `cabc639` | 30000 | 0.0516 | 0.0105 | first full-dataset run, 3144 train clips |
 | `run3493_apdloss` | `0796ab2` | 30000 | 0.2100 | — | depth weighted loss + frame 0 starting pinned + l21 instead of l2 |
+| `run3493_disp` | `ef50476` | 30000 | 0.2487 | — | per-point displacement target instead of absolute |
 
 `compare.png` overlays every run: `python scripts/plot_runs.py runs/*.json`
