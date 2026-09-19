@@ -4,7 +4,10 @@ Overlay several runs' `log.json` on shared axes.
 `plot_log.py` draws a single run. A run is only interpretable against the one
 it changed, so comparisons need them on the same axes.
 
-Run:  python scripts/plot_runs.py runs/run3493.json runs/run3493_apdloss.json
+Runs are labelled by position, so the legend stays readable as names grow;
+the table in README.md maps each number to what changed.
+
+Run:  python runs/plot.py runs/*.json
 """
 
 import argparse
@@ -22,7 +25,8 @@ def main() -> int:
     p.add_argument("--out", type=Path, default=Path("runs/compare.png"))
     args = p.parse_args()
 
-    runs = [(f.stem, json.loads(f.read_text())) for f in args.logs]
+    runs = [(f"run {i}", json.loads(f.read_text()))
+            for i, f in enumerate(args.logs, 1)]
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
     colours = plt.cm.viridis([i / max(len(runs) - 1, 1) * 0.75 for i in range(len(runs))])
 
@@ -46,10 +50,10 @@ def main() -> int:
     fig.savefig(args.out, dpi=140)
     print(f"wrote {args.out}")
 
-    for name, e in runs:
+    for (name, e), f in zip(runs, args.logs):
         best = max(e, key=lambda x: x["average_pts_within_thresh"])
-        print(f"  {name:22} best APD {best['average_pts_within_thresh']:.4f}"
-              f" at step {best['step']}")
+        print(f"  {name}  {f.stem:22} best APD "
+              f"{best['average_pts_within_thresh']:.4f} at step {best['step']}")
     return 0
 
 
