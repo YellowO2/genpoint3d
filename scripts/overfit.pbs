@@ -14,8 +14,12 @@
 #PBS -N overfit
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
 # 2 clips, batch 2, 2000 steps, validating every 100 on those same 2 clips.
-# Minutes on an A100; the hour is slack so a shared GPU cannot kill it.
-#PBS -l walltime=01:00:00
+# Minutes on an A100. Walltime is a cap, not a reservation, so the hours cost
+# nothing -- and asking for only one routed the job to `gdev`, whose overall
+# ngpus limit was saturated ("would exceed overall limit on resource ngpus").
+# Short jobs land in the development queue, which has far fewer GPUs than
+# `normal`, so asking for LESS time made it schedule slower, not faster.
+#PBS -l walltime=04:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
