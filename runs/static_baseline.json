@@ -1,12 +1,12 @@
 {
-  "cache": "~/scratch/cache/kubric",
+  "cache": "/home/users/ntu/yhuang01/scratch/cache/kubric",
   "clips": 100,
   "val_frac": 0.1,
   "seed": 0,
-  "pts_within_1": 0.0970,
-  "pts_within_2": 0.1197,
-  "pts_within_4": 0.1618,
-  "pts_within_8": 0.2914,
-  "pts_within_16": 0.4181,
-  "average_pts_within_thresh": 0.2176
+  "pts_within_1": 0.09704981893446529,
+  "pts_within_2": 0.11973763842667852,
+  "pts_within_4": 0.1618119987542741,
+  "pts_within_8": 0.29136720086847034,
+  "pts_within_16": 0.41809537368161337,
+  "average_pts_within_thresh": 0.2176124027797154
 }
