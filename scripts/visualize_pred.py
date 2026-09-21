@@ -39,7 +39,7 @@ from genpoint3d.models.model import PointDiT
 from genpoint3d.models.flow import sample as flow_sample
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.viz import rerun_log as rl
-from train import ClipDataset, known_frame0, to_device, to_metres
+from train import ClipDataset, known_frame0, split, to_device, to_metres
 
 GT, PRED = (0.2, 0.9, 0.3), (0.95, 0.25, 0.2)
 
@@ -64,9 +64,18 @@ def main() -> int:
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available() else "cpu")
 
-    clips = sorted(Path(args.cache).glob("*.pt"))
+    # An --overfit checkpoint memorised (train + val)[:N] of a SEEDED
+    # PERMUTATION, which is not the first N files on disk. Picking by filename
+    # would draw clips the model never saw and call the result memorisation.
+    if targs.get("overfit"):
+        tr, va, _, _ = split(args.cache, targs["val_frac"], targs["seed"])
+        clips = (tr + va)[: targs["overfit"]]
+        print(f"overfit checkpoint: showing one of the {len(clips)} clips it"
+              " was trained on", flush=True)
+    else:
+        clips = sorted(Path(args.cache).glob("*.pt"))
     if args.clip:
-        clips = [c for c in clips if c.stem == args.clip] or clips[:1]
+        clips = [c for c in clips if Path(c).stem == args.clip] or clips[:1]
     clips = clips[:1]
     probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False, mmap=True))
     seq_id = probe.seq_id
