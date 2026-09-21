@@ -12,7 +12,7 @@ scratchpad. Add a row rather than re-scraping.
 | **TAPIP3D** | world (depth+pose lifted) | no | no | displacement fwd+bwd | absolute (iterative) | no, regression |
 | **MotionForesight** | frozen **last-observed** cam | **yes** | **no** | absolute pointmaps | **residual from frame-0** | video diffusion, 1-step |
 | **MolmoMotion** | frozen **frame-0** cam (`t0`) | yes | yes | text tokens | absolute | autoregressive LLM |
-| **ours** | frozen **frame-0** cam | yes | yes | absolute (← odd one out) | absolute | flow matching |
+| **ours** | frozen **frame-0** cam | yes | yes | absolute (← odd one out) | **displacement from frame-0** | flow matching |
 
 **Two meanings of "causal", do not confuse them.**
 *Task-causal* = the future is not in the input at all. *Attention-causal* = a

@@ -93,8 +93,15 @@ def log_trajectory(
     visibs: np.ndarray,
     track_len: int = 8,
     cmap_name: str = "rainbow",
+    color: Optional[tuple] = None,
 ) -> None:
-    """trajs: (T, N, 3) world points. visibs: (T, N) bool. intrinsics/extrinsics: (T, 3, 3) / (T, 4, 4)."""
+    """trajs: (T, N, 3) world points. visibs: (T, N) bool. intrinsics/extrinsics: (T, 3, 3) / (T, 4, 4).
+
+    `color` overrides the per-point rainbow with one solid RGB(A) for every
+    point. Two tracks logged into the same entity are only tellable apart if
+    they are coloured differently, so an overlay of prediction on ground truth
+    needs it -- the rainbow is keyed on initial height, which both share.
+    """
     num_frames, num_points, _ = trajs.shape
 
     intrinsics_t, extrinsics_t, trajs_t = torch.from_numpy(intrinsics), torch.from_numpy(extrinsics), torch.from_numpy(trajs)
@@ -104,8 +111,12 @@ def log_trajectory(
         torch.repeat_interleave(extrinsics_t, num_points, dim=0),
     ).reshape(num_frames, num_points, 2).numpy()
 
-    cmap = matplotlib.colormaps[cmap_name]
-    colors = cmap(matplotlib.colors.Normalize()(trajs[0, :, 1]))  # color by initial height
+    if color is None:
+        cmap = matplotlib.colormaps[cmap_name]
+        colors = cmap(matplotlib.colors.Normalize()(trajs[0, :, 1]))  # color by initial height
+    else:
+        rgba = list(color) + [1.0] * (4 - len(color))
+        colors = np.tile(np.asarray(rgba, dtype=float), (num_points, 1))
 
     for i in range(num_frames):
         rerun.set_time("frameid", sequence=i)

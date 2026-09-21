@@ -397,6 +397,10 @@ def main() -> int:
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"],
                    help="scene normalisation; see genpoint3d/data/cache.py")
+    p.add_argument("--overfit", type=int, default=0,
+                   help="diagnostic: train AND validate on the first N clips. "
+                        "APD should reach ~100%%; if it plateaus, the pipeline "
+                        "has a bug rather than a data problem")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -411,7 +415,14 @@ def main() -> int:
 
     commit = git_commit()
     train_clips, val_clips, feat_dim, has_feats = split(args.cache, args.val_frac, args.seed)
+    if args.overfit:
+        # Diagnostic, not a run: the same clips in both halves, so val measures
+        # memorisation rather than generalisation. Overfitting a handful of
+        # clips is the easiest thing a network does, so failing here means a
+        # bug in the pipeline -- no data or capacity excuse is available.
+        train_clips = val_clips = (train_clips + val_clips)[: args.overfit]
     print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips"
+          f"{' | OVERFIT (train == val)' if args.overfit else ''}"
           f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
 
     train_loader = DataLoader(
