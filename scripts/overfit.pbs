@@ -14,12 +14,18 @@
 #PBS -N overfit
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
 # 2 clips, batch 2, 2000 steps, validating every 100 on those same 2 clips.
-# Minutes on an A100. Walltime is a cap, not a reservation, so the hours cost
-# nothing -- and asking for only one routed the job to `gdev`, whose overall
-# ngpus limit was saturated ("would exceed overall limit on resource ngpus").
-# Short jobs land in the development queue, which has far fewer GPUs than
-# `normal`, so asking for LESS time made it schedule slower, not faster.
-#PBS -l walltime=04:00:00
+# Minutes on an A100 -- measured 0.44 s/it at batch 16 / 128 points, and this
+# is batch 2.
+#
+# Walltime picks the QUEUE here, and short is better. Under about an hour the
+# job routes to `gdev`, over it to `g1`. gdev looks worse on paper (67 queued
+# against 13 running vs g1's 39/36) but every job in it is capped at an hour,
+# so it turns over far faster: a gdev job started while the g1 one was still
+# waiting. Don't read those ratios as wait times.
+#
+# A cut-off is cheap: train.py writes best.pt and log.json at every
+# validation, so a killed job still leaves a readable APD curve.
+#PBS -l walltime=00:10:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
