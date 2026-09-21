@@ -1,0 +1,46 @@
+#!/bin/bash
+# Render a checkpoint's predictions against ground truth, on a GPU.
+#
+#   qsub -v CKPT=outputs/overfit2/best.pt,OUT=overfit2 \
+#        -q normal -P personal-yhuang01 scripts/visualize.pbs
+#
+# Login nodes have no GPU, and sampling one clip there means 50 forward passes
+# on a shared CPU -- measured at over 10 minutes with no progress output.
+# Seconds on an A100.
+#
+# Writes $HOME/scratch/$OUT.rrd. Copy it off and drag it into
+# https://rerun.io/viewer, or `rerun $OUT.rrd` locally.
+#
+#PBS -N viz
+#PBS -l select=1:ncpus=16:ngpus=1:mem=110gb
+# Under an hour routes to `gdev`, which is capped at an hour and so turns over
+# quickly -- the right queue for a job that takes seconds.
+#PBS -l walltime=00:10:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/viz.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+CKPT=${CKPT:-outputs/overfit2/best.pt}
+CACHE=${CACHE:-$ROOT/cache/kubric}
+OUT=${OUT:-pred}
+ARGS=${ARGS:-}
+
+exec > >(tee -a $ROOT/${OUT}.viz.log) 2>&1
+
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+
+nvidia-smi --query-gpu=name --format=csv,noheader
+
+python scripts/visualize_pred.py \
+  --ckpt $CKPT \
+  --cache $CACHE \
+  --out $ROOT/${OUT}.rrd $ARGS
+
+echo "=== VIZ DONE -- scp ~/scratch/${OUT}.rrd to your machine ==="
