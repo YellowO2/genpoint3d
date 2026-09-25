@@ -17,3 +17,6 @@ __pycache__/
 
 # Copyrighted paper text — kept local, not redistributed
 /docs/refs/
+
+# Rerun recordings, rendered from checkpoints and re-creatable at will.
+*.rrd

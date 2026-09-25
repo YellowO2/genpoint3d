@@ -1,7 +1,7 @@
 #!/bin/bash
 # Render a checkpoint's predictions against ground truth, on a GPU.
 #
-#   qsub -v CKPT=outputs/overfit2/best.pt,OUT=overfit2 \
+#   qsub -v CKPT=outputs/overfit2/best.pt,OUT=overfit2,RAW=$HOME/scratch/kubric \
 #        -q normal -P personal-yhuang01 scripts/visualize.pbs
 #
 # Login nodes have no GPU, and sampling one clip there means 50 forward passes
@@ -27,8 +27,17 @@ cd $ROOT/genpoint3d
 
 CKPT=${CKPT:-outputs/overfit2/best.pt}
 CACHE=${CACHE:-$ROOT/cache/kubric}
+# Raw Kubric dir, for the RGB and unprojected point cloud behind the tracks.
+# The cache holds features and trajectories only, so without this the tracks
+# float on an empty canvas and there is no scene to judge them against. Its own
+# variable rather than a flag in ARGS: `qsub -v` splits on commas and mangles
+# the space in `--root /path`.
+RAW=${RAW:-}
 OUT=${OUT:-pred}
 ARGS=${ARGS:-}
+# An `if`, not `[ ... ] && ...`: under `set -e` a false test as the last
+# command of the line would end the job.
+if [ -n "$RAW" ]; then ARGS="--root $RAW $ARGS"; fi
 
 exec > >(tee -a $ROOT/${OUT}.viz.log) 2>&1
 
