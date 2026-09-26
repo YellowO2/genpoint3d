@@ -47,7 +47,9 @@ class PointDiT(nn.Module):
         feat_dim: int | None = None,
     ) -> None:
         super().__init__()
-        # The conditioning width has no reason to differ from the model width. Follow `dim` unless told otherwise.
+        # The conditioning width has no reason to differ from the model width,
+        # and silently defaulting it to a constant made a size-64 model try to
+        # add a 256-wide vector. Follow `dim` unless told otherwise.
         cond_dim = cond_dim or dim
         feat_dim = feat_dim or dim
         self.dim, self.depth, self.num_heads = dim, depth, num_heads
