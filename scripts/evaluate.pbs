@@ -3,6 +3,7 @@
 #
 #   qsub -q normal -P personal-yhuang01 scripts/evaluate.pbs
 #   qsub -v CKPT=outputs/run3493/ckpt.pt -q normal -P personal-yhuang01 scripts/evaluate.pbs
+#   qsub -v CKPT=outputs/run4_adapter/best_8k.pt,ARGS=--ablate ... scripts/evaluate.pbs
 #
 # Needs a GPU: scoring runs the 50-step sampler for every clip. Under 2h and one
 # GPU routes to gdev, which usually starts quickly.
@@ -30,9 +31,10 @@ source $ROOT/venvs/fyp/bin/activate
 # best.pt was selected on the VAL split, so its val APD is mildly optimistic.
 # This cache chose nothing, which is what makes its number reportable.
 CKPT=${CKPT:-outputs/run3493/best.pt}
+ARGS=${ARGS:-}
 
 python scripts/evaluate.py \
-  --ckpt "$CKPT" --per-frame \
+  --ckpt "$CKPT" --per-frame $ARGS \
   --cache $ROOT/cache/kubric_test \
   --out "$(dirname "$CKPT")/test_metrics.json"
 
