@@ -405,6 +405,9 @@ def main() -> int:
     # Bias cross-attention towards patches near each point's current position.
     # 0 is the model that ignored which video it was given.
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
+    # Score each patch against the query template, so "does this look like me"
+    # is an input rather than something to be discovered. 0 is the run5 model.
+    p.add_argument("--correlate", type=int, default=1, choices=[0, 1])
     p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
     # Evaluate and checkpoint the averaged weights, not the jittering ones.
     # 0 disables. The paper lists EMA among its training ingredients.
@@ -476,7 +479,8 @@ def main() -> int:
 
     model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
                      cross_attn=has_feats, feat_dim=feat_dim,
-                     locality=bool(args.locality)).to(device)
+                     locality=bool(args.locality),
+                     correlate=bool(args.correlate)).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)

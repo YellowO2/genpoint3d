@@ -134,6 +134,61 @@ def check_locality(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     )
 
 
+def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+    """A patch that MATCHES the query template must act more than one that does not.
+
+    Every patch is placed at the same position here, so the distance prior is
+    identical for all of them and appearance is the only thing left that can
+    differentiate. Before this existed the model held the template and the patches
+    but never compared them, and the ablation showed it ignored the video.
+
+    The gates are opened by hand: they init at zero on purpose, so an untrained
+    model is bit-identical to the locality-only one. This asks whether the wiring
+    is there, not whether it is active at step 0.
+    """
+    for cb in m.cross_blocks:
+        cb.corr_w.data.fill_(4.0)
+    m.match_gate.data.fill_(1.0)
+
+    pxyz = torch.ones_like(pxyz)            # every patch equidistant from every point
+    with torch.no_grad():
+        # The feature whose corr_k projection equals point 0's corr_q projection,
+        # i.e. the patch that looks exactly like that point.
+        q0 = m.corr_q(idc)[:, 0]                                    # (B, D)
+        f = q0 @ torch.linalg.pinv(m.corr_k.weight).T               # (B, D_feat)
+        ctx = ctx.clone()
+        ctx[:, :, 0] = f[:, None]                                   # patch 0 matches
+        ctx[:, :, 1] = -f[:, None]                                  # patch 1 anti-matches
+
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        hit = ctx.clone(); hit[:, :, 0] += 1.0
+        a = m(x, k, anchor, context=hit, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        miss = ctx.clone(); miss[:, :, 1] += 1.0
+        b = m(x, k, anchor, context=miss, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+
+    # Point 0 is the one whose template was matched; only its output is evidence.
+    d_hit = (a - base)[:, :, 0].abs().max().item()
+    d_miss = (b - base)[:, :, 0].abs().max().item()
+    return (
+        report("match acts", d_hit > 1e-8, f"matching patch moved output {d_hit:.1e} (want >0)"),
+        report("mismatch muted", d_miss < d_hit, f"non-matching patch moved it {d_miss:.1e}, "
+               f"{d_miss / max(d_hit, 1e-30):.2f}x the matching one (want <1)"),
+    )
+
+
+def check_corr_optional() -> bool:
+    """--correlate 0 must create no correlation parameters.
+
+    Same contract as --locality 0: a checkpoint trained before this existed has
+    to keep loading, which it only does if the state dict has no extra keys.
+    """
+    torch.manual_seed(0)
+    off = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True,
+                   correlate=False)
+    extra = [n for n in off.state_dict() if "corr" in n or "match" in n]
+    return report("corr optional", not extra, f"--correlate 0 adds {len(extra)} params (want 0)")
+
+
 def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     m.zero_grad()
     idc = idc.clone().requires_grad_(True)
@@ -181,6 +236,9 @@ def main() -> int:
     ok &= all(check_patch_pos(m, *args))
     ok &= all(check_locality(m, *args))
     ok &= all(check_grads(m, *args))
+    # Last: it opens the correlation gates, which mutates the model.
+    ok &= check_corr_optional()
+    ok &= all(check_correlation(m, *args))
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")
     return 0 if ok else 1

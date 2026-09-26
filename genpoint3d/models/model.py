@@ -46,6 +46,7 @@ class PointDiT(nn.Module):
         cross_attn: bool = False,
         feat_dim: int | None = None,
         locality: bool = True,
+        correlate: bool = True,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -58,6 +59,7 @@ class PointDiT(nn.Module):
         # Off reproduces the model that scored the static baseline while ignoring
         # which video it was given, which is the comparison this exists against.
         self.locality = locality and cross_attn
+        self.correlate = correlate and cross_attn
         head_dim = dim // num_heads
 
         # [path encoder] representing the current diffused path for the video
@@ -70,6 +72,19 @@ class PointDiT(nn.Module):
         self.frame_proj = nn.Linear(feat_dim, dim, bias=False) if cross_attn else None
         self.patch_pos = FourierEmbedding(3, dim) if cross_attn else None
         self.id_feature_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
+
+        # [correlation] "does this patch look like me?", computed instead of
+        # discovered. Both sides read the RAW backbone features, not the adapter's
+        # output, so matching is not entangled with the patch position that the
+        # adapter adds in. Separate q/k projections because a template and a
+        # patch are not the same kind of thing.
+        if self.correlate:
+            self.corr_q = nn.Linear(feat_dim, dim, bias=False)
+            self.corr_k = nn.Linear(feat_dim, dim, bias=False)
+            # Where in this frame the template matches best, as a 3D position.
+            # Gated to zero at init so the model starts as the run5 model.
+            self.match_emb = FourierEmbedding(3, cond_dim)
+            self.match_gate = nn.Parameter(torch.zeros(1))
 
         # [condition encoder] conditioning vector c
         self.anchor_emb = FourierEmbedding(3, cond_dim)
@@ -94,7 +109,8 @@ class PointDiT(nn.Module):
         # tells the model which frame it is looking at.
         if cross_attn:
             self.cross_blocks = nn.ModuleList(
-                CrossBlock(dim, num_heads, mlp_mult, cond_dim, locality=self.locality)
+                CrossBlock(dim, num_heads, mlp_mult, cond_dim,
+                           locality=self.locality, correlate=self.correlate)
                 for _ in range(depth)
             )
             self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
@@ -136,12 +152,36 @@ class PointDiT(nn.Module):
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
 
+        # --- [correlation] template vs every patch, on the RAW features ---
+        # Read before the adapter overwrites `context`. The model previously had
+        # the template and the patches but nothing that compared them, so the
+        # one route from image to position had to be discovered from position
+        # error alone -- while "predict little motion" cut the loss immediately.
+        corr = match_xyz = None
+        if (self.correlate and context is not None and id_card is not None
+                and patch_xyz is not None):
+            q = self.corr_q(id_card)                                  # (B, N, D)
+            corr = torch.einsum("bnc,btpc->btnp", q, self.corr_k(context))
+            corr = corr * self.dim ** -0.5
+            if visual_mask is not None:
+                corr = corr * visual_mask[..., None, None]
+            # Softly, where in this frame the template matches best. Independent
+            # of the diffused path, so it is evidence rather than an echo of the
+            # model's own guess -- the one term here that the image alone decides.
+            match_xyz = torch.einsum("btnp,btpc->btnc",
+                                     corr.float().softmax(-1).to(patch_xyz.dtype),
+                                     patch_xyz)
+            if visual_mask is not None:
+                match_xyz = match_xyz * visual_mask[..., None, None]
+
         # --- [3] one conditioning vector per (frame, point) ---
         if k.dim() == 1:
             k = k[:, None].expand(B, T)
         cond = self.time_emb(k[..., None])[:, :, None] + self.anchor_emb(anchor)[:, None]
         if id_card is not None:
             cond = cond + self.id_feature_proj(id_card)[:, None]   # the "what am I" term
+        if match_xyz is not None:
+            cond = cond + self.match_gate * self.match_emb(match_xyz)  # "and here"
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         # --- [feature adapter] raw backbone width -> model width, plus position ---
@@ -178,6 +218,8 @@ class PointDiT(nn.Module):
             if visual_mask is not None:
                 dist2 = dist2 * visual_mask[..., None, None]
             dist2 = dist2.clamp_min(0).reshape(B * T, N, -1)
+        if corr is not None:
+            corr = corr.reshape(B * T, N, -1)
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
@@ -204,7 +246,8 @@ class PointDiT(nn.Module):
 
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:
-                h = cross(h, cs, context.reshape(B * T, -1, self.dim), dist2=dist2)
+                h = cross(h, cs, context.reshape(B * T, -1, self.dim),
+                          dist2=dist2, corr=corr)
             h = h.view(B, T, N, -1)
 
         # --- [5] head ---
