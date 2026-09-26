@@ -169,7 +169,7 @@ def split(cache: str, val_frac: float, seed: int):
         probe = CachedClip.from_dict(clips[0])
     if probe.stats is None:
         raise SystemExit(f"cache in {path} has no scale statistics -- "
-                         "run scripts/patch_cache.py")
+                         "re-run scripts/preprocess.py")
     # A cache written before the projection moved into the model holds features
     # that were already projected and already had position summed in, by layers
     # that no longer exist. Nothing in the shapes gives that away: training would

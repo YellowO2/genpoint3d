@@ -141,7 +141,7 @@ class CachedClip:
         if self.stats is None:
             raise ValueError(
                 f"clip {self.seq_id} was cached without scale statistics -- "
-                "run scripts/patch_cache.py"
+                "re-run scripts/preprocess.py"
             )
         return self.stats.norm(mode, traj_scale)
 
@@ -176,7 +176,7 @@ class CachedClip:
         if "traj_metric" not in d:
             raise ValueError(
                 "this cache stores normalised coordinates, not metres -- it "
-                "predates the metres-in-cache format. Run scripts/patch_cache.py"
+                "predates the metres-in-cache format. Re-run scripts/preprocess.py"
             )
         return cls(
             seq_id=d["seq_id"],
