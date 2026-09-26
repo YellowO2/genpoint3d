@@ -202,7 +202,7 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     Revisit only with a measurement, not by reasoning about autocast.
     """
     b = {k: v.to(device) for k, v in batch.items()}
-    for k in ("context", "id_card"):
+    for k in ("context", "id_card", "patch_xyz"):
         b[k] = None if b[k].numel() == 0 else b[k].float()
     return b
 
@@ -336,18 +336,18 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
 
     for batch in loader:
         b = to_device(batch, device, amp)
-        traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
-                                       b["context"], b["id_card"])
+        traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
+                                             b["context"], b["id_card"], b["patch_xyz"])
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
 
         kx0 = known_frame0(b) if anchor_frame0 else None
         l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                   loss_type=loss_type,
-                                  context=ctx, visual_mask=vm, id_card=idc)
+                                  context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         loss_sum += l.item(); loss_n += 1
 
         pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                      known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc)
+                      known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
@@ -499,8 +499,8 @@ def main() -> int:
             if step >= args.steps:
                 break
             b = to_device(batch, device, amp)
-            traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
-                                           b["context"], b["id_card"])
+            traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
+                                                 b["context"], b["id_card"], b["patch_xyz"])
             # All-True: pure tracking. Every frame keeps its image.
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
             w = apd_weight(b, traj) if args.depth_scaled_loss else None
@@ -508,7 +508,7 @@ def main() -> int:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
                                              known_x0=kx0, loss_type=args.loss_type,
-                                             context=ctx, visual_mask=vm, id_card=idc)
+                                             context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()

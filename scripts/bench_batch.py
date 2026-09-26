@@ -71,11 +71,11 @@ def time_one(clips, feat_dim, has_feats, args, batch, workers) -> dict:
 
         b = to_device(batch_data, device, amp)
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-        ctx, idc = b["context"], b["id_card"]
+        ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
-                                         context=ctx, visual_mask=vm, id_card=idc)
+                                         context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

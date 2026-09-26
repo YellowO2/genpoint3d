@@ -45,33 +45,34 @@ def build():
     vm = torch.zeros(B, T, dtype=torch.bool)
     vm[:, :CUT] = True
     idc = torch.randn(B, N, D)
-    return m, x, k, anchor, ctx, vm, idc
+    pxyz = torch.randn(B, T, P, 3)
+    return m, x, k, anchor, ctx, vm, idc, pxyz
 
 
-def check_causality(m, x, k, anchor, ctx, vm, idc) -> bool:
+def check_causality(m, x, k, anchor, ctx, vm, idc, pxyz) -> bool:
     with torch.no_grad():
-        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc)
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         x2 = x.clone()
         x2[:, CUT:] += 10.0
-        pert = m(x2, k, anchor, context=ctx, visual_mask=vm, id_card=idc)
+        pert = m(x2, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
     past = (pert - base)[:, :CUT].abs().max().item()
     future = (pert - base)[:, CUT:].abs().max().item()
     return report("causality", past < 1e-6 and future > 1e-8,
                   f"past moved {past:.1e} (want 0), future moved {future:.1e} (want >0)")
 
 
-def check_mask(m, x, k, anchor, ctx, vm, idc) -> tuple[bool, bool]:
+def check_mask(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     """The forecasting switch: masked frames must be blind to their features."""
     with torch.no_grad():
-        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc)
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
         masked = ctx.clone()
         masked[:, CUT:] = torch.randn_like(masked[:, CUT:]) * 50
-        a = m(x, k, anchor, context=masked, visual_mask=vm, id_card=idc)
+        a = m(x, k, anchor, context=masked, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
         seen = ctx.clone()
         seen[:, :CUT] += 1.0
-        b = m(x, k, anchor, context=seen, visual_mask=vm, id_card=idc)
+        b = m(x, k, anchor, context=seen, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
     blocked = (a - base).abs().max().item()
     passed = (b - base).abs().max().item()
@@ -81,10 +82,31 @@ def check_mask(m, x, k, anchor, ctx, vm, idc) -> tuple[bool, bool]:
     )
 
 
-def check_grads(m, x, k, anchor, ctx, vm, idc) -> tuple[bool, bool]:
+def check_patch_pos(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+    """Patch positions must reach the output, and be masked along with features."""
+    with torch.no_grad():
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+
+        seen = pxyz.clone()
+        seen[:, :CUT] += 1.0
+        a = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=seen)
+
+        hidden = pxyz.clone()
+        hidden[:, CUT:] = torch.randn_like(hidden[:, CUT:]) * 50
+        b = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=hidden)
+
+    used = (a - base).abs().max().item()
+    blocked = (b - base).abs().max().item()
+    return (
+        report("patch pos used", used > 1e-8, f"visible-frame positions moved output {used:.1e} (want >0)"),
+        report("patch pos masked", blocked < 1e-6, f"masked-frame positions moved output {blocked:.1e} (want 0)"),
+    )
+
+
+def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     m.zero_grad()
     idc = idc.clone().requires_grad_(True)
-    m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc).sum().backward()
+    m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz).sum().backward()
     null_g = m.null_ctx.grad.abs().sum().item()
     idc_g = idc.grad.abs().sum().item()
     return (
@@ -125,6 +147,7 @@ def main() -> int:
     m, *args = build()
     ok = check_causality(m, *args)
     ok &= all(check_mask(m, *args))
+    ok &= all(check_patch_pos(m, *args))
     ok &= all(check_grads(m, *args))
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")

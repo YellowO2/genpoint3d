@@ -2,8 +2,7 @@
 THE ARCHITECTURE. Open this file to see the design.
 
 This is stages 2-5 of `docs/map.html`, in order. The transformer machinery it
-uses (RMSNorm, RoPE, Attention, ...) lives in `layers.py` -- you should not
-need to read that to understand what happens here.
+uses (RMSNorm, RoPE, Attention, ...) lives in `layers.py`.
 
     [2] tokenise     3D positions          -> tokens
     [3] conditioning anchor + noise level  -> one vector c per (frame, point)
@@ -48,23 +47,25 @@ class PointDiT(nn.Module):
         feat_dim: int | None = None,
     ) -> None:
         super().__init__()
-        # The conditioning width has no reason to differ from the model width,
-        # and silently defaulting it to a constant made a size-64 model try to
-        # add a 256-wide vector. Follow `dim` unless told otherwise.
+        # The conditioning width has no reason to differ from the model width. Follow `dim` unless told otherwise.
         cond_dim = cond_dim or dim
         feat_dim = feat_dim or dim
         self.dim, self.depth, self.num_heads = dim, depth, num_heads
         self.cross_attn = cross_attn
         head_dim = dim // num_heads
 
-        # [2] path tokeniser -- genuinely just an embedding layer
+        # [path encoder] representing the current diffused path for the video
         self.token_proj = nn.Linear(3, dim, bias=False)
+        
+        # [feature adapter] trainable, unlike encoder.py which is cached frozen.
+        # Always on when there are features: the patch position is added to
+        # frame_proj's output, and W(f + p) = Wf + Wp, so the what/where balance
+        # is only learnable if a layer sits before the sum.
+        self.frame_proj = nn.Linear(feat_dim, dim, bias=False) if cross_attn else None
+        self.patch_pos = FourierEmbedding(3, dim) if cross_attn else None
+        self.id_feature_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
 
-        # [3] conditioning vector c
-        # The encoder's output width is its own choice, so project rather than
-        # assume it matches.
-        self.id_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
-        self.ctx_proj = nn.Linear(feat_dim, dim, bias=False) if (cross_attn and feat_dim != dim) else None
+        # [condition encoder] conditioning vector c
         self.anchor_emb = FourierEmbedding(3, cond_dim)
         self.time_emb = FourierEmbedding(1, cond_dim)
         self.cond_mlp = nn.Sequential(
@@ -106,6 +107,7 @@ class PointDiT(nn.Module):
         context: torch.Tensor | None = None,
         visual_mask: torch.Tensor | None = None,
         id_card: torch.Tensor | None = None,
+        patch_xyz: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x:           (B, T, N, 3)    noisy trajectory, in model units
@@ -117,11 +119,12 @@ class PointDiT(nn.Module):
         visual_mask: (B, T) bool     True = frame has visual conditioning.
                                      False swaps in `null_ctx` -> forecasting.
         id_card:     (B, N, D)       DINOv3 feature sampled at the query  [3]
+        patch_xyz:   (B, T, P, 3)    each patch's 3D position, `anchor`'s space.
+                                     Required with `context`: *what* plus *where*.
 
         returns      (B, T, N, 3)    predicted velocity
 
-        The last three are optional; without them this is the step-2 model that
-        sees no images at all.
+        The visual arguments are optional as a group.
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
@@ -131,17 +134,21 @@ class PointDiT(nn.Module):
             k = k[:, None].expand(B, T)
         cond = self.time_emb(k[..., None])[:, :, None] + self.anchor_emb(anchor)[:, None]
         if id_card is not None:
-            cond = cond + self.id_proj(id_card)[:, None]   # the "what am I" term
+            cond = cond + self.id_feature_proj(id_card)[:, None]   # the "what am I" term
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
-        if context is not None and self.ctx_proj is not None:
-            context = self.ctx_proj(context)
+        # --- [feature adapter] raw backbone width -> model width, plus position ---
+        if context is not None:
+            if patch_xyz is None:
+                raise ValueError("context needs patch_xyz -- features without "
+                                 "positions say what is in the frame but not where")
+            context = self.frame_proj(context) + self.patch_pos(patch_xyz)
 
-        # Masked frames lose their features entirely, before any attention.
-        if context is not None and visual_mask is not None:
-            context = torch.where(
-                visual_mask[..., None, None], context, self.null_ctx.to(context.dtype)
-            )
+            # Masked frames lose features AND positions, before any attention.
+            if visual_mask is not None:
+                context = torch.where(
+                    visual_mask[..., None, None], context, self.null_ctx.to(context.dtype)
+                )
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)

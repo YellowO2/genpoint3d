@@ -48,11 +48,11 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool) -> list[float]:
     for batch in loader:
         b = to_device(batch, device, amp)
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-        ctx, idc = b["context"], b["id_card"]
+        ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                               context=ctx, visual_mask=vm, id_card=idc)
+                               context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
 
         if totals is None:

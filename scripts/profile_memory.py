@@ -55,13 +55,13 @@ def peak_for(args, device, batch, depth, points, patches) -> float:
     for _ in range(2):                       # first step allocates, second is real
         b = to_device(next(it), device, amp)
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-        ctx, idc = b["context"], b["id_card"]
+        ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         if ctx is not None and patches < ctx.shape[2]:
             ctx = ctx[:, :, :patches].contiguous()
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
-                                         context=ctx, visual_mask=vm, id_card=idc)
+                                         context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
@@ -145,7 +145,7 @@ def main() -> int:
         batch = next(it)
         b = to_device(batch, device, amp)
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-        ctx, idc = b["context"], b["id_card"]
+        ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         if phase == "measured":
             print(f"  after batch on device       {gb():7.2f} GB"
                   f"   (context {ctx.numel() * ctx.element_size() / GB:.2f} GB"
@@ -154,7 +154,7 @@ def main() -> int:
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
-                                         context=ctx, visual_mask=vm, id_card=idc)
+                                         context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         if phase == "measured":
             print(f"  after forward               {gb():7.2f} GB"
                   f"   <- activations kept for backward")
@@ -175,14 +175,14 @@ def main() -> int:
 
     batch = next(it)
     b = to_device(batch, device, amp)
-    traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
-                                   b["context"], b["id_card"])
+    traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
+                                         b["context"], b["id_card"], b["patch_xyz"])
     vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                  profile_memory=True, record_shapes=True) as prof:
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             loss, _ = flow_matching_loss(model, traj, anchor, mask=vis,
-                                         context=ctx, visual_mask=vm, id_card=idc)
+                                         context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()

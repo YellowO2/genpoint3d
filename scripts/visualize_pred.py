@@ -97,14 +97,14 @@ def main() -> int:
         batch_size=1, shuffle=False,
     )
     b = to_device(next(iter(loader)), device)
-    traj, anchor, vis, ctx, idc = (b["traj"], b["anchor"], b["visibility"],
-                                   b["context"], b["id_card"])
+    traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
+                                         b["context"], b["id_card"], b["patch_xyz"])
     vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
     kx0 = known_frame0(b) if targs.get("anchor_frame0", 0) else None
 
     pred = flow_sample(model, anchor, num_frames=traj.shape[1],
                        steps=args.sample_steps, known_x0=kx0,
-                       context=ctx, visual_mask=vm, id_card=idc)
+                       context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
     pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
     score = lambda x: tapvid3d_metrics(x, gt_m, vis, b["intrinsics"], b["extrinsics"])
