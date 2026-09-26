@@ -14,7 +14,10 @@ def batch_unproject(depth: torch.Tensor, intrinsics: torch.Tensor, extrinsics: t
     """depth: (T, H, W), intrinsics: (T, 3, 3), extrinsics: (T, 4, 4) -> world points (T, 3, H, W)."""
     t, h, w = depth.shape
     v, u = torch.meshgrid(torch.arange(h, device=depth.device), torch.arange(w, device=depth.device), indexing="ij")
-    uv_homogeneous = torch.stack((u, v, torch.ones_like(u)), dim=-1).float()  # (h, w, 3)
+    # Follow the intrinsics' dtype rather than hardcoding float32: callers that
+    # project float64 trajectories pass float64 intrinsics, and einsum will not
+    # mix the two.
+    uv_homogeneous = torch.stack((u, v, torch.ones_like(u)), dim=-1).to(intrinsics.dtype)  # (h, w, 3)
 
     K_inv = torch.linalg.inv(intrinsics)
     camera_coords = torch.einsum("nij,xyj->nxyi", K_inv, uv_homogeneous)
