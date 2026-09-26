@@ -69,6 +69,49 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool) -> list[float]:
     return [v / max(n, 1) for v in totals]
 
 
+# Each ablation destroys ONE thing the model is supposed to rely on. A score
+# that does not move is a pathway the model is not using.
+#   swap-features   right clip, another clip's appearance
+#   noise-features  appearance replaced by noise of the same mean and std
+#   shuffle-pos     right patches, scrambled 3D positions
+#   swap-id         another clip's query ID cards
+#   blind           no features at all -- the forecasting null embedding
+ABLATIONS = ("none", "swap-features", "noise-features", "shuffle-pos", "swap-id", "blind")
+
+
+class Ablated:
+    """Wraps a loader and corrupts each batch on the way out.
+
+    `evaluate()` calls `to_device` itself, so this hands back CPU batches of the
+    same shapes and dtypes and nothing downstream needs to know.
+    """
+
+    def __init__(self, loader, kind: str) -> None:
+        self.loader, self.kind = loader, kind
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    def __iter__(self):
+        for b in self.loader:
+            b = dict(b)
+            ctx, pxyz, idc = b["context"], b["patch_xyz"], b["id_card"]
+            if self.kind == "swap-features":
+                b["context"] = ctx.roll(1, 0)          # needs batch > 1
+            elif self.kind == "noise-features":
+                b["context"] = torch.randn_like(ctx.float()).to(ctx.dtype) \
+                    * ctx.float().std() + ctx.float().mean()
+            elif self.kind == "shuffle-pos":
+                b["patch_xyz"] = pxyz[:, :, torch.randperm(pxyz.shape[2])]
+            elif self.kind == "swap-id":
+                b["id_card"] = idc.roll(1, 0)
+            elif self.kind == "blind":
+                # to_device turns an empty tensor into None, and the model skips
+                # cross-attention entirely -- no features, no positions.
+                b["context"] = b["patch_xyz"] = b["id_card"] = torch.zeros(0)
+            yield b
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="best.pt or ckpt.pt from a run")
@@ -80,6 +123,10 @@ def main() -> int:
                    help="Euler steps when sampling; the published protocol is not"
                         " prescriptive, so report whatever you use")
     p.add_argument("--out", default=None, help="write the metrics as JSON here")
+    p.add_argument("--ablate", nargs="*", default=None, choices=ABLATIONS,
+                   help="also score with visual inputs corrupted. A score that"
+                        " does not move names a pathway the model ignores."
+                        " No argument means all of them")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -142,6 +189,21 @@ def main() -> int:
         if per_frame[-1] < 0.5 * per_frame[0]:
             print("    the score also decays with time, so error accumulates"
                   " during the rollout on top of any bad start.")
+
+    if args.ablate is not None:
+        kinds = [k for k in (args.ablate or ABLATIONS) if k != "none"]
+        print("\n  Ablations -- APD with one visual input destroyed:\n")
+        print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
+        print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
+        for kind in kinds:
+            a = evaluate(model, Ablated(loader, kind), device,
+                         steps=args.sample_steps, amp=amp)
+            apd = a["average_pts_within_thresh"]
+            print(f"    {kind:<16} {apd:>7.4f}"
+                  f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
+            m[f"ablate_{kind}"] = apd
+        print("\n    ~1.00x means the model is not using that input at all.")
+        print(f"    For scale, the static baseline is {m['apd_static']:.4f}.")
 
     if m["average_pts_within_thresh"] <= m["apd_static"]:
         print("\n  APD is at or below the static baseline -- assuming the points"
