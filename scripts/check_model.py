@@ -103,6 +103,37 @@ def check_patch_pos(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     )
 
 
+def check_locality(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+    """A point must be moved more by patches NEAR it than by distant ones.
+
+    Without this the model has to discover which of P patches is its own, from
+    scratch, with no supervision on attention -- and the measured result was a
+    model that ignored the video entirely. Geometry answers it instead.
+
+    Both patches are perturbed by the same amount, so any difference in effect is
+    the distance prior and nothing else.
+    """
+    P = ctx.shape[2]
+    pxyz = pxyz.clone()
+    pxyz[:, :, 0] = 0.0                     # patch 0 sits exactly on the points
+    pxyz[:, :, 1] = 50.0                    # patch 1 is far away
+    x = torch.zeros_like(x)                 # every point at the origin, beside patch 0
+    with torch.no_grad():
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        near = ctx.clone(); near[:, :, 0] += 1.0
+        a = m(x, k, anchor, context=near, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        far = ctx.clone(); far[:, :, 1] += 1.0
+        b = m(x, k, anchor, context=far, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+
+    d_near = (a - base).abs().max().item()
+    d_far = (b - base).abs().max().item()
+    return (
+        report("near patch acts", d_near > 1e-8, f"nearby patch moved output {d_near:.1e} (want >0)"),
+        report("far patch muted", d_far < d_near, f"distant patch moved it {d_far:.1e}, "
+                                                  f"{d_far / max(d_near, 1e-30):.2f}x the nearby one (want <1)"),
+    )
+
+
 def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     m.zero_grad()
     idc = idc.clone().requires_grad_(True)
@@ -148,6 +179,7 @@ def main() -> int:
     ok = check_causality(m, *args)
     ok &= all(check_mask(m, *args))
     ok &= all(check_patch_pos(m, *args))
+    ok &= all(check_locality(m, *args))
     ok &= all(check_grads(m, *args))
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")

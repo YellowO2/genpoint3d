@@ -227,7 +227,8 @@ class CrossBlock(nn.Module):
     null embedding to forecast. No branching anywhere else in the model.
     """
 
-    def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int) -> None:
+    def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int,
+                 locality: bool = True) -> None:
         super().__init__()
         self.norm_q = AdaRMSNorm(dim, cond_dim)
         self.norm_kv = RMSNorm(dim)
@@ -235,9 +236,31 @@ class CrossBlock(nn.Module):
         self.norm_ff = AdaRMSNorm(dim, cond_dim)
         self.ff_up = GEGLU(dim, dim * mlp_mult)
         self.ff_down = zero_init(nn.Linear(dim * mlp_mult, dim, bias=False))
+        # How sharply to prefer patches near the point's current position. One
+        # scalar per block, so early blocks may look broadly and later ones
+        # narrowly. Softplus keeps it positive: a NEGATIVE value would prefer
+        # patches far away, which is never what is wanted.
+        # Created only when enabled, so a checkpoint from before this existed
+        # still loads under `--locality 0`.
+        self.locality = nn.Parameter(torch.tensor(1.0)) if locality else None
 
-    def forward(self, x, cond, context):
-        x = x + self.attn(self.norm_q(x, cond), context=self.norm_kv(context))
+    def forward(self, x, cond, context, dist2=None):
+        """`dist2` (B, N, P): squared distance from each point's current position
+        estimate to each patch, in the shared normalised space.
+
+        Added to the attention logits as `-dist2 * locality`, which turns the
+        search "which of 576 patches is mine?" into the arithmetic "which are
+        near me?". Geometry answers it; the model only has to compare
+        appearances among the survivors -- what a correlation volume does in
+        CoTracker and TAPIP3D, expressed as an attention prior.
+        """
+        bias = None
+        if dist2 is not None and self.locality is not None:
+            # (B, 1, N, P) broadcasts over heads: a per-head bias would cost
+            # num_heads times the memory for the same prior.
+            bias = (-dist2 * F.softplus(self.locality))[:, None].to(context.dtype)
+        x = x + self.attn(self.norm_q(x, cond), context=self.norm_kv(context),
+                          attn_mask=bias)
         x = x + self.ff_down(self.ff_up(self.norm_ff(x, cond)))
         return x
 

@@ -45,6 +45,7 @@ class PointDiT(nn.Module):
         cond_dim: int | None = None,
         cross_attn: bool = False,
         feat_dim: int | None = None,
+        locality: bool = True,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -54,6 +55,9 @@ class PointDiT(nn.Module):
         feat_dim = feat_dim or dim
         self.dim, self.depth, self.num_heads = dim, depth, num_heads
         self.cross_attn = cross_attn
+        # Off reproduces the model that scored the static baseline while ignoring
+        # which video it was given, which is the comparison this exists against.
+        self.locality = locality and cross_attn
         head_dim = dim // num_heads
 
         # [path encoder] representing the current diffused path for the video
@@ -90,7 +94,8 @@ class PointDiT(nn.Module):
         # tells the model which frame it is looking at.
         if cross_attn:
             self.cross_blocks = nn.ModuleList(
-                CrossBlock(dim, num_heads, mlp_mult, cond_dim) for _ in range(depth)
+                CrossBlock(dim, num_heads, mlp_mult, cond_dim, locality=self.locality)
+                for _ in range(depth)
             )
             self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
 
@@ -152,6 +157,28 @@ class PointDiT(nn.Module):
                     visual_mask[..., None, None], context, self.null_ctx.to(context.dtype)
                 )
 
+        # --- where each point currently thinks it is, relative to every patch ---
+        # x and patch_xyz share one normalised space, so this is a plain distance
+        # and needs no camera. It is the lookup every established tracker does by
+        # projecting into the image and sampling there; in 3D the projection is
+        # unnecessary. Computed once and reused by all `depth` cross blocks.
+        dist2 = None
+        if context is not None and self.locality:
+            # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
+            # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
+            dist2 = (x.pow(2).sum(-1)[..., None]
+                     + patch_xyz.pow(2).sum(-1)[:, :, None]
+                     - 2 * torch.einsum("btnc,btpc->btnp", x, patch_xyz))
+            # A masked frame is one the model is not allowed to see, and its
+            # patch positions come from that frame's depth. Its features are
+            # already replaced, so nothing can flow today -- every value is the
+            # same null vector, whatever the weights. Zeroed anyway: this is the
+            # forecasting path, and a hole in it should not wait for the null
+            # handling to change before it becomes a leak.
+            if visual_mask is not None:
+                dist2 = dist2 * visual_mask[..., None, None]
+            dist2 = dist2.clamp_min(0).reshape(B * T, N, -1)
+
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
 
@@ -177,7 +204,7 @@ class PointDiT(nn.Module):
 
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:
-                h = cross(h, cs, context.reshape(B * T, -1, self.dim))
+                h = cross(h, cs, context.reshape(B * T, -1, self.dim), dist2=dist2)
             h = h.view(B, T, N, -1)
 
         # --- [5] head ---

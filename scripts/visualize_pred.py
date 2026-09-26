@@ -84,7 +84,8 @@ def main() -> int:
 
     model = PointDiT(dim=targs["dim"], depth=targs["depth"], num_heads=targs["heads"],
                      cross_attn=probe.context is not None,
-                     feat_dim=probe.feat_dim).to(device)
+                     feat_dim=probe.feat_dim,
+                     locality=bool(targs.get("locality", 0))).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

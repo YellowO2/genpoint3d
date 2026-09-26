@@ -154,7 +154,9 @@ def main() -> int:
 
     model = PointDiT(dim=targs["dim"], depth=targs["depth"],
                      num_heads=targs["heads"], cross_attn=has_feats,
-                     feat_dim=feat_dim).to(device)
+                     feat_dim=feat_dim,
+                     # Absent means a checkpoint from before the prior existed.
+                     locality=bool(targs.get("locality", 0))).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 
