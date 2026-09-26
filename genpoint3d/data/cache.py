@@ -8,7 +8,9 @@ Two rules, both learned the hard way.
 normalisation is applied when a clip is loaded. Storing normalised coordinates
 baked a training decision into the data, so every change to the scheme -- max
 to median, centred to camera-origin -- invalidated hours of preprocessing.
-Metres are a fact about the clip; how to normalise them is a knob.
+Metres are a fact about the clip; how to normalise them is a knob. The same rule
+governs `patch_xyz`, and the reason features are now cached at the backbone's raw
+width: a projection is a choice, so it belongs to training, not to the data.
 
 **One schema, both sides.** The cache used to be a bare dict built in one
 script and indexed by string in another, with nothing tying the halves
@@ -121,8 +123,15 @@ class CachedClip:
     stats: Optional[ScaleStats] = None
 
     # --- visual conditioning, absent for the step-2 (no-image) model ---
-    context: Optional[torch.Tensor] = None      # (T, P, D) fp16 DINOv3 tokens + depth features
+    # RAW backbone features, at DINOv3's own width -- no projection, no position
+    # folded in. Both of those are learnable, and anything cached cannot learn;
+    # they live in `PointDiT` now. See `models/encoder.py`.
+    context: Optional[torch.Tensor] = None      # (T, P, D) fp16 raw DINOv3 patch tokens
     id_card: Optional[torch.Tensor] = None      # (N, D) fp16, sampled at frame 0
+    # Where each patch is, in METRES, matching `context`'s patch order. The model
+    # embeds and adds this itself, so it can learn how much to weigh "where"
+    # against "what" -- a sum baked in before caching fixes that ratio forever.
+    patch_xyz: Optional[torch.Tensor] = None    # (T, P, 3) fp32 metres
 
     points: Optional[int] = None
     feat_dim: Optional[int] = None
@@ -153,6 +162,7 @@ class CachedClip:
             "extrinsics": self.extrinsics,
             "context": self.context,
             "id_card": self.id_card,
+            "patch_xyz": self.patch_xyz,
             "points": self.points,
             "feat_dim": self.feat_dim,
             "image_size": self.image_size,
@@ -180,6 +190,7 @@ class CachedClip:
             stats=ScaleStats.from_dict(d),
             context=d.get("context"),
             id_card=d.get("id_card"),
+            patch_xyz=d.get("patch_xyz"),
             points=d.get("points"),
             feat_dim=d.get("feat_dim"),
             image_size=d.get("image_size"),

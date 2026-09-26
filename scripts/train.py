@@ -95,6 +95,12 @@ class ClipDataset(Dataset):
         # below is subtracted before the target is scaled, not after.
         n = clip.norm(self.norm_mode, traj_scale=1.0)
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
+        # Patch positions share the ANCHOR's normalisation, not the target's:
+        # `traj_scale` divides only what gets denoised. A patch position has to be
+        # comparable with `anchor` -- that is the whole point of a feature cloud --
+        # so it goes through the same `n.apply`. Done here, not further down,
+        # because `n` is rebound below.
+        pxyz = None if clip.patch_xyz is None else n.apply(clip.patch_xyz)
         if self.target == "displacement":
             offset = traj[:1].clone()          # (1, N, 3), each point's own start
             traj = traj - offset
@@ -103,9 +109,9 @@ class ClipDataset(Dataset):
         traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
-        n = traj.shape[1]
-        if self.num_points < n:
-            idx = (torch.randperm(n)[: self.num_points] if self.resample
+        n_pts = traj.shape[1]
+        if self.num_points < n_pts:
+            idx = (torch.randperm(n_pts)[: self.num_points] if self.resample
                    else torch.arange(self.num_points))
             traj, anchor, vis = traj[:, idx], anchor[idx], vis[:, idx]
             offset = offset[:, idx]
@@ -126,6 +132,7 @@ class ClipDataset(Dataset):
             "traj": traj, "anchor": anchor, "visibility": vis,
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
+            "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
             "extrinsics": clip.extrinsics,
@@ -163,6 +170,18 @@ def split(cache: str, val_frac: float, seed: int):
     if probe.stats is None:
         raise SystemExit(f"cache in {path} has no scale statistics -- "
                          "run scripts/patch_cache.py")
+    # A cache written before the projection moved into the model holds features
+    # that were already projected and already had position summed in, by layers
+    # that no longer exist. Nothing in the shapes gives that away: training would
+    # run, read no patch positions at all, and quietly produce another number to
+    # explain. There is no migration -- the backbone's raw output was never
+    # saved -- so this has to be rebuilt.
+    if probe.context is not None and probe.patch_xyz is None:
+        raise SystemExit(
+            f"cache in {path} has features but no patch_xyz -- it predates the "
+            "trainable visual head and cannot be migrated. Re-run "
+            "scripts/preprocess.py --features"
+        )
 
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(clips), generator=g).tolist()

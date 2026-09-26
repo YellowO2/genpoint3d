@@ -20,8 +20,9 @@ so T_C = T and there is no "future" being withheld. Revisit before training
 with random cutoffs.
 
 Visual features are cached in fp16 at 384px (the resolution the paper's own
-ablations use, §3.4), which is ~10 MB per clip -- about 5 GB for 500 clips.
-Re-encoding them every epoch would dominate training time.
+ablations use, §3.4), RAW at the backbone's 384-wide output. Re-encoding them
+every epoch would dominate training time; projecting them before caching would
+freeze a layer that has to learn. About 11 MB per clip, 37 GB for 3500.
 
 Run:  python scripts/preprocess.py --root DATA --out local/cache/kubric --features
 """
@@ -37,7 +38,7 @@ import torch
 
 from genpoint3d.data.cache import CachedClip, scale_stats
 from genpoint3d.data.kubric import KubricSequenceDataset
-from genpoint3d.data.transform import scene_pointmap, transform
+from genpoint3d.data.transform import transform
 from genpoint3d.geometry import batch_unproject
 
 
@@ -48,7 +49,6 @@ def main() -> int:
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--features", action="store_true", help="also cache DINOv3 features")
     p.add_argument("--image-size", type=int, default=384)
-    p.add_argument("--feat-dim", type=int, default=256, help="must match the model's dim")
     p.add_argument("--stub", action="store_true", help="random backbone, for testing without DINOv3 access")
     p.add_argument("--limit", type=int, default=None, help="only the first N complete clips")
     args = p.parse_args()
@@ -80,10 +80,11 @@ def main() -> int:
         from genpoint3d.models.encoder import VisualEncoder
 
         dev = _t.device("cuda" if _t.cuda.is_available() else "cpu")
-        encoder = VisualEncoder(
-            dim=args.feat_dim, image_size=args.image_size, stub=args.stub
-        ).to(dev).eval()
-        print(f"encoding on {dev} at {args.image_size}px"
+        # No width argument: the cache takes the backbone's own width, because a
+        # projection to the model's width would be an untrainable layer sitting
+        # in front of the data. `train.py` reads `feat_dim` off the cache.
+        encoder = VisualEncoder(image_size=args.image_size, stub=args.stub).to(dev).eval()
+        print(f"encoding on {dev} at {args.image_size}px, {encoder.dim}-wide features"
               f"{' (STUB backbone)' if args.stub else ''}", flush=True)
     todo = list(range(len(ds)))
 
@@ -113,19 +114,24 @@ def main() -> int:
             extrinsics=x.extrinsics.clone(),  # (T, 4, 4) cam_0 -> cam_t
             stats=scale_stats(pointmap),      # every candidate scale, measured once
             points=args.points,
-            feat_dim=args.feat_dim if args.features else None,
+            feat_dim=encoder.dim if encoder is not None else None,
             image_size=args.image_size if args.features else None,
         )
 
         if encoder is not None:
             with torch.no_grad():
-                feat = encoder(x.frames.to(dev), scene_pointmap(x).to(dev))  # (T,D,g,g)
+                feat = encoder(x.frames.to(dev))                              # (T,D,g,g)
                 # The ID card is sampled ONCE, at the query's own frame (frame 0),
                 # per the paper's "unique starting context" -- not per frame.
                 uv0 = x.query_uv[None].to(dev)
-                id_card = encoder.sample_at(feat[:1], uv0, clip.hw)[0]       # (N, D)
-            clip.context = encoder.tokens(feat).half().cpu()                 # (T, P, D)
-            clip.id_card = id_card.half().cpu()                              # (N, D)
+                id_card = encoder.sample_at(feat[:1], uv0, clip.hw)[0]        # (N, D)
+                # METRES, like `traj`. The load path normalises it with the same
+                # statistics as the anchor, so patch positions and point
+                # positions land in one shared space whatever scheme is chosen.
+                xyz = encoder.patch_xyz(pointmap.to(dev))                     # (T, P, 3)
+            clip.context = encoder.tokens(feat).half().cpu()                  # (T, P, D)
+            clip.id_card = id_card.half().cpu()                               # (N, D)
+            clip.patch_xyz = xyz.float().cpu()                                # (T, P, 3)
 
         # write to a temp name first so a kill mid-write cannot leave a
         # half-file that the resume check would mistake for finished

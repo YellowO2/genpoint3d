@@ -1,12 +1,29 @@
 """
-[1] Visual encoder -- frozen DINOv3 plus the 3D feature cloud.
+[1] Visual encoder -- frozen DINOv3, and nothing else.
 
-Produces the one thing stage 1 owes the rest of the model: a grid of feature
-vectors per frame, describing what is at each patch AND where that patch sits
-in 3D. That grid is then read two different ways (see docs/map.html):
+Produces the one thing stage 1 owes the rest of the model: a grid of raw
+backbone feature vectors per frame, describing what is at each patch. That grid
+is then read two different ways (see docs/map.html):
 
     sample_at()  one spot     -> the query's "ID card", feeds [3]
     tokens()     whole grid   -> searched by cross-attention in [4c]
+
+**Nothing learnable lives here, deliberately.** This module's output is what
+`preprocess.py` writes to the cache, and anything cached is frozen for the life
+of the cache. A projection and a 3D-position embedding used to sit at the end of
+`forward`, so the model's entire interface to the visual world was a pair of
+randomly initialised layers that training could never reach: run once, output
+saved, layers discarded. Worse, each preprocessing run built its own -- so a
+cache assembled over several jobs held clips in mutually unreadable feature
+spaces, which is exactly the sort of thing that lets a model memorise two clips
+at 94% APD and learn almost nothing from three thousand. Those layers now live
+in `PointDiT`, on the training side of the cache boundary.
+
+The rule this encodes: **cache what is frozen, train what is learnable.** The
+boundary belongs immediately after the backbone.
+
+`patch_xyz` stays here even though it is not learnable, because it is a fact
+about the clip and it needs `grid` to compute.
 
 DINOv3 never sees the query points. It runs on the whole frame, once, and the
 queries only index into its output afterwards.
@@ -17,13 +34,11 @@ cloud, cross-attention, null embedding, masking -- can be tested before the
 real (gated) weights are available. It learns nothing; it is a wiring harness.
 """
 
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from genpoint3d.models.layers import FourierEmbedding
 
 DINOV3_S = "facebook/dinov3-vits16-pretrain-lvd1689m"
 
@@ -33,10 +48,13 @@ _STD = (0.229, 0.224, 0.225)
 
 
 class VisualEncoder(nn.Module):
-    """Frozen backbone -> per-patch features, with 3D position folded in.
+    """Frozen backbone -> per-patch features, at the backbone's own width.
+
+    `self.dim` is an OUTPUT, not a setting: the backbone's hidden size, 384 for
+    ViT-S/16. Choosing a width here would mean a projection here, which is what
+    put untrainable weights in front of the cache.
 
     Args:
-        dim:        model width to project features into
         image_size: frames are resized to this square before encoding. Kubric
                     is 512 native; the paper uses 768 but ablates at 384, so
                     512 sits inside the range they validated and avoids a
@@ -47,23 +65,20 @@ class VisualEncoder(nn.Module):
 
     def __init__(
         self,
-        dim: int,
         model_id: str = DINOV3_S,
         image_size: int = 512,
         patch: int = 16,
         stub: bool = False,
-        feature_cloud: bool = True,
     ) -> None:
         super().__init__()
-        self.dim, self.image_size, self.patch, self.stub = dim, image_size, patch, stub
+        self.image_size, self.patch, self.stub = image_size, patch, stub
         self.grid = image_size // patch
-        self.feature_cloud = feature_cloud
 
         if stub:
-            backbone_dim = 384
+            self.dim = 384
             # Fixed random projection of raw patch pixels. Deterministic and
             # input-dependent, so a shape bug shows up but nothing is learnt.
-            self.register_buffer("stub_proj", torch.randn(3 * patch * patch, backbone_dim) * 0.05)
+            self.register_buffer("stub_proj", torch.randn(3 * patch * patch, self.dim) * 0.05)
             self.backbone = None
         else:
             from transformers import AutoModel  # imported lazily; heavy
@@ -71,12 +86,7 @@ class VisualEncoder(nn.Module):
             self.backbone = AutoModel.from_pretrained(model_id)
             self.backbone.requires_grad_(False)
             self.backbone.eval()
-            backbone_dim = self.backbone.config.hidden_size
-
-        self.proj = nn.Linear(backbone_dim, dim, bias=False)
-        # 3D position of each patch, Fourier-encoded and added to its feature.
-        # TAPIP3D's feature cloud: the patch says *what*, this says *where*.
-        self.pos_enc = FourierEmbedding(3, dim) if feature_cloud else None
+            self.dim = self.backbone.config.hidden_size
 
         self.register_buffer("mean", torch.tensor(_MEAN).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor(_STD).view(1, 3, 1, 1))
@@ -102,32 +112,39 @@ class VisualEncoder(nn.Module):
         return out[:, -self.grid * self.grid :]
 
     # ---------------------------------------------------------------- public
-    def forward(self, frames: torch.Tensor, pointmap: Optional[torch.Tensor] = None) -> torch.Tensor:
+    @torch.no_grad()
+    def forward(self, frames: torch.Tensor) -> torch.Tensor:
         """
         frames:   (T, H, W, 3) uint8
-        pointmap: (T, 3, H, W) scene geometry, frame-0 frame, scene-normalised.
-                  Required when `feature_cloud` is on.
 
         returns   (T, dim, grid, grid) -- a feature GRID, not a sequence, so
                   `sample_at` can bilinearly interpolate between patches.
         """
         T = frames.shape[0]
-        tokens = self.proj(self._backbone_tokens(self._prepare(frames)))  # (T, P, dim)
-        feat = tokens.transpose(1, 2).reshape(T, self.dim, self.grid, self.grid)
-
-        if self.feature_cloud:
-            if pointmap is None:
-                raise ValueError("feature_cloud=True needs a pointmap")
-            # Average depth-derived 3D position within each patch footprint.
-            xyz = F.adaptive_avg_pool2d(pointmap, self.grid)            # (T, 3, g, g)
-            xyz = xyz.permute(0, 2, 3, 1)                                # (T, g, g, 3)
-            feat = feat + self.pos_enc(xyz).permute(0, 3, 1, 2)
-        return feat
+        tokens = self._backbone_tokens(self._prepare(frames))            # (T, P, dim)
+        return tokens.transpose(1, 2).reshape(T, self.dim, self.grid, self.grid)
 
     @staticmethod
     def tokens(feat: torch.Tensor) -> torch.Tensor:
-        """(T, dim, g, g) -> (T, P, dim). What cross-attention searches over."""
+        """(T, C, g, g) -> (T, P, C). What cross-attention searches over."""
         return feat.flatten(2).transpose(1, 2)
+
+    def patch_xyz(self, pointmap: torch.Tensor) -> torch.Tensor:
+        """(T, 3, H, W) scene points -> (T, P, 3), one 3D position per patch.
+
+        Averaged over each patch's footprint. TAPIP3D's feature cloud: the patch
+        feature says *what*, this says *where*, and the two are combined inside
+        the model where the combining weights can be learnt.
+
+        Flattened with `tokens()` so patch i of the feature sequence and row i
+        here are the same patch by construction, not by a matching convention
+        two files apart.
+
+        Units are whatever `pointmap` is in. `preprocess.py` passes METRES, so
+        the cache stores a fact and the load path normalises it -- the same rule
+        the trajectory follows.
+        """
+        return self.tokens(F.adaptive_avg_pool2d(pointmap, self.grid))
 
     def sample_at(self, feat: torch.Tensor, uv: torch.Tensor, hw: tuple[int, int]) -> torch.Tensor:
         """Bilinear lookup at pixel coords -- the query's ID card.

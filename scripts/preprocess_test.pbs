@@ -33,6 +33,6 @@ python -c "import torch; print('cuda ok:', torch.cuda.is_available())"
 python scripts/preprocess.py \
   --root $ROOT/kubric_test \
   --out  $ROOT/cache/kubric_test \
-  --features --feat-dim 256 --image-size 384 --points 256
+  --features --image-size 384 --points 256
 
 echo "=== PREPROCESS TEST DONE ==="

@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
+import torch.nn.functional as F
 
 from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.model import PointDiT
@@ -93,16 +94,30 @@ def check_grads(m, x, k, anchor, ctx, vm, idc) -> tuple[bool, bool]:
 
 
 def check_encoder() -> bool:
-    enc = VisualEncoder(dim=D, image_size=64, stub=True)
+    """Shapes out of stage [1], and that patch features and patch positions
+    agree on which patch is which -- they are matched by index in the model, so
+    a transpose in either flatten would silently pair a feature with someone
+    else's coordinates."""
+    enc = VisualEncoder(image_size=64, stub=True)
+    E, g = enc.dim, enc.grid
     frames = torch.randint(0, 255, (T, 128, 128, 3), dtype=torch.uint8)
-    pm = torch.randn(T, 3, 128, 128)
-    feat = enc(frames, pm)
+    feat = enc(frames)
     tok = VisualEncoder.tokens(feat)
     uv = torch.rand(T, N, 2) * 127
     samp = enc.sample_at(feat, uv, (128, 128))
-    g = enc.grid
-    ok = feat.shape == (T, D, g, g) and tok.shape == (T, g * g, D) and samp.shape == (T, N, D)
-    return report("encoder shapes", ok, f"grid {tuple(feat.shape)}  tokens {tuple(tok.shape)}  sample {tuple(samp.shape)}")
+    ok = feat.shape == (T, E, g, g) and tok.shape == (T, g * g, E) and samp.shape == (T, N, E)
+    ok = report("encoder shapes", ok,
+                f"grid {tuple(feat.shape)}  tokens {tuple(tok.shape)}  sample {tuple(samp.shape)}")
+
+    # Each pixel carries its own patch index as its "position", so the pooled
+    # value of patch i must come back as row i.
+    idx = torch.arange(g * g, dtype=torch.float32).reshape(1, 1, g, g)
+    pm = F.interpolate(idx, size=(128, 128), mode="nearest").expand(T, 3, 128, 128)
+    xyz = enc.patch_xyz(pm)
+    want = torch.arange(g * g, dtype=torch.float32)[None, :, None].expand(T, g * g, 3)
+    err = (xyz - want).abs().max().item()
+    return ok & report("patch order", xyz.shape == (T, g * g, 3) and err == 0.0,
+                       f"max index mismatch {err:.1f}")
 
 
 def main() -> int:
