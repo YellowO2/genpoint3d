@@ -64,6 +64,15 @@ def main() -> int:
     # the number of BROKEN clips, not to the size of the dataset. Scanning 3500
     # clips to find the zero-or-two bad ones was the wrong trade.
     cached = {p.stem for p in out.glob("*.pt")}
+    # Resuming into a cache of a different format would leave clips the model
+    # reads two different ways -- the failure this cache layout exists to stop.
+    if cached and args.features:
+        probe = CachedClip.from_dict(
+            torch.load(out / f"{sorted(cached)[0]}.pt", weights_only=False, mmap=True))
+        if probe.patch_xyz is None or probe.feat_dim != probe.context.shape[-1]:
+            raise SystemExit(
+                f"{out} holds clips in an older format. Resuming would mix the two."
+                " Delete the directory or pass a different --out.")
     ds.seq_ids = [s for s in ds.seq_ids if s not in cached]
     print(f"{found} clips on disk, {len(cached)} already cached,"
           f" {len(ds.seq_ids)} to encode", flush=True)
