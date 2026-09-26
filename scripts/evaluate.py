@@ -28,12 +28,13 @@ from torch.utils.data import DataLoader
 from genpoint3d.eval.metrics import tapvid3d_metrics
 from genpoint3d.models.model import PointDiT
 from genpoint3d.data.cache import CachedClip
-from train import ClipDataset, evaluate, to_device, to_metres
+from train import ClipDataset, evaluate, known_frame0, to_device, to_metres
 from genpoint3d.models.flow import sample as flow_sample
 
 
 @torch.no_grad()
-def per_frame_apd(model, loader, device, steps: int, amp: bool) -> list[float]:
+def per_frame_apd(model, loader, device, steps: int, amp: bool,
+                  anchor_frame0: bool = False) -> list[float]:
     """APD for each frame index separately.
 
     The model is handed frame 0's true position as `anchor`, but still has to
@@ -50,8 +51,10 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool) -> list[float]:
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
         ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
+        kx0 = known_frame0(b) if anchor_frame0 else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                               known_x0=kx0,
                                context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
 
@@ -157,15 +160,26 @@ def main() -> int:
 
     loader = DataLoader(
         # resample=False: a test score must not change between runs.
+        # Every one of these changes what the numbers MEAN. Defaulting any of
+        # them scores the model in a space it was not trained in, and the result
+        # is not a bad score but a meaningless one.
         ClipDataset(clips, points, resample=False,
-                    norm_mode=targs.get("norm_mode", "median")),
+                    norm_mode=targs.get("norm_mode", "median"),
+                    target=targs.get("target", "absolute")),
         batch_size=args.batch, shuffle=False, num_workers=4,
     )
 
     t0 = time.time()
-    per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp) \
-        if args.per_frame else None
-    m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp)
+    anchor_frame0 = bool(targs.get("anchor_frame0", 0))
+    loss_type = targs.get("loss_type", "l21")  # train.py's default
+    print(f"scoring as trained: target {targs.get('target', 'absolute')}"
+          f" | norm {targs.get('norm_mode', 'median')}"
+          f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
+
+    per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
+                              anchor_frame0) if args.per_frame else None
+    m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp,
+                 anchor_frame0=anchor_frame0, loss_type=loss_type)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss"):
@@ -197,7 +211,8 @@ def main() -> int:
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
         for kind in kinds:
             a = evaluate(model, Ablated(loader, kind), device,
-                         steps=args.sample_steps, amp=amp)
+                         steps=args.sample_steps, amp=amp,
+                         anchor_frame0=anchor_frame0, loss_type=loss_type)
             apd = a["average_pts_within_thresh"]
             print(f"    {kind:<16} {apd:>7.4f}"
                   f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
