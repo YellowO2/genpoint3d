@@ -121,6 +121,12 @@ The cache boundary is drawn here on purpose: cache what is frozen, train
 what is learnable. Anything downstream of this line is trainable, so it
 must not live in encoder.py -- preprocess.py runs that file once and
 throws the layers away.
+
+NOT YET IMPLEMENTED, and in the paper's spec: take MULTIPLE backbone
+layers, concatenate them, and upsample 2x. We take last_hidden_state only,
+at one scale. At 384px with patch 16 that is a 24x24 grid, so one patch
+covers 16 pixels -- coarser than the localisation a tracker needs, which
+is what the 2x upsample is for.
         </pre
           >
         </section>
