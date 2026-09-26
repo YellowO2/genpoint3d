@@ -34,6 +34,9 @@ flowchart TD
     reframe + normalise`"]
     enc["`**[1] Visual encoder**
     DINOv3-S, frozen`"]
+    adapt["`**[1b] Feature adapter**
+    backbone width -> model width
+    + each patch's 3D position`"]
     tok["`**[2] Trajectory tokeniser**`"]
     cond["`**[3] Query + timestep conditioning**
     appearance and position at query
@@ -50,8 +53,9 @@ flowchart TD
     video --> prep --> enc
     noisy --> tok
     query --> cond
-    enc -->|"feature map"| cond
-    enc -->|"feature map"| cutoff
+    enc -->|"raw feature map (CACHED)"| adapt
+    adapt -->|"feature map"| cond
+    adapt -->|"feature map"| cutoff
     cutoff -->|"features or null"| blocks
     tok --> blocks
     cond -.->|AdaLN| blocks
@@ -59,6 +63,7 @@ flowchart TD
 
     click prep href "#stage-0"
     click enc href "#stage-1"
+    click adapt href "#stage-1b"
     click tok href "#stage-2"
     click cond href "#stage-3"
     click cutoff href "#masking"
@@ -70,7 +75,7 @@ flowchart TD
     classDef input   fill:#fff,stroke:#c6ccd4,stroke-width:1.5px,stroke-dasharray:4 3,color:#555d68
 
     class video,query,noisy input
-    class prep,enc,tok,cond,blocks,heads done
+    class prep,enc,adapt,tok,cond,blocks,heads done
     class cutoff partial
 </pre>
 
@@ -105,16 +110,49 @@ flowchart TD
         <section id="stage-1">
           <h2>[1] Visual encoder — step 3</h2>
           <pre>
-DINOv3-S (frozen) for every frame once. Take multiple layers,
-concatenate, project to D, upsample 2×. 
-We can encode each clip once and reuse it for every epoch and every
-cutoff. The catch is storage as features are far larger than the video. We will see how later.
+DINOv3-S (frozen) for every frame once, and NOTHING ELSE. The output is
+the backbone's raw patch grid, at the backbone's own width (384 for
+ViT-S/16), which is what the cache stores.
 
-We also plan to have a depth model that adds 3D information to the visual features. Currently it is kubrics ground truth. Each patch
-token also gets its 3D position. Downsample depth to the patch grid,
-unproject, Fourier-encode, add. TAPIP3D's construction. 
+We can encode each clip once and reuse it for every epoch and every
+cutoff. The catch is storage as features are far larger than the video.
+
+The cache boundary is drawn here on purpose: cache what is frozen, train
+what is learnable. Anything downstream of this line is trainable, so it
+must not live in encoder.py -- preprocess.py runs that file once and
+throws the layers away.
         </pre
           >
+        </section>
+
+        <section id="stage-1b">
+          <h2>[1b] Feature adapter</h2>
+          <pre>
+Two trainable layers, inside PointDiT. They turn the cached backbone grid
+into what [3] and the cutoff actually consume:
+
+  frame_proj   Linear(384 -> D). Not a resize -- each of the D outputs is
+               a learned mix of all 384 inputs, so this is where the model
+               learns what to read DINOv3 for.
+  patch_pos    each patch's 3D position, Fourier-encoded and ADDED to its
+               feature. TAPIP3D's feature cloud: the feature says what is
+               at a patch, this says where it is. Positions come from the
+               cache in metres and are normalised with the trajectory, so
+               patches and points share one coordinate space.
+
+Both sit before the sum, and that is the point: W(f + p) = Wf + Wp, so
+nothing downstream can rebalance "what" against "where" once they are
+added. The balance has to be learnable on this side of the +.
+
+These layers used to sit at the end of encoder.py, upstream of the cache.
+Training could never reach them, so the model's entire interface to the
+visual world was frozen at random initialisation -- and each preprocessing
+run rolled its own, so a cache built over several jobs held clips in
+mutually unreadable feature spaces.
+
+The [4c] cutoff replaces the adapter's output, positions included, so a
+masked frame gives up where as well as what.
+          </pre>
         </section>
 
         <section id="masking">
