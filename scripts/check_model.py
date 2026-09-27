@@ -176,6 +176,24 @@ def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     )
 
 
+def check_bidirectional(x, k, anchor, ctx, vm, idc, pxyz) -> bool:
+    """--causal 0 must actually let a frame see later frames.
+
+    The mirror of `check_causality`. A flag that silently does nothing is worse
+    than no flag, because the run it produces looks like an answer.
+    """
+    torch.manual_seed(0)
+    m = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True,
+                 causal=False).eval()
+    with torch.no_grad():
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        x2 = x.clone(); x2[:, CUT:] += 10.0
+        pert = m(x2, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    past = (pert - base)[:, :CUT].abs().max().item()
+    return report("bidirectional", past > 1e-8,
+                  f"--causal 0: future moved the past {past:.1e} (want >0)")
+
+
 def check_corr_optional() -> bool:
     """--correlate 0 must create no correlation parameters.
 
@@ -237,6 +255,7 @@ def main() -> int:
     ok &= all(check_locality(m, *args))
     ok &= all(check_grads(m, *args))
     # Last: it opens the correlation gates, which mutates the model.
+    ok &= check_bidirectional(*args)
     ok &= check_corr_optional()
     ok &= all(check_correlation(m, *args))
     ok &= check_encoder()

@@ -408,6 +408,10 @@ def main() -> int:
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
     p.add_argument("--correlate", type=int, default=1, choices=[0, 1])
+    # 0 lets a frame see later frames. Legitimate for tracking, where every
+    # image is available, and what the published trackers do. Forecasting does
+    # not depend on it: a masked frame holds only `null_ctx`.
+    p.add_argument("--causal", type=int, default=1, choices=[0, 1])
     p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
     # Evaluate and checkpoint the averaged weights, not the jittering ones.
     # 0 disables. The paper lists EMA among its training ingredients.
@@ -480,7 +484,8 @@ def main() -> int:
     model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
                      cross_attn=has_feats, feat_dim=feat_dim,
                      locality=bool(args.locality),
-                     correlate=bool(args.correlate)).to(device)
+                     correlate=bool(args.correlate),
+                     causal=bool(args.causal)).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)

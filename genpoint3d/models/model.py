@@ -47,6 +47,7 @@ class PointDiT(nn.Module):
         feat_dim: int | None = None,
         locality: bool = True,
         correlate: bool = True,
+        causal: bool = True,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -60,6 +61,13 @@ class PointDiT(nn.Module):
         # which video it was given, which is the comparison this exists against.
         self.locality = locality and cross_attn
         self.correlate = correlate and cross_attn
+        # Off lets a frame attend to later frames. Tracking has every image in
+        # hand, so bidirectional context is legitimate and is what every tracker
+        # in the benchmark table uses. The mask is NOT what keeps forecasting
+        # honest -- a masked frame already gets `null_ctx`, so it holds nothing
+        # to leak (docs/references.md:19). It exists for autoregressive rollout
+        # and diffusion forcing, neither of which is built yet.
+        self.causal = causal
         head_dim = dim // num_heads
 
         # [path encoder] representing the current diffused path for the video
@@ -228,7 +236,8 @@ class PointDiT(nn.Module):
         t_pos = torch.arange(T, device=dev, dtype=dt)[None, :, None].expand(B * N, T, 1)
         theta_time = self.time_rope(t_pos)                             # (B*N, H, T, d)
         theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
-        causal = torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]
+        causal = (torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]
+                  if self.causal else None)
 
         # --- [4] blocks ---
         cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth

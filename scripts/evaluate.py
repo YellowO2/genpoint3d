@@ -157,7 +157,10 @@ def main() -> int:
                      feat_dim=feat_dim,
                      # Absent means a checkpoint from before the prior existed.
                      locality=bool(targs.get("locality", 0)),
-                     correlate=bool(targs.get("correlate", 0))).to(device)
+                     correlate=bool(targs.get("correlate", 0)),
+                     # Absent means a checkpoint from before the flag existed,
+                     # and every one of those was causal.
+                     causal=bool(targs.get("causal", 1))).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 
