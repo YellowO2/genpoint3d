@@ -49,6 +49,14 @@ def main() -> int:
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--features", action="store_true", help="also cache DINOv3 features")
     p.add_argument("--image-size", type=int, default=384)
+    # Which backbone layers to concatenate. Omitted means the last one only,
+    # which is what every cache before this held. A late layer is semantic but
+    # spatially smeared; an early one is sharp but semantically blank, and a
+    # tracker needs both -- DELTA, TAPIP3D and SpatialTrackerV2 all read several.
+    # Each extra layer MULTIPLIES the cache: 384-wide per layer, ~39 GB per
+    # layer for 3500 clips. Check quota before asking for four.
+    p.add_argument("--layers", type=int, nargs="*", default=None,
+                   help="e.g. --layers 6 12 (1-indexed, 12 layers in ViT-S/16)")
     p.add_argument("--stub", action="store_true", help="random backbone, for testing without DINOv3 access")
     p.add_argument("--limit", type=int, default=None, help="only the first N complete clips")
     args = p.parse_args()
@@ -66,6 +74,7 @@ def main() -> int:
     cached = {p.stem for p in out.glob("*.pt")}
     # Resuming into a cache of a different format would leave clips the model
     # reads two different ways -- the failure this cache layout exists to stop.
+    cached_dim = None
     if cached and args.features:
         probe = CachedClip.from_dict(
             torch.load(out / f"{sorted(cached)[0]}.pt", weights_only=False, mmap=True))
@@ -73,6 +82,10 @@ def main() -> int:
             raise SystemExit(
                 f"{out} holds clips in an older format. Resuming would mix the two."
                 " Delete the directory or pass a different --out.")
+        # Feature width, which --layers and the backbone both change. A mixed
+        # cache is the bug that let a model memorise two clips and learn nothing
+        # from three thousand, and a width mismatch is the readable symptom.
+        cached_dim = probe.context.shape[-1]
     ds.seq_ids = [s for s in ds.seq_ids if s not in cached]
     print(f"{found} clips on disk, {len(cached)} already cached,"
           f" {len(ds.seq_ids)} to encode", flush=True)
@@ -92,9 +105,16 @@ def main() -> int:
         # No width argument: the cache takes the backbone's own width, because a
         # projection to the model's width would be an untrainable layer sitting
         # in front of the data. `train.py` reads `feat_dim` off the cache.
-        encoder = VisualEncoder(image_size=args.image_size, stub=args.stub).to(dev).eval()
+        encoder = VisualEncoder(image_size=args.image_size, stub=args.stub,
+                                layers=args.layers).to(dev).eval()
         print(f"encoding on {dev} at {args.image_size}px, {encoder.dim}-wide features"
+              f" from layer(s) {args.layers or 'last'}"
               f"{' (STUB backbone)' if args.stub else ''}", flush=True)
+        if cached_dim is not None and cached_dim != encoder.dim:
+            raise SystemExit(
+                f"{out} holds {cached_dim}-wide features but this run produces"
+                f" {encoder.dim}-wide (layers {args.layers or 'last'}). Resuming"
+                " would mix two feature spaces. Use a different --out.")
     todo = list(range(len(ds)))
 
     t0, skipped = time.time(), []

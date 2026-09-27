@@ -69,13 +69,22 @@ class VisualEncoder(nn.Module):
         image_size: int = 512,
         patch: int = 16,
         stub: bool = False,
+        layers: tuple[int, ...] | None = None,
     ) -> None:
         super().__init__()
         self.image_size, self.patch, self.stub = image_size, patch, stub
         self.grid = image_size // patch
+        # Which backbone layers to read. None means the last one only, which is
+        # what every cache before this used. A late layer knows "this is a cube
+        # face" but has had its position smeared across 12 rounds of global
+        # attention; an early one is spatially sharp and semantically blank. A
+        # tracker needs both, which is why DELTA, TAPIP3D and SpatialTrackerV2
+        # all read several scales. Concatenated, so the adapter learns the mix
+        # on the training side of the cache boundary.
+        self.layers = tuple(layers) if layers else None
 
         if stub:
-            self.dim = 384
+            self.dim = 384 * len(self.layers or (0,))
             # Fixed random projection of raw patch pixels. Deterministic and
             # input-dependent, so a shape bug shows up but nothing is learnt.
             self.register_buffer("stub_proj", torch.randn(3 * patch * patch, self.dim) * 0.05)
@@ -86,7 +95,11 @@ class VisualEncoder(nn.Module):
             self.backbone = AutoModel.from_pretrained(model_id)
             self.backbone.requires_grad_(False)
             self.backbone.eval()
-            self.dim = self.backbone.config.hidden_size
+            self.dim = self.backbone.config.hidden_size * len(self.layers or (0,))
+            n = self.backbone.config.num_hidden_layers
+            for i in self.layers or ():
+                if not 1 <= i <= n:
+                    raise ValueError(f"layer {i} out of range: backbone has {n}")
 
         self.register_buffer("mean", torch.tensor(_MEAN).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor(_STD).view(1, 3, 1, 1))
@@ -100,16 +113,22 @@ class VisualEncoder(nn.Module):
         return (x - self.mean) / self.std
 
     def _backbone_tokens(self, x: torch.Tensor) -> torch.Tensor:
-        """(T, 3, S, S) -> (T, P, backbone_dim) patch tokens, no CLS/registers."""
+        """(T, 3, S, S) -> (T, P, self.dim) patch tokens, no CLS/registers."""
         if self.stub:
             patches = F.unfold(x, kernel_size=self.patch, stride=self.patch)  # (T, 3*p*p, P)
             return patches.transpose(1, 2) @ self.stub_proj
 
+        P = self.grid * self.grid
         with torch.no_grad():
-            out = self.backbone(pixel_values=x).last_hidden_state  # (T, 1+R+P, D)
+            if self.layers is None:
+                outs = [self.backbone(pixel_values=x).last_hidden_state]
+            else:
+                # hidden_states[0] is the embedding output, so layer i is at i.
+                hs = self.backbone(pixel_values=x, output_hidden_states=True).hidden_states
+                outs = [hs[i] for i in self.layers]
         # DINOv3 prepends a CLS token and register tokens. Taking the trailing
         # P entries drops both without hardcoding how many registers there are.
-        return out[:, -self.grid * self.grid :]
+        return torch.cat([o[:, -P:] for o in outs], dim=-1)
 
     # ---------------------------------------------------------------- public
     @torch.no_grad()
