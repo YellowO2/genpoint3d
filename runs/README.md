@@ -13,6 +13,8 @@ better.
 | 4 | `run4_adapter` | `c9d05ec` | 28000 | 0.2740 | 0.2859 | visual head moved into the model, so it trains (was frozen at random init upstream of the cache) |
 | 5 | `run5_locality` | `27c16b9` | 12000 | 0.2940 | 0.2774 | cross-attention biased towards patches near each point's current estimate |
 | 6 | `run6_corr` | `c93f990` | 12000 | **0.3540** | **0.3618** | query template compared against every patch: correlation steers the lookup, and its soft-argmax feeds in where the template matches |
+| 7 | `run7_30k` | `a13f19b` | 30000 | **0.3880** | — | same as run 6, 30k steps instead of 12k |
+| 8 | `run8_bidir` | `a13f19b` | 30000 | 0.3750 | — | `--causal 0`: a frame may attend to later frames |
 
 `compare.png` overlays every run: `python runs/plot.py runs/*.json`
 Legend labels are positional -- run 1 is the first file on the command line.
@@ -61,11 +63,37 @@ architecture never seen in training, so its collapse says nothing about whether
 the features are useful. The honest ablations keep the shape and corrupt the
 content.
 
+## Causal vs bidirectional, and a loss/metric disagreement
+
+| | best val APD | val_loss at end |
+| --- | --- | --- |
+| run7, causal | **0.3880** | 0.2775 |
+| run8, bidirectional | 0.3750 | **0.2122** |
+
+Bidirectional **generalises better and overfits far less** -- its val_loss barely
+moved from 16k to 30k (0.2068 -> 0.2122) where run7's climbed 0.2473 -> 0.2775 --
+and still scores WORSE on APD.
+
+**Our loss and our metric disagree.** The loss is l21 on 3D displacement; APD
+counts points inside depth-scaled thresholds. Cutting mean error while landing
+fewer points inside the tight bands is exactly what smoothing toward the mean
+does, and bidirectional attention smooths.
+
+Note this contradicts the closest reference: genpt sets
+`causal_attn_masking: False`. It costs us 0.013 APD. The likely difference is the
+target: **we regress raw metric 3D and every reference reparameterises** -- DELTA
+predicts `log(d_t / d_1)` and ablated it against inverse and Euclidean depth,
+genpt splits coordinate, visibility and confidence losses. Keep `--causal 1`
+until the loss is in the geometry the metric scores.
+
 ## Known open items
 
-- Best APD lands on the LAST step in runs 5 and 6, with the cosine schedule
-  already at zero. Run 4 peaked at 10k and 18k further steps changed nothing, so
-  12k was chosen -- but these two may be schedule-limited rather than converged.
+- Runs 5 and 6 peaked on their last step, so 30k was tried: run 7 reached 0.388
+  and val_loss turned up after ~16k. **Not schedule-limited any more; now
+  data-limited.** Downloading 3,144 -> ~5,600 clips (DELTA trains on 5,632).
+- Image augmentation is unavailable to us: we cache DINOv3 features, not pixels,
+  so flips and colour jitter would need the backbone re-run. Geometric jitter on
+  `patch_xyz` (DELTA's depth noise) is the version that works on a feature cache.
 - Per-frame APD: frame 0 scores 1.0000 and decays to 0.3251 by frame 23. Error
   accumulates across the rollout. Rollout training and diffusion forcing address
   this; `flow.py` already accepts `per_frame_k`.
