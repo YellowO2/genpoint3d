@@ -33,7 +33,7 @@ flowchart TD
     frame-0 camera, normalise`"]
     enc["`**[1] DINOv3-S/16 — FROZEN**
     24x24 patches, 384-wide
-    stride 16`"]
+    stride 16 — refs use 4`"]
     idc["`**ID card**
     query feature, frame 0 only`"]
     adapt["`**[1b] Feature adapter**
@@ -60,16 +60,11 @@ flowchart TD
     temporal (causal) -> spatial
     -> cross-attn to patches`"]
     heads["`**[5] Head**
-    Linear(256->3) velocity`"]
+    Linear(256->3) velocity
+    no visibility head (no AJ/OA)`"]
     sampler(["`**Flow sampler**
     50 Euler steps
     M1/M3 recompute each step`"])
-
-    vis["`**Visibility head**
-    NOT BUILT — blocks AJ, OA`"]
-    fine["`**Stride 4 + pyramid**
-    NOT BUILT
-    refs use stride 4, ours is 16`"]
 
     video --> prep --> enc
     query --> idc
@@ -77,6 +72,7 @@ flowchart TD
     enc -->|"raw grid — CACHE BOUNDARY"| adapt
     enc --> corr
     enc --> cv
+    enc -->|"patch xyz"| dist
     idc --> corr
     idc --> cv
     noisy -->|"current estimate x"| dist
@@ -85,14 +81,11 @@ flowchart TD
     adapt --> cutoff
     corr --> cond
     cv --> cond
-    idc --> cond
     cutoff -->|"features or null"| blocks
     dist -.->|"attention bias"| blocks
     tok --> blocks
     cond -.->|AdaLN| blocks
     blocks --> heads --> sampler
-    heads -.- vis
-    enc -.- fine
 
     click prep href "#stage-0"
     click enc href "#stage-1"
@@ -107,25 +100,23 @@ flowchart TD
     click blocks href "#stage-4"
     click heads href "#stage-5"
     click sampler href "#training"
-    click vis href "#gaps"
-    click fine href "#gaps"
 
     classDef done    fill:#e7f3ec,stroke:#4a9d6e,stroke-width:1.5px,color:#153322
     classDef partial fill:#fdf4e1,stroke:#d4a12c,stroke-width:1.5px,color:#3c2e0b
     classDef input   fill:#fff,stroke:#c6ccd4,stroke-width:1.5px,stroke-dasharray:4 3,color:#555d68
-    classDef gap     fill:#fdeaea,stroke:#c0504d,stroke-width:1.5px,stroke-dasharray:5 3,color:#5c1f1e
+    classDef gap     fill:#e7f3ec,stroke:#c0504d,stroke-width:1.5px,stroke-dasharray:5 3,color:#153322
 
     class video,query,noisy input
-    class prep,enc,idc,adapt,tok,cond,blocks,heads,sampler,corr,cv,dist done
+    class prep,idc,adapt,tok,cond,blocks,sampler,corr,cv,dist done
     class cutoff partial
-    class vis,fine gap
+    class enc,heads gap
 </pre>
 
         <div class="legend">
           <span><i class="sw in"></i>input</span>
           <span><i class="sw ok"></i>implemented and in use</span>
           <span><i class="sw off"></i>implemented, not in use</span>
-          <span><i class="sw gap"></i>known gap vs the references</span>
+          <span><i class="sw gap"></i>built, with a known gap vs the references</span>
         </div>
       </div>
 
