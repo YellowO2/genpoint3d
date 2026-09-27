@@ -160,7 +160,10 @@ def main() -> int:
                      correlate=bool(targs.get("correlate", 0)),
                      # Absent means a checkpoint from before the flag existed,
                      # and every one of those was causal.
-                     causal=bool(targs.get("causal", 1))).to(device)
+                     causal=bool(targs.get("causal", 1)),
+                     costvol=bool(targs.get("costvol", 0)),
+                     cv_k=targs.get("cv_k", 16),
+                     cv_support=targs.get("cv_support", 8)).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 

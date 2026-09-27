@@ -176,6 +176,43 @@ def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     )
 
 
+def check_costvol(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+    """The support window must matter, and only from frame 0.
+
+    Nothing else in this suite touches it: `id card` tests the single-vector
+    template, and the correlation checks compare that template against patches.
+    The support window is a separate path -- features gathered around the ANCHOR
+    at frame 0 -- and it is the thing CoTracker has and our first attempt did not.
+
+    Gate opened by hand; it inits at zero so an untrained model matches run6.
+    """
+    m.cv_gate.data.fill_(1.0)
+    with torch.no_grad():
+        base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        # Frame 0 is the query frame, so its patches are what the support reads.
+        f0 = ctx.clone(); f0[:, 0] += 1.0
+        a = m(x, k, anchor, context=f0, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        # A frame the model is not allowed to see must not reach the cost volume,
+        # which reads RAW features -- before the adapter swaps in the null.
+        hid = ctx.clone(); hid[:, CUT:] += 1.0
+        b = m(x, k, anchor, context=hid, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    d_sup = (a - base).abs().max().item()
+    d_masked = (b - base)[:, :CUT].abs().max().item()
+    return (
+        report("support acts", d_sup > 1e-8, f"frame-0 support moved output {d_sup:.1e} (want >0)"),
+        report("cv not leaking", d_masked < 1e-8,
+               f"masked-frame features moved visible output {d_masked:.1e} (want 0)"),
+    )
+
+
+def check_cv_optional() -> bool:
+    """--costvol 0 must create no parameters, so run6/7/8 checkpoints still load."""
+    torch.manual_seed(0)
+    off = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True, costvol=False)
+    extra = [n for n in off.state_dict() if n.startswith("cv_")]
+    return report("cv optional", not extra, f"--costvol 0 adds {len(extra)} params (want 0)")
+
+
 def check_bidirectional(x, k, anchor, ctx, vm, idc, pxyz) -> bool:
     """--causal 0 must actually let a frame see later frames.
 
@@ -257,6 +294,8 @@ def main() -> int:
     # Last: it opens the correlation gates, which mutates the model.
     ok &= check_bidirectional(*args)
     ok &= check_corr_optional()
+    ok &= check_cv_optional()
+    ok &= all(check_costvol(m, *args))
     ok &= all(check_correlation(m, *args))
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")

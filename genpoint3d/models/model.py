@@ -48,6 +48,10 @@ class PointDiT(nn.Module):
         locality: bool = True,
         correlate: bool = True,
         causal: bool = True,
+        costvol: bool = True,
+        cv_k: int = 16,
+        cv_support: int = 8,
+        cv_dim: int = 32,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -68,6 +72,8 @@ class PointDiT(nn.Module):
         # to leak (docs/references.md:19). It exists for autoregressive rollout
         # and diffusion forcing, neither of which is built yet.
         self.causal = causal
+        self.costvol = costvol and cross_attn
+        self.cv_k, self.cv_support, self.cv_dim = cv_k, cv_support, cv_dim
         head_dim = dim // num_heads
 
         # [path encoder] representing the current diffused path for the video
@@ -93,6 +99,23 @@ class PointDiT(nn.Module):
             # Gated to zero at init so the model starts as the run5 model.
             self.match_emb = FourierEmbedding(3, cond_dim)
             self.match_gate = nn.Parameter(torch.zeros(1))
+
+        # [cost volume] CoTracker3 and genpt compare a 7x7 support WINDOW around
+        # the query against a 7x7 crop at the current estimate, then MLP the
+        # resulting 49x49 table. One similarity score per patch throws away where
+        # inside the window the match peaks and how sharply; the table keeps it.
+        # We take k nearest patches in 3D rather than a square image crop,
+        # because our estimate lives in 3D and we never project -- the same
+        # substitution TAPIP3D makes in knn_feature_4d.
+        if self.costvol:
+            # Matching happens in a narrow learned space: gathering feat_dim-wide
+            # features per (frame, point, neighbour) is 600 MB at batch 16.
+            self.cv_proj = nn.Linear(feat_dim, cv_dim, bias=False)
+            self.cv_mlp = nn.Sequential(
+                nn.Linear(cv_support * cv_k + cv_k * 3, cond_dim), nn.GELU(),
+                nn.Linear(cond_dim, cond_dim),
+            )
+            self.cv_gate = nn.Parameter(torch.zeros(1))
 
         # [condition encoder] conditioning vector c
         self.anchor_emb = FourierEmbedding(3, cond_dim)
@@ -160,6 +183,48 @@ class PointDiT(nn.Module):
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
 
+        # --- where each point currently thinks it is, relative to every patch ---
+        # x and patch_xyz share one normalised space, so this is a plain distance
+        # and needs no camera. It is the lookup every established tracker does by
+        # projecting into the image and sampling there; in 3D the projection is
+        # unnecessary. Computed once, used by the cost volume and by every block.
+        dist2 = None
+        if context is not None and patch_xyz is not None and (self.locality or self.costvol):
+            # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
+            # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
+            dist2 = (x.pow(2).sum(-1)[..., None]
+                     + patch_xyz.pow(2).sum(-1)[:, :, None]
+                     - 2 * torch.einsum("btnc,btpc->btnp", x, patch_xyz)).clamp_min(0)
+
+        # --- [cost volume] support window vs the neighbourhood of the estimate ---
+        cv = None
+        if self.costvol and dist2 is not None:
+            cf = self.cv_proj(context)                                # (B, T, P, cv)
+            # Support: the patches around where the point STARTS. The 3D
+            # equivalent of CoTracker's window around the query pixel, and it
+            # replaces a single-vector template that many patches match equally.
+            d0 = (anchor.pow(2).sum(-1)[..., None]
+                  + patch_xyz[:, 0].pow(2).sum(-1)[:, None]
+                  - 2 * torch.einsum("bnc,bpc->bnp", anchor, patch_xyz[:, 0]))
+            si = d0.topk(self.cv_support, dim=-1, largest=False).indices   # (B, N, S)
+            sup = cf[:, 0].gather(1, si.reshape(B, -1)[..., None]
+                                  .expand(-1, -1, self.cv_dim)).reshape(B, N, self.cv_support, -1)
+
+            # Neighbourhood: the patches nearest the CURRENT estimate, per frame.
+            ni = dist2.topk(self.cv_k, dim=-1, largest=False).indices      # (B, T, N, K)
+            flat = ni.reshape(B, T, -1)[..., None]
+            nb = cf.gather(2, flat.expand(-1, -1, -1, self.cv_dim)) \
+                   .reshape(B, T, N, self.cv_k, -1)
+            # Offsets, not absolute positions: "two cells up-left of you" is the
+            # part a single similarity score cannot express.
+            off = patch_xyz.gather(2, flat.expand(-1, -1, -1, 3)) \
+                           .reshape(B, T, N, self.cv_k, 3) - x[..., None, :]
+
+            cost = torch.einsum("bnsc,btnkc->btnsk", sup, nb) * self.cv_dim ** -0.5
+            cv = self.cv_mlp(torch.cat([cost.flatten(3), off.flatten(3)], dim=-1))
+            if visual_mask is not None:
+                cv = cv * visual_mask[..., None, None]
+
         # --- [correlation] template vs every patch, on the RAW features ---
         # Read before the adapter overwrites `context`. The model previously had
         # the template and the patches but nothing that compared them, so the
@@ -190,6 +255,8 @@ class PointDiT(nn.Module):
             cond = cond + self.id_feature_proj(id_card)[:, None]   # the "what am I" term
         if match_xyz is not None:
             cond = cond + self.match_gate * self.match_emb(match_xyz)  # "and here"
+        if cv is not None:
+            cond = cond + self.cv_gate * cv.to(cond.dtype)   # "and this is the fit"
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         # --- [feature adapter] raw backbone width -> model width, plus position ---
@@ -205,18 +272,8 @@ class PointDiT(nn.Module):
                     visual_mask[..., None, None], context, self.null_ctx.to(context.dtype)
                 )
 
-        # --- where each point currently thinks it is, relative to every patch ---
-        # x and patch_xyz share one normalised space, so this is a plain distance
-        # and needs no camera. It is the lookup every established tracker does by
-        # projecting into the image and sampling there; in 3D the projection is
-        # unnecessary. Computed once and reused by all `depth` cross blocks.
-        dist2 = None
-        if context is not None and self.locality:
-            # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
-            # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
-            dist2 = (x.pow(2).sum(-1)[..., None]
-                     + patch_xyz.pow(2).sum(-1)[:, :, None]
-                     - 2 * torch.einsum("btnc,btpc->btnp", x, patch_xyz))
+        # --- the same distances, folded into the attention bias ---
+        if dist2 is not None and self.locality:
             # A masked frame is one the model is not allowed to see, and its
             # patch positions come from that frame's depth. Its features are
             # already replaced, so nothing can flow today -- every value is the
@@ -225,7 +282,9 @@ class PointDiT(nn.Module):
             # handling to change before it becomes a leak.
             if visual_mask is not None:
                 dist2 = dist2 * visual_mask[..., None, None]
-            dist2 = dist2.clamp_min(0).reshape(B * T, N, -1)
+            dist2 = dist2.reshape(B * T, N, -1)
+        else:
+            dist2 = None
         if corr is not None:
             corr = corr.reshape(B * T, N, -1)
 

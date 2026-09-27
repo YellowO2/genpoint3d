@@ -97,6 +97,43 @@ APD 55.38 where the paper says 85.44. Do not cite it.
   - Code: https://github.com/tesfaldet/genpt  (src/, configs/, checkpoints, MIT)
   - Same core method (video-conditioned flow-matching point generation), different authors.
 
+### genpt's config, read from the source (configs/model/genpt_fm.yaml)
+
+The closest reference: same method (flow-matching point tracking), full code.
+**Its config is CoTracker3's design near-verbatim**, so the evidence behind these
+numbers is CoTracker3's published results, not genpt's (arXiv only, no numbers
+we have found). Verified against `cotracker3_online.py:45-49`.
+
+| | CoTracker3 | genpt | ours |
+| --- | --- | --- | --- |
+| encoder | RAFT CNN | RAFT CNN | frozen DINOv3 ViT-S/16 |
+| **stride** | **4** | **4** | **16** |
+| correlation | `corr_radius=3` -> 7x7 | `corr_crop_diameter: 7` | whole frame, 576 patches |
+| query template | support window | `query_support_size: 7` | k-nearest window (was: 1 vector) |
+| pyramid levels | `corr_levels=4` | `num_pyramid_levels: 3` | 1 |
+| virtual tracks | 64 | 64 | none |
+| token dim | — | 256 | 256 |
+| heads | — | 8 | 4 |
+| depth | — | 6 | 6 |
+| mlp mult | — | 2 | 3 |
+| **causal mask** | n/a | **False** | flag, default True |
+| window | 8 | 16 | 24 (whole clip) |
+| refinement steps (train) | — | **4** | 1 |
+| losses | — | coord + vis + conf | coord only |
+
+**Their conditioning IS the correlation** (`genpt_fm.py:365`: `curr_cond =
+curr_feat_corrs_0`). They crop 7x7 at the current estimate, correlate against a
+7x7 support window -> 7^2 x 7^2 = 2401 values per level (`genpt_fm.py:147`), MLP
+each level to 256, concatenate. **There is no cross-attention over patch tokens.**
+
+**Fine stride and local cropping are coupled.** A correlation tensor is
+(B,T,N,P); at stride 4, P=9216 and that is ~1.8 GB. Cropping is what makes the
+resolution affordable, so "upsample 2x" was never a standalone change.
+
+**Why we take k-nearest in 3D instead of a 7x7 image crop:** our estimate lives
+in 3D and we never project. TAPIP3D makes the same substitution
+(`knn_feature_4d_optimized.py:510-530`).
+
 ## 3D point tracking — coordinate-frame reference
 - **D4RT: Efficiently Reconstructing Dynamic Scenes One D4RT at a Time** —
   Zhang et al. (Google DeepMind / UCL / Oxford). CVPR 2026 **Best Paper**.
