@@ -20,3 +20,6 @@ __pycache__/
 
 # Rerun recordings, rendered from checkpoints and re-creatable at will.
 *.rrd
+
+# Secrets. Never commit.
+.env
