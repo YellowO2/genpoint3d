@@ -40,14 +40,14 @@ flowchart TD
     Linear(384->256) + patch xyz`"]
 
     dist["`**[M1] Locality bias**
-    prefer patches near x
-    geometry only, no pixels`"]
+    prefer patches near the
+    current estimate x`"]
     corr["`**[M2] Correlation**
     ID card vs every patch
     -> match position`"]
     cv["`**[M3] Cost volume**
-    8 support x 16 nearest
-    + offsets -> MLP`"]
+    8 support patches x 16 nearest
+    to x, + offsets -> MLP`"]
 
     tok["`**[2] Path tokeniser**
     Linear(3->256)`"]
@@ -75,8 +75,6 @@ flowchart TD
     enc -->|"patch xyz"| dist
     idc --> corr
     idc --> cv
-    noisy -->|"current estimate x"| dist
-    noisy --> cv
     noisy --> tok
     adapt --> cutoff
     corr --> cond
