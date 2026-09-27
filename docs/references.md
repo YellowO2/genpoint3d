@@ -240,8 +240,9 @@ ground-truth depth (DELTA paper, Table 3):
 With GT depth the numbers are **80-90**, not ~19. Their eval set is 143 videos
 of 24 frames at 384x512 -- structurally near-identical to our val split.
 
-**DELTA trains on 5,632 Kubric videos. We have 322.** A 17x data gap, which is
-the concrete basis for "we are data-limited, not architecture-limited".
+**DELTA trains on 5,632 Kubric videos. We have 3,144 train clips** (this used to
+read 322 and was never updated). A 1.8x gap, so data is no longer the obvious
+explanation -- and runs 4-6 showed the shortfall was architectural after all.
 
 **Gen-points** (our paper) reports Kubric *2D pixel* tracking: delta_avg ~64,
 AJ ~53, OA ~85-88. Also not comparable -- 2D, different split, 200k steps.
@@ -260,6 +261,6 @@ From `TAPIP3D/evaluation/tapvid3d_metrics.py`:
   monocular depth is scale-ambiguous. With Kubric GT depth we would use
   `scaling="none"`.
 
-**TODO:** port this implementation so our results become comparable. Our
-current `delta_avg` in `scripts/train.py` uses arbitrary fixed thresholds and
-is NOT the same measure.
+**DONE** -- `genpoint3d/eval/metrics.py` implements this, and
+`use_fixed_metric_threshold` defaults to False, so our APD *is* APD3D. Our 0.386
+is their 38.6, directly comparable to the Kubric3D table above.
