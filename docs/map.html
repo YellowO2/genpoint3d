@@ -23,66 +23,109 @@
       <div id="left">
         <pre class="mermaid">
 flowchart TD
-    video["`RGB video
-    + depth + pose`"]
-    noisy["`Noisy trajectory
-    T x N x 3, pure noise at the start`"]
+    video["`RGB video + depth + pose`"]
     query["`Query points
-    2D pixel + frame index`"]
+    2D pixel + frame`"]
+    noisy["`Noisy trajectory x
+    T x N x 3`"]
 
-    prep["`**[0] Preprocessing**
-    reframe + normalise`"]
-    enc["`**[1] Visual encoder**
-    DINOv3-S, frozen`"]
+    prep["`**[0] Preprocess**
+    frame-0 camera, normalise`"]
+    enc["`**[1] DINOv3-S/16 — FROZEN**
+    24x24 patches, 384-wide
+    stride 16`"]
+    idc["`**ID card**
+    query feature, frame 0 only`"]
     adapt["`**[1b] Feature adapter**
-    backbone width -> model width
-    + each patch's 3D position`"]
-    tok["`**[2] Trajectory tokeniser**`"]
-    cond["`**[3] Query + timestep conditioning**
-    appearance and position at query
-    + noise level`"]
-    cutoff["`**Conditioning cutoff**
-    features before, null after
-    tracking vs forecasting`"]
-    blocks["`**[4] DiT blocks x6**
-    temporal + spatial
-    + point-image`"]
-    heads["`**[5] Output head**
-    position`"]
+    Linear(384->256) + patch xyz`"]
+
+    dist["`**[M1] Locality bias**
+    prefer patches near x
+    geometry only, no pixels`"]
+    corr["`**[M2] Correlation**
+    ID card vs every patch
+    -> match position`"]
+    cv["`**[M3] Cost volume**
+    8 support x 16 nearest
+    + offsets -> MLP`"]
+
+    tok["`**[2] Path tokeniser**
+    Linear(3->256)`"]
+    cond["`**[3] Conditioning c**
+    noise level + anchor + ID card
+    + M2 + M3`"]
+    cutoff["`**Visual cutoff**
+    null after T_C = forecasting`"]
+    blocks["`**[4] DiT x6**
+    temporal (causal) -> spatial
+    -> cross-attn to patches`"]
+    heads["`**[5] Head**
+    Linear(256->3) velocity`"]
+    sampler(["`**Flow sampler**
+    50 Euler steps
+    M1/M3 recompute each step`"])
+
+    vis["`**Visibility head**
+    NOT BUILT — blocks AJ, OA`"]
+    fine["`**Stride 4 + pyramid**
+    NOT BUILT
+    refs use stride 4, ours is 16`"]
 
     video --> prep --> enc
+    query --> idc
+    enc --> idc
+    enc -->|"raw grid — CACHE BOUNDARY"| adapt
+    enc --> corr
+    enc --> cv
+    idc --> corr
+    idc --> cv
+    noisy -->|"current estimate x"| dist
+    noisy --> cv
     noisy --> tok
-    query --> cond
-    enc -->|"raw feature map (CACHED)"| adapt
-    adapt -->|"feature map"| cond
-    adapt -->|"feature map"| cutoff
+    adapt --> cutoff
+    corr --> cond
+    cv --> cond
+    idc --> cond
     cutoff -->|"features or null"| blocks
+    dist -.->|"attention bias"| blocks
     tok --> blocks
     cond -.->|AdaLN| blocks
-    blocks --> heads
+    blocks --> heads --> sampler
+    heads -.- vis
+    enc -.- fine
 
     click prep href "#stage-0"
     click enc href "#stage-1"
+    click idc href "#stage-3"
     click adapt href "#stage-1b"
+    click dist href "#matching"
+    click corr href "#matching"
+    click cv href "#matching"
     click tok href "#stage-2"
     click cond href "#stage-3"
     click cutoff href "#masking"
     click blocks href "#stage-4"
     click heads href "#stage-5"
+    click sampler href "#training"
+    click vis href "#gaps"
+    click fine href "#gaps"
 
     classDef done    fill:#e7f3ec,stroke:#4a9d6e,stroke-width:1.5px,color:#153322
     classDef partial fill:#fdf4e1,stroke:#d4a12c,stroke-width:1.5px,color:#3c2e0b
     classDef input   fill:#fff,stroke:#c6ccd4,stroke-width:1.5px,stroke-dasharray:4 3,color:#555d68
+    classDef gap     fill:#fdeaea,stroke:#c0504d,stroke-width:1.5px,stroke-dasharray:5 3,color:#5c1f1e
 
     class video,query,noisy input
-    class prep,enc,adapt,tok,cond,blocks,heads done
+    class prep,enc,idc,adapt,tok,cond,blocks,heads,sampler,corr,cv,dist done
     class cutoff partial
+    class vis,fine gap
 </pre>
 
         <div class="legend">
           <span><i class="sw in"></i>input</span>
           <span><i class="sw ok"></i>implemented and in use</span>
           <span><i class="sw off"></i>implemented, not in use</span>
+          <span><i class="sw gap"></i>known gap vs the references</span>
         </div>
       </div>
 
@@ -90,6 +133,7 @@ flowchart TD
         <nav>
           <button data-doc="training">Training</button>
           <button data-doc="decisions">Decisions</button>
+          <button data-doc="gaps">Known gaps</button>
           <button data-doc="sources">Code sources</button>
         </nav>
 
@@ -122,11 +166,21 @@ what is learnable. Anything downstream of this line is trainable, so it
 must not live in encoder.py -- preprocess.py runs that file once and
 throws the layers away.
 
-NOT YET IMPLEMENTED, and in the paper's spec: take MULTIPLE backbone
-layers, concatenate them, and upsample 2x. We take last_hidden_state only,
-at one scale. At 384px with patch 16 that is a 24x24 grid, so one patch
-covers 16 pixels -- coarser than the localisation a tracker needs, which
-is what the 2x upsample is for.
+The paper's spec says: take MULTIPLE backbone layers, concatenate them,
+and upsample 2x. Half of that exists -- `preprocess.py --layers 6 12`
+concatenates layers -- but it is UNUSED, because it needs its own cache and
+because reading genpt's config showed it is not what the references do.
+
+The upsample half is not built, and it is the half that matters. At 384px
+with patch 16 the grid is 24x24, so one patch covers a 16x16 pixel block:
+an EFFECTIVE STRIDE OF 16. CoTracker3 (`stride=4`) and genpt
+(`encoder_stride: 4`) both run at 4. That is 16x more spatial cells, and it
+bounds how precisely any of the matching below can localise a point.
+
+Note a ViT cannot give a pyramid the way a CNN does: every layer is the
+same 24x24 resolution, so picking layers varies DEPTH, not resolution.
+Finer needs a bigger input image (768px -> 48x48) or a DPT-style
+upsampler.
         </pre
           >
         </section>
@@ -205,22 +259,116 @@ Then at inference, we mask it deliberately too (like pass the null embedding) to
           Cross-attention (step 3) — each point queries its frame's feature map.
           RMSNorm, QK-norm, GEGLU FFN. RoPE on time; axial RoPE on query xyz. 4c
           is the tracking/forecasting switch: masked frames get the learned null
-          embedding ∅ instead of C_t. Same machinery, no branching. Why
-          cross-attention and not correlation features: correlation needs a
-          template matched against a real image. In forecasting there is no
-          image. Cross-attention just swaps in ∅ and keeps running. Paper sizes:
-          6 blocks / dim 384 (main), 12 / 768 (Kinetics). Ours: 11.93M params at
-          dim 256 / depth 6 / 4 heads.
+          embedding ∅ instead of C_t. Same machinery, no branching. Cross-attention was chosen over correlation
+          features on the grounds that correlation needs a template matched
+          against a real image and forecasting has no image. THAT REASONING WAS
+          WRONG, and an ablation proved it: with cross-attention alone the model
+          scored the static baseline whether it was given the right video or
+          another clip's. Correlation is now computed as well (see Visual
+          matching), and a masked frame simply zeroes it, exactly as ∅ does for
+          cross-attention. Paper sizes: 6 blocks / dim 384 (main), 12 / 768
+          (Kinetics). Ours: 18.35M params at dim 256 / depth 6 / 4 heads.
+          genpt uses 8 heads and mlp_mult 2; we use 4 and 3.
         </section>
 
         <section id="stage-5">
           <h2>[5] Output heads</h2>
           A "head" is a small output layer converting a hidden vector into the
           format we want. Position — Linear(D → 3), predicts the velocity x1 −
-          x0, L2 loss. Visibility — Linear(D → 1), predicts clean V1, BCE loss.
-          Step 4. Visibility means geometric occluded/off-screen, predicted for
-          every frame including forecast frames. A forecast point is not
-          automatically invisible.
+          x0. Loss is l21 by default, weighted per point so the error is measured
+          in units of the APD threshold (`apd_weight`, after TAPIP3D's
+          `scale_loss_by_depth`).
+
+          Visibility — Linear(D → 1) with BCE on the ground-truth visibility —
+          is NOT BUILT. The model has only the position head. Consequence: of
+          the benchmark's three headline metrics we can report APD and neither AJ
+          (which requires the visibility call to be right) nor OA (which is
+          purely visibility). It would not improve APD; it makes results
+          reportable. Visibility means geometrically occluded or off-screen, and
+          would be predicted for every frame including forecast frames — a
+          forecast point is not automatically invisible.
+        </section>
+
+        <section id="matching">
+          <h2>Visual matching — M1, M2, M3</h2>
+          <pre>
+Three separate ways the model relates a point to the image. All three are
+recomputed at EVERY sampling step, because all three read the current
+estimate x, which the sampler updates 50 times.
+
+[M1] LOCALITY BIAS  (run5, APD 0.274 -> 0.294)
+  dist2 = |x - patch_xyz|^2 for all 576 patches, added to the
+  cross-attention logits as -dist2 * softplus(w), one learnable w per
+  block. Prefers patches near where the point currently thinks it is.
+  NOTE: this contains NO PIXELS. x and patch_xyz are both geometry, so it
+  narrows the search without carrying any information about the image --
+  which is why the ablation still showed the video being ignored after it.
+  Equivalent in spirit to DELTA's ALiBi-style spatial bias.
+
+[M2] GLOBAL CORRELATION  (run6, 0.294 -> 0.354)
+  corr = corr_q(id_card) . corr_k(context), one score per patch, on RAW
+  backbone features. Used twice: added to the attention logits so
+  appearance steers the lookup, and softmaxed over patches to give a
+  weighted-average patch position -- "where in this frame does the query
+  appear" -- fed into [3].
+  This is what made the model actually read the video: after it,
+  swapping in another clip's frames drops APD BELOW the static baseline.
+
+[M3] COST VOLUME  (run9, running)
+  8 support patches nearest the anchor at frame 0, correlated against the
+  16 patches nearest the current estimate, giving an 8x16 table, plus each
+  neighbour's offset from x. MLP -> 256 -> [3].
+  Why: one score per patch throws away WHERE INSIDE the neighbourhood the
+  match peaks and how sharply. CoTracker3 and genpt correlate a 7x7 support
+  window against a 7x7 crop and MLP the 49x49 result
+  (`genpt_fm.py:147`); their conditioning IS that correlation
+  (`genpt_fm.py:365`) and they have no patch cross-attention at all.
+  We take k-nearest in 3D rather than a square image crop because our
+  estimate lives in 3D and we never project -- TAPIP3D substitutes the same
+  way in knn_feature_4d.
+
+Each is switchable: --locality 0, --correlate 0, --costvol 0. All three
+create no parameters when off, so older checkpoints still load, and every
+gate initialises at ZERO so an untrained model reproduces the previous one
+exactly.
+          </pre>
+        </section>
+
+        <section id="gaps">
+          <h2>Known gaps vs the references</h2>
+          <pre>
+Read from source, not from abstracts: configs/model/genpt_fm.yaml and
+cotracker3_online.py:45-49. genpt is the closest reference (same method,
+full code) and ITS CONFIG IS COTRACKER3'S, so the evidence behind these
+numbers is CoTracker3's published results.
+
+                      CoTracker3   genpt    ours
+  encoder             RAFT CNN     RAFT CNN frozen DINOv3 ViT-S/16
+  stride              4            4        16          <-- biggest gap
+  correlation window  7x7          7x7      k-nearest in 3D
+  query template      window       7x7      8 support patches
+  pyramid levels      4            3        1
+  virtual tracks      64           64       none
+  causal mask         n/a          False    True (measured better for us)
+  refinement (train)  --           4 steps  none
+  losses              --           coord + vis + conf   coord only
+
+FINE STRIDE AND LOCAL CROPPING ARE COUPLED. A correlation tensor is
+(B,T,N,P); at stride 4, P=9216 and that is ~1.8 GB. Cropping is what makes
+the resolution affordable, so "upsample 2x" was never a standalone change
+-- M3 is its prerequisite.
+
+Also unbuilt: the visibility head (blocks AJ and OA), diffusion forcing
+(`flow.py` already accepts per_frame_k), autoregressive sliding window
+(nothing to slide on 24-frame clips), and point-count factorisation.
+
+One open puzzle, not a gap: our loss and our metric disagree. Bidirectional
+attention cut val_loss 0.278 -> 0.212 while APD fell 0.388 -> 0.375, on the
+SAME val clips. The loss is a continuous error; APD is a threshold count.
+Every reference reparameterises the target -- DELTA predicts log(d_t/d_1)
+and ablates it against inverse and Euclidean depth -- and we regress raw
+metric 3D.
+          </pre>
         </section>
 
         <!-- ═══ everything else — reached from the nav buttons ═══ -->

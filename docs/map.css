@@ -93,6 +93,7 @@ h2 {
 .sw.in  { background: #fff;     border-color: #c6ccd4; border-style: dashed; }
 .sw.ok  { background: #e7f3ec;  border-color: #4a9d6e; }
 .sw.off { background: #fdf4e1;  border-color: #d4a12c; }
+.sw.gap { background: #fdeaea;  border-color: #c0504d; border-style: dashed; }
 
 /* Some sections wrap their prose in <pre>. Left alone that is monospace and
    never wraps, so a long line pushes the whole page sideways. Prose <pre>
