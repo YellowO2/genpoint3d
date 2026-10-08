@@ -135,6 +135,11 @@ def main() -> int:
                         "tracks into the image and scores the original TAP-Vid "
                         "pixel thresholds, which is blind to depth error. The "
                         "two together say whether depth is what we get wrong.")
+    p.add_argument("--oracle-z", action="store_true",
+                   help="replace the PREDICTION's depth channel with the truth "
+                        "before scoring. An error decomposition, not an input: "
+                        "the gap to the plain 3D score is the share of 3D error "
+                        "that is purely depth.")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -195,7 +200,7 @@ def main() -> int:
                               anchor_frame0) if args.per_frame else None
     m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp,
                  anchor_frame0=anchor_frame0, loss_type=loss_type,
-                 space=args.space)
+                 space=args.space, oracle_z=args.oracle_z)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss"):
