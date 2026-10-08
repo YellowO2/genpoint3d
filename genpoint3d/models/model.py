@@ -45,6 +45,7 @@ class PointDiT(nn.Module):
         cond_dim: int | None = None,
         cross_attn: bool = False,
         feat_dim: int | None = None,
+        adapter_depth: int = 1,
         locality: bool = True,
         correlate: bool = True,
         causal: bool = True,
@@ -83,7 +84,20 @@ class PointDiT(nn.Module):
         # Always on when there are features: the patch position is added to
         # frame_proj's output, and W(f + p) = Wf + Wp, so the what/where balance
         # is only learnable if a layer sits before the sum.
-        self.frame_proj = nn.Linear(feat_dim, dim, bias=False) if cross_attn else None
+        # adapter_depth > 1 puts a non-linearity between the frozen backbone and
+        # the model. The encoder is cached frozen, so a single linear map is the
+        # only thing that ever adapts DINOv3's features to tracking -- and a
+        # linear map cannot do much. Depth 1 stays a bare Linear so the
+        # parameter keeps its name and old checkpoints still load.
+        if not cross_attn:
+            self.frame_proj = None
+        elif adapter_depth <= 1:
+            self.frame_proj = nn.Linear(feat_dim, dim, bias=False)
+        else:
+            layers = [nn.Linear(feat_dim, dim, bias=False)]
+            for _ in range(adapter_depth - 1):
+                layers += [nn.GELU(), nn.Linear(dim, dim, bias=False)]
+            self.frame_proj = nn.Sequential(*layers)
         self.patch_pos = FourierEmbedding(3, dim) if cross_attn else None
         self.id_feature_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
 

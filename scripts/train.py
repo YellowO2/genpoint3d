@@ -423,6 +423,12 @@ def main() -> int:
     # than denoised. 0 reproduces the earlier behaviour.
     # Bias cross-attention towards patches near each point's current position.
     # 0 is the model that ignored which video it was given.
+    p.add_argument("--adapter-depth", type=int, default=1,
+                   help="layers in the feature adapter. The encoder is cached "
+                        "frozen, so this map is the ONLY thing that adapts "
+                        "DINOv3 to tracking; at depth 1 it is a single linear "
+                        "layer. Deepening it is the cheap stand-in for "
+                        "unfreezing the backbone, which the cache forbids.")
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
@@ -516,6 +522,7 @@ def main() -> int:
 
     model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
                      cross_attn=has_feats, feat_dim=feat_dim,
+                     adapter_depth=args.adapter_depth,
                      locality=bool(args.locality),
                      correlate=bool(args.correlate),
                      causal=bool(args.causal),

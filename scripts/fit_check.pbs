@@ -37,6 +37,10 @@ source $ROOT/venvs/fyp/bin/activate
 CKPT=${CKPT:-outputs/run7_30k/best.pt}
 CACHE=${CACHE:-$ROOT/cache/kubric}
 N=${N:-50}
+# SPACE=2d projects both tracks into the image and scores pixel thresholds, so
+# depth error stops counting. Run both and the pair says whether depth is what
+# we get wrong.
+SPACE=${SPACE:-3d}
 WORK=$ROOT/fit_check
 
 # val_frac and seed must match the run's run.json, or these are not the clips
@@ -48,9 +52,10 @@ done
 
 for SPLIT in train val; do
   echo
-  echo "################ $SPLIT split ($N clips) ################"
+  echo "########## $SPLIT split, $SPACE score ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --out "$(dirname "$CKPT")/fit_check_$SPLIT.json"
+    --space "$SPACE" \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}.json"
 done
 
 echo "=== FIT CHECK DONE ==="

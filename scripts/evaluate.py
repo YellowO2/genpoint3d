@@ -160,6 +160,7 @@ def main() -> int:
     model = PointDiT(dim=targs["dim"], depth=targs["depth"],
                      num_heads=targs["heads"], cross_attn=has_feats,
                      feat_dim=feat_dim,
+                     adapter_depth=targs.get("adapter_depth", 1),
                      # Absent means a checkpoint from before the prior existed.
                      locality=bool(targs.get("locality", 0)),
                      correlate=bool(targs.get("correlate", 0)),
