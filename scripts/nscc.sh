@@ -13,13 +13,22 @@
 # passwords in YOUR terminal -- do not put them in a file, and never in a repo.
 
 set -euo pipefail
-REPO=~/scratch/genpoint3d
+REPO='$HOME/scratch/genpoint3d'
 
 case "${1:-}" in
   pull) exec ssh nscc "cd $REPO && git pull" ;;
   logs)
-    # -O: some jump-host setups reject sftp, which scp now uses by default.
-    exec scp -O "nscc:$REPO/outputs/*/log.json" "$(dirname "$0")/../runs/" ;;
+    # Every log is named log.json, so a plain scp would overwrite them all into
+    # one file. Stream them as a tar instead and name each after its run dir.
+    dest=$(cd "$(dirname "$0")/../runs" && pwd)
+    ssh nscc "cd $REPO/outputs && tar cf - */log.json" | tar xf - -C "$dest"
+    for d in "$dest"/*/; do
+      [ -f "$d/log.json" ] || continue
+      mv -f "$d/log.json" "$dest/$(basename "$d").json"
+      rmdir "$d"
+    done
+    ls -la "$dest"/*.json
+    exit 0 ;;
   "")
     echo "usage: $0 <command> | pull | logs" >&2; exit 2 ;;
 esac
