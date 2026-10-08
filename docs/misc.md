@@ -265,3 +265,35 @@ Useful conversions:
 
 
 Kubrics Data is from tappid
+## Query points are sampled randomly per cache -- static baselines will differ
+
+`preprocess.py` chooses WHICH points to track at random, so two caches built
+from the same clips hold different query points. Verified on clip 000000:
+`intrinsics` are equal between `cache/kubric` and `cache/kubric_768`, but
+`query_uv` is not.
+
+The symptom is an `apd_static` that does not match earlier runs (0.223 or 0.214
+against the familiar 0.241) while nothing about the geometry has changed.
+`--image-size` does not cause it: the encoder resizes images internally and the
+cache clones the transform's intrinsics untouched.
+
+So **APD from two different caches is not directly comparable**. Compare each
+run to its own `apd_static`, or train a matched control on the same cache.
+Matching the clips is not enough and is a separate problem, solved by
+symlinking one cache's filenames at another resolution:
+
+    SRC=~/scratch/cache/kubric; DST=~/scratch/cache/kubric_768_3493
+    mkdir -p $DST && for f in $SRC/*.pt; do
+      ln -s ~/scratch/cache/kubric_768/$(basename $f) $DST/$(basename $f)
+    done
+
+`split()` sorts filenames and permutes with a fixed seed, so an identical set
+of names and count reproduces the identical train/val partition.
+
+## ControlMaster sockets go stale when the VPN drops
+
+`~/.ssh/config` multiplexes `nscc` with `ControlPersist 10m`. When GlobalProtect
+disconnects mid-session the socket survives but the tunnel does not, and the
+next command fails with `mux_client_request_session: read from master failed:
+Broken pipe`. Clear it with `ssh -O exit nscc` and reconnect. A PBS job is
+unaffected -- it runs on the cluster and needs no connection from this end.

@@ -100,3 +100,114 @@ until the loss is in the geometry the metric scores.
 - The encoder takes `last_hidden_state` at one scale. The paper's spec is
   multiple layers concatenated and upsampled 2x. At 384px with patch 16 the grid
   is 24x24, so one patch covers 16 pixels -- coarser than a tracker needs.
+
+## Runs 9-11: measuring bias instead of guessing at it (2026-10-09)
+
+run9_costvol reached 0.3864 against run7's 0.3884. The cost volume changed
+nothing, so k-nearest-in-3D does not reproduce a 7x7 image crop at stride 16.
+
+### The model does not fit its own training data
+
+`scripts/fit_check.pbs` scores one checkpoint on 50 train clips and 50 val
+clips with identical code. On run7_30k/best.pt:
+
+| split | APD | static | vs static |
+| --- | --- | --- | --- |
+| train | 0.571 | 0.296 | 1.93x |
+| val | 0.453 | 0.316 | 1.44x |
+
+Train APD of 0.57 after 30k steps on clips the model has seen is underfitting.
+If data were the binding constraint this would read 0.85-0.9 with only val
+lagging. The overfit-2-clips run is NOT this measurement: it tests whether the
+pipeline can memorise two clips, not whether the architecture can fit 3144.
+
+The loss curves cannot substitute for it. train_loss is a running average taken
+while the weights are still moving, and at step 2000 run9 logs train 0.550
+against val 0.353 -- train above val, so they are not the same quantity. Hence
+`--train-eval N`, which scores N train clips at every validation.
+
+The standard bias recipe says more training data does not fix high bias, which
+retires the "grow to 5,600 clips" plan as a bias fix. It remains a variance fix.
+
+### Most of the 3D error is depth error
+
+run7_30k/best.pt, same 50 clips, same points, same thresholds:
+
+| split | 3D | 3D with true depth | 2D |
+| --- | --- | --- | --- |
+| train | 0.571 | 0.689 | 0.702 |
+| val | 0.453 | 0.602 | 0.655 |
+
+Substituting the ground-truth depth channel into the *prediction* recovers
+0.149 of the 0.202 gap to the 2D score, so roughly three quarters of what
+separates our 3D number from our 2D number is depth. The 2D train/val gap is
+also far smaller (0.047 vs 0.118): in the image plane we are close to fitting.
+
+For scale, Gen-points reports Kubric 2D delta_avg ~64 and our val 2D is 65.5.
+Different split and protocol, so not a like-for-like claim -- but the 2D half
+of the problem is roughly at the level of the paper we are extending, and the
+3D half is where the shortfall lives. This is the evidence for DELTA's
+`log(d_t / d_1)` target, which is still not implemented.
+
+`--oracle-z` is an error decomposition, not an oracle input: the model has
+already produced its answer and only the depth channel of that answer is
+replaced before scoring. Nothing is fed back, unlike handing a feature lookup
+the true position, which would let the model recover the answer from
+`patch_positions - truth`.
+
+### The bias sweep, all arms at step 4000
+
+Six arms at a fixed budget on gdev, each logging its own train APD.
+
+| arm | val APD | train APD | verdict |
+| --- | --- | --- | --- |
+| ctrl (dim 256, depth 6) | 0.270 | 0.293 | reference |
+| grad clip 1.0 -> off | 0.276 | 0.295 | no effect |
+| adapter depth 1 -> 3 | 0.265 | 0.275 | no effect |
+| depth 6 -> 12 | 0.283 | 0.323 | helps |
+| dim 256 -> 512 | 0.306 | 0.356 | **helps most** |
+| points 128 -> 256 | 0.251 | 0.242 | unreadable, see below |
+
+Width is the biggest single lever and it raises TRAIN APD (0.293 -> 0.356), so
+it is fitting better rather than only generalising better. Capacity was a real
+constraint, which 13 runs at an unchanged dim 256 had never tested.
+
+The adapter result matters too: deepening the only trainable layer between the
+frozen DINOv3 features and the model changed nothing, so the frozen encoder is
+not the bias source. That was the prime suspect and it is now ruled out
+cheaply, without the in-loop backbone a real unfreeze would require.
+
+dim 512 needs `--accum`: it goes out of memory at batch 16 on a 40GB A100, and
+halving the batch would change the optimisation as well as the capacity.
+
+### Gotcha: query points are resampled per cache, so static baselines differ
+
+The `--points 256` arm and run11 both report a different `apd_static` from
+every earlier run (0.214 and 0.223 against 0.241). Preprocessing samples WHICH
+points to track at random, so two caches built from the same clips hold
+different query points:
+
+    cache/kubric vs cache/kubric_768, clip 000000
+      intrinsics equal : True
+      query_uv equal   : False
+
+Intrinsics and trajectories are untouched by `--image-size` -- the encoder
+resizes images internally and `preprocess.py` clones the transform's
+intrinsics -- so this is point sampling, not geometry. Consequences:
+
+- APD across two different caches is not directly comparable. Compare each run
+  to ITS OWN `apd_static`, or run a matched control on the same cache.
+- `cache/kubric_768_3493` symlinks the 3493 names from `cache/kubric` so
+  `split(seed=0, val_frac=0.1)` yields the identical 3144/349 partition, which
+  fixes the CLIPS but not the points.
+- run11_stride8 therefore needs a matched 384px control at the same steps,
+  batch and accumulation before its number means anything.
+
+### Open, in priority order
+
+1. A depth-specific target. `log(d_t / d_1)` as DELTA uses, which needs no
+   cache rebuild and attacks the three quarters of the error that is depth.
+2. Width. dim 512 was the best arm and only ran to 4000 steps.
+3. Resolution. run11_stride8 is training at 768px (48x48 patches, stride 8);
+   it fits at batch 8 with accum 2 at 1.025 s/it. Needs its matched control.
+4. A visibility head, which blocks AJ and OA -- the numbers papers report.
