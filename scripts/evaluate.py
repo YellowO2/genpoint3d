@@ -130,6 +130,11 @@ def main() -> int:
                    help="also score with visual inputs corrupted. A score that"
                         " does not move names a pathway the model ignores."
                         " No argument means all of them")
+    p.add_argument("--space", default="3d", choices=["3d", "2d"],
+                   help="3d is APD3D, the reported metric. 2d projects both "
+                        "tracks into the image and scores the original TAP-Vid "
+                        "pixel thresholds, which is blind to depth error. The "
+                        "two together say whether depth is what we get wrong.")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -188,7 +193,8 @@ def main() -> int:
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
                               anchor_frame0) if args.per_frame else None
     m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp,
-                 anchor_frame0=anchor_frame0, loss_type=loss_type)
+                 anchor_frame0=anchor_frame0, loss_type=loss_type,
+                 space=args.space)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss"):

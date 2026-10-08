@@ -47,6 +47,21 @@ def _to_camera_t(pts: torch.Tensor, extrinsics: torch.Tensor) -> torch.Tensor:
     return torch.einsum("btij,btnj->btni", R, pts) + t[:, :, None]
 
 
+def _project(pts: torch.Tensor, intrinsics: torch.Tensor) -> torch.Tensor:
+    """(B,T,N,3) points in their own frame's camera -> (B,T,N,2) pixels.
+
+    A global scale on the prediction cancels here, because perspective division
+    only sees x/z and y/z. That is exactly why the 2D score is the right way to
+    ask whether depth is what we are getting wrong: it is blind to the one
+    degree of freedom depth is most likely to be wrong by.
+    """
+    fx, fy = intrinsics[..., 0, 0], intrinsics[..., 1, 1]
+    cx, cy = intrinsics[..., 0, 2], intrinsics[..., 1, 2]
+    z = pts[..., 2].abs().clamp(min=1e-6)
+    return torch.stack([fx[..., None] * pts[..., 0] / z + cx[..., None],
+                        fy[..., None] * pts[..., 1] / z + cy[..., None]], dim=-1)
+
+
 def _scale_factor(pred: torch.Tensor, gt: torch.Tensor, valid: torch.Tensor,
                   scaling: str) -> torch.Tensor:
     """Per-video rescaling of the prediction, as the benchmark protocol requires.
@@ -81,6 +96,7 @@ def tapvid3d_metrics(
     pred_visible: Optional[torch.Tensor] = None,
     scaling: str = "median",
     use_fixed_metric_threshold: bool = False,
+    space: str = "3d",
 ) -> dict:
     """
     pred, gt      (B, T, N, 3) metric positions in the frame-0 camera frame
@@ -90,10 +106,17 @@ def tapvid3d_metrics(
                   frame-0 depth, which is wrong for points that move in z.
     pred_visible  (B, T, N) bool. Without it only APD is returned; AJ and OA
                   need a visibility prediction by definition.
+    space         "3d" for APD3D, or "2d" to project both tracks into the image
+                  and score the original TAP-Vid pixel thresholds. Same points,
+                  same clips, same thresholds -- the only difference is whether
+                  depth error counts. The pair separates "the model cannot find
+                  the point" from "the model finds it but misplaces it in z".
 
     Returns a dict of floats averaged over the batch.
     """
     B = pred.shape[0]
+    if space not in ("2d", "3d"):
+        raise ValueError(f"unknown space {space!r}")
     pred = pred * _scale_factor(pred, gt, visible, scaling)
 
     # Depth for the threshold: the z of each point in the camera that sees it.
@@ -102,13 +125,22 @@ def tapvid3d_metrics(
     focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()  # (B, T)
     multiplier = depth / focal[..., None].clamp(min=1e-12)
 
-    dist_sq = (pred - gt).pow(2).sum(-1)                          # (B, T, N)
+    if space == "2d":
+        # In pixels the thresholds ARE the thresholds -- no back-projection,
+        # which is the whole point of the 3D multiplier above.
+        pred_cam = _to_camera_t(pred, extrinsics) if extrinsics is not None else pred
+        dist_sq = (_project(pred_cam, intrinsics)
+                   - _project(gt_cam, intrinsics)).pow(2).sum(-1)
+        multiplier = torch.ones_like(multiplier)
+    else:
+        dist_sq = (pred - gt).pow(2).sum(-1)                      # (B, T, N)
     n_visible = visible.flatten(1).sum(1).clamp(min=1)
 
     out, fracs, jaccards = {}, [], []
     for thresh in THRESHOLDS:
         pw = (torch.full_like(multiplier, PIXEL_TO_FIXED_METRIC_THRESH[thresh])
-              if use_fixed_metric_threshold else thresh * multiplier)
+              if use_fixed_metric_threshold and space == "3d"
+              else thresh * multiplier)
         within = dist_sq < pw.pow(2)
         correct = within & visible
 

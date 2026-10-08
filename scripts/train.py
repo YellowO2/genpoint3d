@@ -315,7 +315,8 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
-             anchor_frame0: bool = False, loss_type: str = "l2") -> dict:
+             anchor_frame0: bool = False, loss_type: str = "l2",
+             space: str = "3d") -> dict:
     """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
@@ -352,7 +353,8 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
         gt_m = to_metres(traj, b)
-        score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"], b["extrinsics"])
+        score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
+                                           b["extrinsics"], space=space)
         m = score(to_metres(pred, b))
         # Static Baseline: each point stays where it started. Free -- no
         # sampling -- and the number a reader will ask for first.
@@ -376,12 +378,29 @@ def main() -> int:
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--points", type=int, default=128)
+    p.add_argument("--train-eval", type=int, default=0, metavar="N",
+                   help="also score N clips from the TRAIN split at every "
+                        "validation, logged as train_apd. Without it a run "
+                        "reports only val APD, which cannot separate bias from "
+                        "variance: a model that scores badly on clips it has "
+                        "trained on is underfitting, and more data will not "
+                        "help it. Costs one extra eval pass per interval.")
+    p.add_argument("--accum", type=int, default=1,
+                   help="micro-batches per optimiser step. A wider model does "
+                        "not fit at --batch 16 on a 40GB A100, and halving the "
+                        "batch would change the optimisation as well as the "
+                        "capacity. accum keeps the effective batch fixed so a "
+                        "size comparison isolates size.")
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--depth", type=int, default=6)
     p.add_argument("--heads", type=int, default=4)
     # 5e-4 is what both references use on Kubric -- CoTracker3's
     # launch_training_kubric_offline.sh and genpt's train_tracker_tapvid_kubric.
     p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--clip", type=float, default=1.0,
+                   help="gradient-norm clip. 1.0 is tight for this model; a "
+                        "clip that bites every step caps how fast the weights "
+                        "can move and shows up as underfitting. 0 disables it.")
     # A FRACTION, not a step count. 500 fixed steps was 20% of a 2500-step run
     # and 2.5% of a 20000-step one -- the same flag meaning two different
     # things. CoTracker3 uses OneCycleLR with pct_start=0.05.
@@ -471,6 +490,15 @@ def main() -> int:
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     )
 
+    # Scored with resample=False and the val loader's settings, so the only
+    # difference from val_loader is WHICH clips it holds. Anything else would
+    # confound the comparison the number exists to make.
+    fit_loader = DataLoader(
+        ClipDataset(train_clips[: args.train_eval], args.points, resample=False,
+                    norm_mode=args.norm_mode, target=args.target),
+        batch_size=args.batch, shuffle=False, num_workers=args.workers,
+    ) if args.train_eval else None
+
     # The denoising target must sit near unit variance: flow matching mixes it
     # with x0 ~ N(0, I), and a target far below 1 teaches the model to output
     # -x0 while the loss still falls. That failure is silent, so check it once
@@ -513,6 +541,7 @@ def main() -> int:
     # steps -- the gap between them IS the overfitting measurement.
     log, step, t0, running = [], 0, time.time(), 0.0
     since_val, since_val_n = 0.0, 0
+    micro, micro_loss = 0, 0.0
     best = -float('inf')
     while step < args.steps:
         for batch in train_loader:
@@ -530,16 +559,27 @@ def main() -> int:
                                              known_x0=kx0, loss_type=args.loss_type,
                                              context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            # Divided by accum so the accumulated gradient is the mean over
+            # the effective batch, not its sum -- otherwise the gradient norm
+            # scales with accum and clipping would bite differently.
+            (loss / args.accum).backward()
+            micro_loss += loss.item() / args.accum
+            micro += 1
+            if micro < args.accum:
+                continue
+            micro = 0
+
+            if args.clip:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
             opt.step()
+            opt.zero_grad(set_to_none=True)
             if ema is not None:
                 ema.update(model)
             sched.step()
 
-            running += loss.item()
-            since_val += loss.item(); since_val_n += 1
+            running += micro_loss
+            since_val += micro_loss; since_val_n += 1
+            micro_loss = 0.0
             step += 1
 
             if step % 100 == 0:
@@ -560,11 +600,21 @@ def main() -> int:
                 m = evaluate(model, val_loader, device, amp=amp,
                              anchor_frame0=args.anchor_frame0,
                              loss_type=args.loss_type)
+                if fit_loader is not None:
+                    f = evaluate(model, fit_loader, device, amp=amp,
+                                 anchor_frame0=args.anchor_frame0,
+                                 loss_type=args.loss_type)
+                    m["train_apd"] = f["average_pts_within_thresh"]
+                    m["train_apd_static"] = f["apd_static"]
+                    m["train_eval_loss"] = f["val_loss"]
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
                       f"  (static {m['apd_static']:.3f})"
-                      f"  ({time.time() - tv:.0f}s)", flush=True)
+                      + (f"  trainAPD {m['train_apd']:.3f}"
+                         f" (static {m['train_apd_static']:.3f})"
+                         if fit_loader is not None else "")
+                      + f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step,
                             "train_loss": since_val / max(since_val_n, 1), **m})
                 since_val, since_val_n = 0.0, 0
