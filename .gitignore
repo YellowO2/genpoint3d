@@ -27,3 +27,6 @@ __pycache__/
 # Checkpoints and logs written by the PBS jobs on the cluster. Ignored so that
 # `git clean -fd` cannot delete them -- it did once, taking every checkpoint.
 /outputs/
+
+# Cloned reference repos. Notes beside them are tracked; the clones are not.
+/references/*/repo/
