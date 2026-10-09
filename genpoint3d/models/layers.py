@@ -119,12 +119,14 @@ def apply_rope(x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
 class RoPE(nn.Module):
     """Rotary position embedding over `n_axes` continuous coordinates.
 
-    `n_axes=1` with the frame index gives standard temporal RoPE. `n_axes=3`
+    `n_axes=1` with the frame's time gives standard temporal RoPE. `n_axes=3`
     with a point's xyz gives the axial variant the paper uses for spatial
     attention -- the head's rotary channels are split evenly across x, y, z.
 
     Frequencies are log-spaced and differ per head, so heads attend at
-    different wavelengths.
+    different wavelengths. The ladder runs from pi to `max_freq * pi` radians
+    per unit of position, so it expects positions in roughly [-1, 1]: the
+    slowest channel then turns once across the whole range.
     """
 
     def __init__(self, head_dim: int, num_heads: int, n_axes: int = 1, max_freq: float = 10.0) -> None:
@@ -141,7 +143,10 @@ class RoPE(nn.Module):
 
     def forward(self, pos: torch.Tensor) -> torch.Tensor:
         """`pos`: (..., N, n_axes) -> theta (..., H, N, n_axes*per_axis)."""
-        theta = pos[..., None, None] * self.freqs.to(pos.dtype)  # (..., N, n_axes, H, per_axis)
+        # fp32 whatever autocast says: the top channel turns 10*pi per unit, and
+        # bf16's 8 bits of mantissa cannot hold an angle that large.
+        with torch.autocast(device_type=pos.device.type, enabled=False):
+            theta = pos.float()[..., None, None] * self.freqs  # (..., N, n_axes, H, per_axis)
         theta = theta.movedim(-2, -3)                            # (..., N, H, n_axes, per_axis)
         theta = theta.flatten(-2)                                # (..., N, H, d)
         return theta.transpose(-3, -2)                            # (..., H, N, d)
@@ -292,5 +297,10 @@ class FourierEmbedding(nn.Module):
         self.register_buffer("freqs", torch.randn(in_dim, out_dim // 2) * std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        proj = 2 * math.pi * (x @ self.freqs)
-        return torch.cat((proj.sin(), proj.cos()), dim=-1)
+        # fp32 whatever autocast says, and the output stays fp32. Under bf16 the
+        # matmul rounded `x` to 8 bits of mantissa before multiplying by
+        # frequencies of std 16, and a small error in `x` is a large one in phase:
+        # the result had cosine 0.88 with the fp32 embedding of the same position.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            proj = 2 * math.pi * (x.float() @ self.freqs)
+            return torch.cat((proj.sin(), proj.cos()), dim=-1)

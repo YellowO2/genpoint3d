@@ -53,6 +53,7 @@ class PointDiT(nn.Module):
         traj_scale: float = 1.0,
         displacement: bool = False,
         legacy_lookup: bool = False,
+        time_norm: bool = True,
         locality: bool = True,
         correlate: bool = True,
         causal: bool = True,
@@ -75,6 +76,10 @@ class PointDiT(nn.Module):
         # see `_lookup_pos`.
         self.traj_scale, self.displacement = traj_scale, displacement
         self.legacy_lookup = legacy_lookup
+        # Frame times in [-1, 1] for temporal RoPE; see `forward`. Off feeds the
+        # raw frame index, only so checkpoints trained that way still evaluate
+        # as they were trained.
+        self.time_norm = time_norm
         self.locality = locality and cross_attn
         self.correlate = correlate and cross_attn
         # Off lets a frame attend to later frames. Tracking has every image in
@@ -170,7 +175,7 @@ class PointDiT(nn.Module):
         self.spatial_blocks = nn.ModuleList(
             Block(dim, num_heads, mlp_mult, cond_dim) for _ in range(depth)
         )
-        self.time_rope = RoPE(head_dim, num_heads, n_axes=1)   # position = frame index
+        self.time_rope = RoPE(head_dim, num_heads, n_axes=1)   # position = frame time
         self.space_rope = RoPE(head_dim, num_heads, n_axes=3)  # position = query xyz
 
         # [4c] point-image cross-attention, and the tracking/forecasting switch.
@@ -274,14 +279,20 @@ class PointDiT(nn.Module):
         # and needs no camera. It is the lookup every established tracker does by
         # projecting into the image and sampling there; in 3D the projection is
         # unnecessary. Computed once, used by the cost volume and by every block.
+        #
+        # Every position computation in this method is taken out of autocast:
+        # bf16 keeps 8 bits of mantissa, so a coordinate near 1 is only known to
+        # about 1/256, and autocast ran the einsum below in it.
         dist2 = None
-        pos = self._lookup_pos(x, anchor)
-        if context is not None and patch_xyz is not None and (self.locality or self.costvol):
-            # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
-            # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
-            dist2 = (pos.pow(2).sum(-1)[..., None]
-                     + patch_xyz.pow(2).sum(-1)[:, :, None]
-                     - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
+        with torch.autocast(device_type=dev.type, enabled=False):
+            pos = self._lookup_pos(x.float(), anchor.float())
+            if context is not None and patch_xyz is not None and (self.locality or self.costvol):
+                patch_xyz = patch_xyz.float()
+                # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
+                # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
+                dist2 = (pos.pow(2).sum(-1)[..., None]
+                         + patch_xyz.pow(2).sum(-1)[:, :, None]
+                         - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
 
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
@@ -290,9 +301,11 @@ class PointDiT(nn.Module):
             # Support: the patches around where the point STARTS. The 3D
             # equivalent of CoTracker's window around the query pixel, and it
             # replaces a single-vector template that many patches match equally.
-            d0 = (anchor.pow(2).sum(-1)[..., None]
-                  + patch_xyz[:, 0].pow(2).sum(-1)[:, None]
-                  - 2 * torch.einsum("bnc,bpc->bnp", anchor, patch_xyz[:, 0]))
+            with torch.autocast(device_type=dev.type, enabled=False):
+                a0 = anchor.float()
+                d0 = (a0.pow(2).sum(-1)[..., None]
+                      + patch_xyz[:, 0].pow(2).sum(-1)[:, None]
+                      - 2 * torch.einsum("bnc,bpc->bnp", a0, patch_xyz[:, 0]))
             si = d0.topk(self.cv_support, dim=-1, largest=False).indices   # (B, N, S)
             sup = cf[:, 0].gather(1, si.reshape(B, -1)[..., None]
                                   .expand(-1, -1, self.cv_dim)).reshape(B, N, self.cv_support, -1)
@@ -304,8 +317,9 @@ class PointDiT(nn.Module):
                    .reshape(B, T, N, self.cv_k, -1)
             # Offsets, not absolute positions: "two cells up-left of you" is the
             # part a single similarity score cannot express.
-            off = patch_xyz.gather(2, flat.expand(-1, -1, -1, 3)) \
-                           .reshape(B, T, N, self.cv_k, 3) - pos[..., None, :]
+            with torch.autocast(device_type=dev.type, enabled=False):
+                off = patch_xyz.gather(2, flat.expand(-1, -1, -1, 3)) \
+                               .reshape(B, T, N, self.cv_k, 3) - pos[..., None, :]
 
             cost = torch.einsum("bnsc,btnkc->btnsk", sup, nb) * self.cv_dim ** -0.5
             cv = self.cv_mlp(torch.cat([cost.flatten(3), off.flatten(3)], dim=-1))
@@ -328,9 +342,9 @@ class PointDiT(nn.Module):
             # Softly, where in this frame the template matches best. Independent
             # of the diffused path, so it is evidence rather than an echo of the
             # model's own guess -- the one term here that the image alone decides.
-            match_xyz = torch.einsum("btnp,btpc->btnc",
-                                     corr.float().softmax(-1).to(patch_xyz.dtype),
-                                     patch_xyz)
+            with torch.autocast(device_type=dev.type, enabled=False):
+                match_xyz = torch.einsum("btnp,btpc->btnc",
+                                         corr.float().softmax(-1), patch_xyz.float())
             if visual_mask is not None:
                 match_xyz = match_xyz * visual_mask[..., None, None]
 
@@ -351,7 +365,11 @@ class PointDiT(nn.Module):
             if patch_xyz is None:
                 raise ValueError("context needs patch_xyz -- features without "
                                  "positions say what is in the frame but not where")
-            context = self.frame_proj(context) + self.patch_pos(patch_xyz)
+            # The position embedding is computed in fp32 and cast down only
+            # here: a second full-size fp32 copy of the context is the memory
+            # that `rms_norm` goes out of its way not to spend.
+            context = self.frame_proj(context)
+            context = context + self.patch_pos(patch_xyz).to(context.dtype)
 
             # Masked frames lose features AND positions, before any attention.
             if visual_mask is not None:
@@ -379,7 +397,13 @@ class PointDiT(nn.Module):
         h = self.token_proj(x)                                        # (B, T, N, D)
 
         # --- positions for RoPE, and the causal mask ---
-        t_pos = torch.arange(T, device=dev, dtype=dt)[None, :, None].expand(B * N, T, 1)
+        # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in
+        # [-1, 1], which is what `anchor` gives the spatial one. The raw frame
+        # index turned adjacent frames by at least 180 degrees on every channel,
+        # so neighbours in time looked no more related than distant frames.
+        t_pos = (torch.linspace(-1, 1, T, device=dev, dtype=dt) if self.time_norm
+                 else torch.arange(T, device=dev, dtype=dt))
+        t_pos = t_pos[None, :, None].expand(B * N, T, 1)
         theta_time = self.time_rope(t_pos)                             # (B*N, H, T, d)
         theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
         causal = (torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]

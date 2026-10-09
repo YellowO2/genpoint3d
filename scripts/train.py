@@ -26,6 +26,7 @@ Run:  python scripts/preprocess.py --root DATA --out local/cache/kubric
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from torch.utils.data import DataLoader, Dataset
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.eval.metrics import _to_camera_t, motion_px, tapvid3d_metrics
+from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
 
@@ -58,8 +60,15 @@ class ClipDataset(Dataset):
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
-                 norm_mode: str = "median", target: str = "absolute"):
+                 norm_mode: str = "median", target: str = "absolute",
+                 fix_idcard: bool = True):
         self.clips, self.num_points, self.resample = clips, num_points, resample
+        # The cached ID card was read with a lookup that was up to half a patch
+        # off (see `VisualEncoder.sample_at`). The cache also holds frame 0's
+        # whole feature grid and the query pixels, so it is read again here
+        # rather than re-encoding 3500 clips. Off serves the cached one, only so
+        # checkpoints trained on it still evaluate as they were trained.
+        self.fix_idcard = fix_idcard
         # The cache holds metres; normalisation happens here, so switching
         # scheme is a flag rather than hours of reprocessing.
         self.norm_mode = norm_mode
@@ -106,6 +115,15 @@ class ClipDataset(Dataset):
         traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
+        if self.fix_idcard and id_card is not None:
+            # Before the subsampling below, so it stays aligned with traj.
+            # `context` is (T, P, F) with P row-major, which is what `tokens()`
+            # flattens a (F, g, g) grid into.
+            f0 = clip.context[0].float()
+            g = math.isqrt(f0.shape[0])
+            id_card = VisualEncoder.sample_at(
+                f0.T.reshape(1, -1, g, g), clip.query_uv[None].float(), clip.hw,
+            )[0].to(id_card.dtype)
         n_pts = traj.shape[1]
         if self.num_points < n_pts:
             idx = (torch.randperm(n_pts)[: self.num_points] if self.resample
@@ -291,6 +309,10 @@ def known_frame0(b: dict) -> torch.Tensor:
 def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     """(B, T, N) weight that puts the loss in units of the APD threshold.
 
+    Times the clip's own scale, because the error it multiplies is in model
+    units -- metres divided by that scale -- and without it a clip twice as
+    large had its points weighted half as much for the same pixel error.
+
     The metric allows a point an error of `thresh * depth / focal`, so a point
     20 m away is given ten times the slack of one 2 m away. An unweighted loss
     does not know that: it spends the same effort on a distant point that was
@@ -307,7 +329,7 @@ def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     gt_cam = _to_camera_t(to_metres(traj, b), b["extrinsics"])
     depth = gt_cam[..., 2].abs().clamp(min=DEPTH_MIN)                  # (B, T, N)
     focal = (b["intrinsics"][..., 0, 0] * b["intrinsics"][..., 1, 1]).sqrt()
-    w = focal[..., None] / depth
+    w = focal[..., None] / depth * b["norm_scale"][:, None, None]
     return w / w.mean().clamp(min=1e-8)
 
 
@@ -354,13 +376,15 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
 
         kx0 = known_frame0(b) if anchor_frame0 else None
-        l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
-                                  loss_type=loss_type,
-                                  context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        # The same autocast as the training step: a model trained in bf16 and
+        # scored in fp32 is being scored on numerics it never saw.
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
+                                      loss_type=loss_type,
+                                      context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+            pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                          known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         loss_sum += l.item(); loss_n += 1
-
-        pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                      known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
@@ -498,6 +522,14 @@ def main() -> int:
                    help="1 reproduces the lookups as they were before 2026-10-09, "
                         "centred on the raw sample instead of the point's "
                         "position. Only for a like-for-like control run.")
+    p.add_argument("--time-norm", type=int, default=1, choices=[0, 1],
+                   help="frame times in [-1, 1] for temporal RoPE. 0 feeds the "
+                        "raw frame index, as every run before 2026-10-09 did.")
+    p.add_argument("--fix-idcard", type=int, default=1, choices=[0, 1],
+                   help="re-read each query's ID card from frame 0's cached "
+                        "features at the right place. 0 uses the cached one, "
+                        "sampled up to half a patch off, as every run before "
+                        "2026-10-09 did.")
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
@@ -555,13 +587,14 @@ def main() -> int:
 
     train_loader = DataLoader(
         ClipDataset(train_clips, args.points, norm_mode=args.norm_mode,
-                    target=args.target),
+                    target=args.target, fix_idcard=bool(args.fix_idcard)),
         batch_size=args.batch, shuffle=True, num_workers=args.workers,
         drop_last=True, persistent_workers=args.workers > 0,
     )
     val_loader = DataLoader(
         ClipDataset(val_clips, args.points, resample=False,
-                    norm_mode=args.norm_mode, target=args.target),
+                    norm_mode=args.norm_mode, target=args.target,
+                    fix_idcard=bool(args.fix_idcard)),
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     )
 
@@ -570,7 +603,8 @@ def main() -> int:
     # confound the comparison the number exists to make.
     fit_loader = DataLoader(
         ClipDataset(train_clips[: args.train_eval], args.points, resample=False,
-                    norm_mode=args.norm_mode, target=args.target),
+                    norm_mode=args.norm_mode, target=args.target,
+                    fix_idcard=bool(args.fix_idcard)),
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     ) if args.train_eval else None
 
@@ -597,6 +631,7 @@ def main() -> int:
                                  else TRAJ_SCALE),
                      displacement=args.target == "displacement",
                      legacy_lookup=bool(args.legacy_lookup),
+                     time_norm=bool(args.time_norm),
                      locality=bool(args.locality),
                      correlate=bool(args.correlate),
                      causal=bool(args.causal),

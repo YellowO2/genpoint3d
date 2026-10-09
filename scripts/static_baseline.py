@@ -60,7 +60,7 @@ def main() -> int:
         gt = to_metres(b["traj"], b)
         # Every frame equals frame 0: the point never moved.
         m = tapvid3d_metrics(gt[:, :1].expand_as(gt), gt, b["visibility"],
-                             b["intrinsics"], b["extrinsics"])
+                             b["intrinsics_256"], b["extrinsics"])
         for k, v in m.items():
             sums[k] = sums.get(k, 0.0) + v
         n += 1

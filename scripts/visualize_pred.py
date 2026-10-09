@@ -81,6 +81,7 @@ def main() -> int:
     model = PointDiT(dim=targs["dim"], depth=targs["depth"], num_heads=targs["heads"],
                      cross_attn=probe.context is not None,
                      feat_dim=probe.feat_dim,
+                     time_norm=bool(targs.get("time_norm", 0)),
                      locality=bool(targs.get("locality", 0))).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -90,7 +91,8 @@ def main() -> int:
     loader = DataLoader(
         ClipDataset(clips, args.points or targs["points"], resample=False,
                     norm_mode=targs.get("norm_mode", "median"),
-                    target=targs.get("target", "absolute")),
+                    target=targs.get("target", "absolute"),
+                    fix_idcard=bool(targs.get("fix_idcard", 0))),
         batch_size=1, shuffle=False,
     )
     b = to_device(next(iter(loader)), device)
@@ -104,7 +106,7 @@ def main() -> int:
                        context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
     pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
-    score = lambda x: tapvid3d_metrics(x, gt_m, vis, b["intrinsics"], b["extrinsics"])
+    score = lambda x: tapvid3d_metrics(x, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
     apd = score(pred_m)["average_pts_within_thresh"]
     static = score(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
     # Distances in metres say the same thing as APD but without the threshold,

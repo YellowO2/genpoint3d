@@ -182,6 +182,7 @@ def main() -> int:
                      # Absent means trained before the lookup was fixed, and a
                      # checkpoint has to be evaluated the way it was trained.
                      legacy_lookup=bool(targs.get("legacy_lookup", 1)),
+                     time_norm=bool(targs.get("time_norm", 0)),
                      # Absent means a checkpoint from before the prior existed.
                      locality=bool(targs.get("locality", 0)),
                      correlate=bool(targs.get("correlate", 0)),
@@ -201,7 +202,9 @@ def main() -> int:
         # is not a bad score but a meaningless one.
         ClipDataset(clips, points, resample=False,
                     norm_mode=targs.get("norm_mode", "median"),
-                    target=targs.get("target", "absolute")),
+                    target=targs.get("target", "absolute"),
+                    # Absent means trained on the ID cards as they were cached.
+                    fix_idcard=bool(targs.get("fix_idcard", 0))),
         batch_size=args.batch, shuffle=False, num_workers=4,
     )
 
