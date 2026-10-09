@@ -60,7 +60,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             # One frame at a time, so each score is that frame's alone.
             m = tapvid3d_metrics(
                 pred_m[:, t : t + 1], gt_m[:, t : t + 1], vis[:, t : t + 1],
-                b["intrinsics"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
+                b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
             )
             totals[t] += m["average_pts_within_thresh"]
         n += 1

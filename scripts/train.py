@@ -132,6 +132,12 @@ class ClipDataset(Dataset):
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
+            # The benchmark defines its pixel thresholds on a frame whose short
+            # side is 256 px, and scores with intrinsics resized to match
+            # (TAPIP3D `evaluation/metrics.py`, following DeepMind's
+            # `evaluate_model.py`). Kubric frames are larger, so scoring with
+            # the native intrinsics makes every threshold too tight.
+            "intrinsics_256": _resize_intrinsics(clip.intrinsics, clip.hw),
             "extrinsics": clip.extrinsics,
             "norm_mean": norm.mean,
             "norm_scale": norm.scale,
@@ -141,6 +147,14 @@ class ClipDataset(Dataset):
             # expression.
             "norm_offset": offset,
         }
+
+
+def _resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:
+    """(T, 3, 3) pixel intrinsics, rescaled as if the frame's short side were
+    `short_side` px. Focal lengths and principal point scale together."""
+    K = K.clone()
+    K[..., :2, :] *= short_side / min(hw)
+    return K
 
 
 def split(cache: str, val_frac: float, seed: int):
@@ -354,10 +368,10 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         if min_motion_px:
             # Score only points that actually move. `vis` keeps its meaning for
             # the loss above; this narrows what the METRIC counts.
-            moving = motion_px(gt_m, vis, b["intrinsics"], b["extrinsics"]) > min_motion_px
+            moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > min_motion_px
             sums["moving_frac"] = sums.get("moving_frac", 0.0) + moving.float().mean().item()
             vis = vis & moving[:, None]
-        score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
+        score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics_256"],
                                            b["extrinsics"], space=space,
                                            scaling=scaling)
         pred_m = to_metres(pred, b)
@@ -393,7 +407,7 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
             # The same prediction, scored in the image plane. Costs no extra
             # sampling, and the pair separates "cannot find the point" from
             # "finds it and misplaces it in depth" on every validation.
-            s2 = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
+            s2 = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics_256"],
                                             b["extrinsics"], space="2d",
                                             scaling=scaling)
             m["apd_2d"] = s2(pred_m)["average_pts_within_thresh"]
@@ -403,8 +417,8 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
                 # global rescale. About half our query points never move, and
                 # "nothing moves" tracks those perfectly, so the plain average
                 # can sit well above its baseline without any tracking in it.
-                mv = vis & (motion_px(gt_m, vis, b["intrinsics"], b["extrinsics"]) > 4)[:, None]
-                s3 = lambda p: tapvid3d_metrics(p, gt_m, mv, b["intrinsics"],
+                mv = vis & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4)[:, None]
+                s3 = lambda p: tapvid3d_metrics(p, gt_m, mv, b["intrinsics_256"],
                                                 b["extrinsics"], scaling="none")
                 m["apd_moving"] = s3(pred_m)["average_pts_within_thresh"]
                 m["apd_moving_static"] = s3(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
