@@ -114,6 +114,7 @@ def tapvid3d_metrics(
     scaling: str = "median",
     use_fixed_metric_threshold: bool = False,
     space: str = "3d",
+    per_clip: bool = False,
 ) -> dict:
     """
     pred, gt      (B, T, N, 3) metric positions in the frame-0 camera frame
@@ -128,6 +129,12 @@ def tapvid3d_metrics(
                   same clips, same thresholds -- the only difference is whether
                   depth error counts. The pair separates "the model cannot find
                   the point" from "the model finds it but misplaces it in z".
+
+    per_clip      return a (B,) tensor per metric instead of the batch mean,
+                  NaN for a clip whose `visible` is empty. A score averaged
+                  across batches has to be built from these: a mean of batch
+                  means over-weights a short last batch, and an empty clip has
+                  no score rather than a score of 0. Average with `clip_mean`.
 
     Returns a dict of floats averaged over the batch.
     """
@@ -182,4 +189,15 @@ def tapvid3d_metrics(
         )
 
     assert all(v.shape == (B,) for v in out.values())
+    if per_clip:
+        # Occlusion accuracy counts every point, so it exists without the mask.
+        empty = ~visible.flatten(1).any(1)
+        return {k: v if k == "occlusion_accuracy" else v.masked_fill(empty, float("nan"))
+                for k, v in out.items()}
     return {k: v.mean().item() for k, v in out.items()}
+
+
+def clip_mean(values: list[torch.Tensor]) -> float:
+    """Mean over clips of per-clip values gathered across batches, skipping the
+    NaN of a clip that had nothing to score. NaN if no clip had anything."""
+    return torch.cat(values).nanmean().item()

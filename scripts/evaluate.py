@@ -21,18 +21,18 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.eval.metrics import tapvid3d_metrics
+from genpoint3d.eval.metrics import clip_mean, tapvid3d_metrics
 from genpoint3d.models.model import PointDiT
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
-from train import ClipDataset, evaluate, known_frame0, to_device, to_metres
+from train import EVAL_SEED, ClipDataset, evaluate, known_frame0, to_device, to_metres
 from genpoint3d.models.flow import sample as flow_sample
 
 
 @torch.no_grad()
 def per_frame_apd(model, loader, device, steps: int, amp: bool,
-                  anchor_frame0: bool = False) -> list[float]:
-    """APD for each frame index separately.
+                  anchor_frame0: bool = False, scaling: str = "median") -> list[float]:
+    """APD for each frame index separately: APD3D over every visible point.
 
     The model is handed frame 0's true position as `anchor`, but still has to
     generate frame 0 from noise like every other frame -- nothing pins it. If
@@ -40,9 +40,14 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     position it was given, and clamping it during sampling is worth doing. If
     frame 0 is clearly the best and the score decays with time, the error is
     accumulating drift instead and clamping would not address it.
+
+    Seeded like `evaluate()`, so on the same loader these are the frames of the
+    very samples it scores. A mean over clips; a clip with no visible point in
+    a frame is left out of that frame.
     """
     model.eval()
-    totals, n = None, 0
+    vals = None
+    gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
     for batch in loader:
         b = to_device(batch, device, amp)
         traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
@@ -51,22 +56,22 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
         kx0 = known_frame0(b) if anchor_frame0 else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                               known_x0=kx0,
+                               generator=gen, known_x0=kx0,
                                context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
 
-        if totals is None:
-            totals = [0.0] * traj.shape[1]
+        if vals is None:
+            vals = [[] for _ in range(traj.shape[1])]
         for t in range(traj.shape[1]):
             # One frame at a time, so each score is that frame's alone.
             m = tapvid3d_metrics(
                 pred_m[:, t : t + 1], gt_m[:, t : t + 1], vis[:, t : t + 1],
                 b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
+                scaling=scaling, per_clip=True,
             )
-            totals[t] += m["average_pts_within_thresh"]
-        n += 1
+            vals[t].append(m["average_pts_within_thresh"].cpu())
     model.train()
-    return [v / max(n, 1) for v in totals]
+    return [clip_mean(v) for v in vals]
 
 
 # Each ablation destroys ONE thing the model is supposed to rely on. A score
@@ -216,23 +221,30 @@ def main() -> int:
           f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
 
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
-                              anchor_frame0) if args.per_frame else None
-    m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp,
-                 anchor_frame0=anchor_frame0, loss_type=loss_type,
-                 space=args.space, oracle_axis=args.oracle_axis,
-                 scaling=args.scaling, min_motion_px=args.min_motion_px)
+                              anchor_frame0, args.scaling) if args.per_frame else None
+    # One set of scoring rules for the intact score and every ablation of it.
+    how = dict(steps=args.sample_steps, amp=amp, anchor_frame0=anchor_frame0,
+               loss_type=loss_type, space=args.space, oracle_axis=args.oracle_axis,
+               scaling=args.scaling, min_motion_px=args.min_motion_px)
+    m = evaluate(model, loader, device, **how)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac",
               "disp_ratio", "disp_cos"):
         if k in m:
             print(f"  {k:<26} {m[k]:.4f}")
+    if "moving_clips" in m:
+        print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(clips)}")
     print()
     for t in (1, 2, 4, 8, 16):
         print(f"  pts_within_{t:<15} {m[f'pts_within_{t}']:.4f}")
 
     if per_frame is not None:
         print("\n  APD by frame -- does error start at frame 0 or accumulate?")
+        if args.space != "3d" or args.min_motion_px or args.oracle_axis:
+            print("    NOTE: per-frame APD is always 3D, over all visible points,"
+                  " with no oracle axis.\n    --space, --min-motion-px and"
+                  " --oracle-axis do NOT apply to it; only --scaling does.")
         for t, v in enumerate(per_frame):
             bar = "#" * int(round(v / max(max(per_frame), 1e-9) * 40))
             print(f"    frame {t:>2}  {v:.4f}  {bar}")
@@ -253,9 +265,7 @@ def main() -> int:
         print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
         for kind in kinds:
-            a = evaluate(model, Ablated(loader, kind), device,
-                         steps=args.sample_steps, amp=amp,
-                         anchor_frame0=anchor_frame0, loss_type=loss_type)
+            a = evaluate(model, Ablated(loader, kind), device, **how)
             apd = a["average_pts_within_thresh"]
             print(f"    {kind:<16} {apd:>7.4f}"
                   f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)

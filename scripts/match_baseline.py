@@ -28,6 +28,7 @@ Run:  python scripts/match_baseline.py --cache ~/scratch/cache/kubric --n 100
 """
 
 import argparse
+import math
 from pathlib import Path
 
 import torch
@@ -35,6 +36,7 @@ import torch.nn.functional as F
 
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.eval.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
+from genpoint3d.models.encoder import VisualEncoder
 from train import _resize_intrinsics, split
 
 
@@ -43,10 +45,15 @@ def predictions(clip: CachedClip, dev) -> dict[str, torch.Tensor]:
     traj = clip.traj.to(dev).float()                              # (T, N, 3) metres
     pxyz = clip.patch_xyz.to(dev).float()                         # (T, P, 3) metres
     ctx = F.normalize(clip.context.to(dev).float(), dim=-1)       # (T, P, F)
-    idc = F.normalize(clip.id_card.to(dev).float(), dim=-1)       # (N, F)
     T, P, _ = pxyz.shape
+    g = math.isqrt(P)
+    # The card the model is given, not the cached one: that was read up to half
+    # a patch off, and `ClipDataset` re-reads it from frame 0's grid like this.
+    f0 = clip.context[0].to(dev).float()                          # (P, F) row-major
+    idc = F.normalize(VisualEncoder.sample_at(
+        f0.T.reshape(1, -1, g, g), clip.query_uv[None].to(dev).float(), clip.hw,
+    )[0], dim=-1)                                                 # (N, F)
     N = idc.shape[0]
-    g = int(P ** 0.5)
 
     sim = torch.einsum("nf,tpf->tnp", idc, ctx)                   # (T, N, P)
     pick = lambda idx: pxyz.gather(1, idx[..., None].expand(-1, -1, 3))

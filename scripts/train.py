@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
-from genpoint3d.eval.metrics import _to_camera_t, motion_px, tapvid3d_metrics
+from genpoint3d.eval.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
@@ -43,6 +43,10 @@ from genpoint3d.models.model import PointDiT
 # TAPIP3D clamps depth the same way before dividing, so a point behind the
 # camera or at zero depth cannot produce an enormous weight.
 DEPTH_MIN = 0.1
+
+# Scoring starts every sample from the same noise, so a checkpoint has one
+# score rather than a slightly different one each time it is asked.
+EVAL_SEED = 0
 
 
 class ClipDataset(Dataset):
@@ -364,10 +368,18 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
     take the query point's 3D position and assume it never moves. That is a
     real bar rather than a formality -- it scores 9.4 there, above TAPIR-3D's
     5.9 and not far below SpatialTracker's 15.5.
+
+    Every score is a mean over CLIPS, and a clip with no point to score (no
+    moving point, when the score is restricted to those) is left out of it, as
+    scripts/ref_tapip3d.py does. `moving_clips` is how many were left in.
     """
     model.eval()
     loss_sum = loss_n = 0.0
-    sums, n_batches = {}, 0
+    # Per-clip values, averaged once at the end: a mean of batch means would
+    # give each clip of a short last batch several times its share.
+    vals = {}
+    add = lambda k, v: vals.setdefault(k, []).append(v.float().cpu())
+    gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
 
     for batch in loader:
         b = to_device(batch, device, amp)
@@ -383,8 +395,10 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
                                       loss_type=loss_type,
                                       context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
             pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                          generator=gen,
                           known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-        loss_sum += l.item(); loss_n += 1
+        # The loss is a mean over this batch, so it counts once per clip in it.
+        loss_sum += l.item() * traj.shape[0]; loss_n += traj.shape[0]
 
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
@@ -393,22 +407,22 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
             # Score only points that actually move. `vis` keeps its meaning for
             # the loss above; this narrows what the METRIC counts.
             moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > min_motion_px
-            sums["moving_frac"] = sums.get("moving_frac", 0.0) + moving.float().mean().item()
+            add("moving_frac", moving.float().mean(1))
             vis = vis & moving[:, None]
         score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics_256"],
                                            b["extrinsics"], space=space,
-                                           scaling=scaling)
+                                           scaling=scaling, per_clip=True)
         pred_m = to_metres(pred, b)
-        if min_motion_px and vis.any():
+        if min_motion_px:
             # On the moving points: how much motion does the model predict, and
             # in the right direction? ratio ~0 means it predicts "stays put";
             # cos ~0 means the motion it does predict is unrelated to the truth.
-            d_gt = (gt_m - gt_m[:, :1])[vis]
-            d_pr = (pred_m - gt_m[:, :1])[vis]
-            sums["disp_ratio"] = sums.get("disp_ratio", 0.0) + (
-                d_pr.norm(dim=-1).mean() / d_gt.norm(dim=-1).mean().clamp(min=1e-9)).item()
-            sums["disp_cos"] = sums.get("disp_cos", 0.0) + torch.nn.functional.cosine_similarity(
-                d_pr, d_gt, dim=-1).mean().item()
+            # Per clip; one with no moving point is 0/0 = NaN and is left out.
+            d_gt, d_pr = gt_m - gt_m[:, :1], pred_m - gt_m[:, :1]
+            on_vis = lambda x: (x * vis).flatten(1).sum(1)
+            add("disp_ratio", on_vis(d_pr.norm(dim=-1)) / on_vis(d_gt.norm(dim=-1)))
+            add("disp_cos", on_vis(torch.nn.functional.cosine_similarity(d_pr, d_gt, dim=-1))
+                / vis.flatten(1).sum(1))
         if oracle_axis:
             # Attribution, not an input: the model has already produced its
             # answer, and this only overwrites one channel of that answer before
@@ -433,7 +447,7 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
             # "finds it and misplaces it in depth" on every validation.
             s2 = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics_256"],
                                             b["extrinsics"], space="2d",
-                                            scaling=scaling)
+                                            scaling=scaling, per_clip=True)
             m["apd_2d"] = s2(pred_m)["average_pts_within_thresh"]
             m["apd_2d_static"] = s2(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
             if not min_motion_px:
@@ -443,17 +457,21 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
                 # can sit well above its baseline without any tracking in it.
                 mv = vis & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4)[:, None]
                 s3 = lambda p: tapvid3d_metrics(p, gt_m, mv, b["intrinsics_256"],
-                                                b["extrinsics"], scaling="none")
+                                                b["extrinsics"], scaling="none",
+                                                per_clip=True)
                 m["apd_moving"] = s3(pred_m)["average_pts_within_thresh"]
                 m["apd_moving_static"] = s3(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
 
         for k, v in m.items():
-            sums[k] = sums.get(k, 0.0) + v
-        n_batches += 1
+            add(k, v)
 
     model.train()
-    return {"val_loss": loss_sum / max(loss_n, 1),
-            **{k: v / max(n_batches, 1) for k, v in sums.items()}}
+    out = {"val_loss": loss_sum / max(loss_n, 1),
+           **{k: clip_mean(v) for k, v in vals.items()}}
+    moving_key = "average_pts_within_thresh" if min_motion_px else "apd_moving"
+    if moving_key in vals:
+        out["moving_clips"] = int((~torch.cat(vals[moving_key]).isnan()).sum())
+    return out
 
 
 def main() -> int:

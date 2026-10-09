@@ -23,7 +23,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.eval.metrics import tapvid3d_metrics
+from genpoint3d.eval.metrics import clip_mean, tapvid3d_metrics
 from train import ClipDataset, split, to_device, to_metres
 
 
@@ -53,19 +53,19 @@ def main() -> int:
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sums, n = {}, 0
+    # Per clip, averaged at the end, so a short last batch is not over-weighted.
+    vals = {}
     t0 = time.time()
     for batch in loader:
         b = to_device(batch, device)
         gt = to_metres(b["traj"], b)
         # Every frame equals frame 0: the point never moved.
         m = tapvid3d_metrics(gt[:, :1].expand_as(gt), gt, b["visibility"],
-                             b["intrinsics_256"], b["extrinsics"])
+                             b["intrinsics_256"], b["extrinsics"], per_clip=True)
         for k, v in m.items():
-            sums[k] = sums.get(k, 0.0) + v
-        n += 1
+            vals.setdefault(k, []).append(v.cpu())
 
-    m = {k: v / max(n, 1) for k, v in sums.items()}
+    m = {k: clip_mean(v) for k, v in vals.items()}
     print(f"scored in {time.time() - t0:.0f}s\n")
     print(f"  APD (static baseline)  {m['average_pts_within_thresh']:.4f}")
     for t in (1, 2, 4, 8, 16):

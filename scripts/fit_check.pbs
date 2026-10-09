@@ -50,6 +50,10 @@ SCALING=${SCALING:-median}
 # MOTION=4 scores only points that move more than 4 back-projected pixels.
 MOTION=${MOTION:-0}
 [ -n "$AXIS" ] && OZ="--oracle-axis $AXIS" || OZ=""
+# POINTS=256 scores every cached query point; unset uses as many as the
+# checkpoint trained with.
+POINTS=${POINTS:-}
+[ -n "$POINTS" ] && PTS="--points $POINTS" || PTS=""
 # Per job, not shared: split_dir.py clears the directory before relinking, so
 # two fit_check jobs pointed at one WORK would delete each other's links. The
 # three axis jobs are meant to run at the same time.
@@ -66,8 +70,8 @@ for SPLIT in train val; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION.json"
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}.json"
 done
 
 echo "=== FIT CHECK DONE ==="
