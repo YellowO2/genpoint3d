@@ -38,6 +38,28 @@ def sample_k(
     return torch.sigmoid(torch.randn(batch, *shape, device=device) * scale + loc)
 
 
+def masked_error(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
+    loss_type: str = "l2",
+) -> torch.Tensor:
+    """The weighted mean error of `pred` against `target`, both (B, T, N, 3).
+
+    Its own function so that every method is scored by one rule: a comparison
+    between two of them is only about the method if nothing else differs.
+    `mask`, `weight` and `loss_type` are as in `flow_matching_loss`.
+    """
+    d = pred - target
+    err = d.norm(dim=-1) if loss_type == "l21" else d.pow(2).mean(dim=-1)  # (B, T, N)
+
+    w = mask.float() if mask is not None else torch.ones_like(err)
+    if weight is not None:
+        w = w * weight
+    return (err * w).sum() / w.sum().clamp(min=1e-8)
+
+
 def flow_matching_loss(
     model: nn.Module,
     x1: torch.Tensor,
@@ -86,13 +108,7 @@ def flow_matching_loss(
         target = torch.cat([torch.zeros_like(target[:, :1]), target[:, 1:]], dim=1)
 
     pred = model(x_k, k, anchor, **cond)
-    d = pred - target
-    err = d.norm(dim=-1) if loss_type == "l21" else d.pow(2).mean(dim=-1)  # (B, T, N)
-
-    w = mask.float() if mask is not None else torch.ones_like(err)
-    if weight is not None:
-        w = w * weight
-    loss = (err * w).sum() / w.sum().clamp(min=1e-8)
+    loss = masked_error(pred, target, mask, weight, loss_type)
 
     return loss, {"loss": loss.detach(), "k_mean": k.mean().detach()}
 

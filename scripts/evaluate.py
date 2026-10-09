@@ -27,11 +27,13 @@ from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from train import EVAL_SEED, ClipDataset, evaluate, known_frame0, to_device, to_metres
 from genpoint3d.models.flow import sample as flow_sample
+from genpoint3d.models.regress import refine
 
 
 @torch.no_grad()
 def per_frame_apd(model, loader, device, steps: int, amp: bool,
-                  anchor_frame0: bool = False, scaling: str = "median") -> list[float]:
+                  anchor_frame0: bool = False, scaling: str = "median",
+                  method: str = "flow", refine_iters: int = 4) -> list[float]:
     """APD for each frame index separately: APD3D over every visible point.
 
     The model is handed frame 0's true position as `anchor`, but still has to
@@ -54,10 +56,14 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
         ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
         kx0 = known_frame0(b) if anchor_frame0 else None
+        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                               generator=gen, known_x0=kx0,
-                               context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+            if method == "regress":
+                pred = refine(model, anchor, num_frames=traj.shape[1],
+                              iters=refine_iters, known_x0=kx0, **cond)
+            else:
+                pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                                   generator=gen, known_x0=kx0, **cond)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
 
         if vals is None:
@@ -127,6 +133,10 @@ def main() -> int:
     p.add_argument("--sample-steps", type=int, default=50,
                    help="Euler steps when sampling; the published protocol is not"
                         " prescriptive, so report whatever you use")
+    p.add_argument("--refine-iters", type=int, default=None,
+                   help="regress checkpoints only: refinement iterations. "
+                        "default: whatever the checkpoint trained with. More "
+                        "than that is a test of whether extra looks help")
     p.add_argument("--out", default=None, help="write the metrics as JSON here")
     p.add_argument("--ablate", nargs="*", default=None, choices=ABLATIONS,
                    help="also score with visual inputs corrupted. A score that"
@@ -173,8 +183,13 @@ def main() -> int:
     probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False, mmap=True))
     feat_dim, has_feats = probe.feat_dim, probe.context is not None
     points = args.points or targs["points"]
+    # Absent means a checkpoint from before there was a second method.
+    method = targs.get("method", "flow")
+    refine_iters = args.refine_iters or targs.get("refine_iters", 4)
     print(f"{len(clips)} test clips | {device} | amp {'bf16' if amp else 'off'}"
-          f" | points {points} | {args.sample_steps} sampling steps", flush=True)
+          f" | points {points} | "
+          + (f"{refine_iters} refinement iterations" if method == "regress"
+             else f"{args.sample_steps} sampling steps"), flush=True)
 
     model = PointDiT(dim=targs["dim"], depth=targs["depth"],
                      num_heads=targs["heads"], cross_attn=has_feats,
@@ -226,11 +241,13 @@ def main() -> int:
           f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
 
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
-                              anchor_frame0, args.scaling) if args.per_frame else None
+                              anchor_frame0, args.scaling, method,
+                              refine_iters) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
     how = dict(steps=args.sample_steps, amp=amp, anchor_frame0=anchor_frame0,
                loss_type=loss_type, space=args.space, oracle_axis=args.oracle_axis,
-               scaling=args.scaling, min_motion_px=args.min_motion_px)
+               scaling=args.scaling, min_motion_px=args.min_motion_px,
+               method=method, refine_iters=refine_iters)
     m = evaluate(model, loader, device, **how)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
@@ -285,7 +302,8 @@ def main() -> int:
     if args.out:
         Path(args.out).write_text(json.dumps(
             {"ckpt": args.ckpt, "cache": args.cache, "step": ckpt["step"],
-             "sample_steps": args.sample_steps, "clips": len(clips), **m},
+             "sample_steps": args.sample_steps, "method": method,
+             "refine_iters": refine_iters, "clips": len(clips), **m},
             indent=2))
         print(f"\nwrote {args.out}")
     return 0

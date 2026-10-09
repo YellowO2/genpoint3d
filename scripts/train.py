@@ -39,10 +39,15 @@ from genpoint3d.eval.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d
 from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
+from genpoint3d.models.regress import refine, regress_loss
 
 # TAPIP3D clamps depth the same way before dividing, so a point behind the
 # camera or at zero depth cannot produce an enormous weight.
 DEPTH_MIN = 0.1
+
+# The pixel thresholds APD averages over; the moving-points score is logged at
+# each of them as well.
+MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
 
 # Scoring starts every sample from the same noise, so a checkpoint has one
 # score rather than a slightly different one each time it is asked.
@@ -354,10 +359,11 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
              anchor_frame0: bool = False, loss_type: str = "l2",
              space: str = "3d", oracle_axis: str = "",
-             scaling: str = "median", min_motion_px: float = 0.0) -> dict:
+             scaling: str = "median", min_motion_px: float = 0.0,
+             method: str = "flow", refine_iters: int = 4) -> dict:
     """Two numbers, both standard -- no homemade units.
 
-    val_loss  the SAME flow-matching objective as training, on held-out clips.
+    val_loss  the SAME objective as training (`method`), on held-out clips.
               Plot it against training loss: the gap is overfitting.
     APD       `average_pts_within_thresh` from the TAP-Vid-3D benchmark, scored
               in METRES -- see genpoint3d/eval/metrics.py. The number other
@@ -390,13 +396,18 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         kx0 = known_frame0(b) if anchor_frame0 else None
         # The same autocast as the training step: a model trained in bf16 and
         # scored in fp32 is being scored on numerics it never saw.
+        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
-                                      loss_type=loss_type,
-                                      context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-            pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                          generator=gen,
-                          known_x0=kx0, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+            if method == "regress":
+                l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
+                                    loss_type=loss_type, iters=refine_iters, **cond)
+                pred = refine(model, anchor, num_frames=traj.shape[1],
+                              iters=refine_iters, known_x0=kx0, **cond)
+            else:
+                l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
+                                          loss_type=loss_type, **cond)
+                pred = sample(model, anchor, num_frames=traj.shape[1], steps=steps,
+                              generator=gen, known_x0=kx0, **cond)
         # The loss is a mean over this batch, so it counts once per clip in it.
         loss_sum += l.item() * traj.shape[0]; loss_n += traj.shape[0]
 
@@ -459,7 +470,13 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
                 s3 = lambda p: tapvid3d_metrics(p, gt_m, mv, b["intrinsics_256"],
                                                 b["extrinsics"], scaling="none",
                                                 per_clip=True)
-                m["apd_moving"] = s3(pred_m)["average_pts_within_thresh"]
+                mv_m = s3(pred_m)
+                m["apd_moving"] = mv_m["average_pts_within_thresh"]
+                # The average hides WHERE the points land: finding most of them
+                # within 16px and none within 1px scores the same as a model
+                # with some precision.
+                for t in MOVING_THRESHOLDS:
+                    m[f"moving_within_{t}"] = mv_m[f"pts_within_{t}"]
                 m["apd_moving_static"] = s3(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
 
         for k, v in m.items():
@@ -488,6 +505,17 @@ def main() -> int:
                         "variance: a model that scores badly on clips it has "
                         "trained on is underfitting, and more data will not "
                         "help it. Costs one extra eval pass per interval.")
+    p.add_argument("--method", default="flow", choices=["flow", "regress"],
+                   help="flow: flow matching, the network denoises a noisy "
+                        "sample. regress: the same network refines its own "
+                        "guess from \"nothing moves\", with no noise, as "
+                        "TAPIP3D and CoTracker do. The control that tells a "
+                        "noise problem from a feature problem.")
+    p.add_argument("--refine-iters", type=int, default=4,
+                   help="regress only: refinement iterations, in training and "
+                        "in evaluation. Each is a full forward and backward "
+                        "pass, so a step costs this many times a flow step in "
+                        "time, and the same in memory. TAPIP3D trains with 4.")
     p.add_argument("--accum", type=int, default=1,
                    help="micro-batches per optimiser step. A wider model does "
                         "not fit at --batch 16 on a 40GB A100, and halving the "
@@ -708,15 +736,24 @@ def main() -> int:
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
             w = apd_weight(b, traj) if args.depth_scaled_loss else None
             kx0 = known_frame0(b) if args.anchor_frame0 else None
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
-                                             known_x0=kx0, loss_type=args.loss_type,
-                                             context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-
             # Divided by accum so the accumulated gradient is the mean over
             # the effective batch, not its sum -- otherwise the gradient norm
             # scales with accum and clipping would bite differently.
-            (loss / args.accum).backward()
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                if args.method == "regress":
+                    # Back-propagated inside, one iteration at a time, so the
+                    # step holds one forward pass in memory rather than
+                    # --refine-iters of them. The loss comes back detached.
+                    loss, _ = regress_loss(model, traj, anchor, mask=vis, weight=w,
+                                           known_x0=kx0, loss_type=args.loss_type,
+                                           iters=args.refine_iters, backward=1 / args.accum,
+                                           context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+                else:
+                    loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
+                                                 known_x0=kx0, loss_type=args.loss_type,
+                                                 context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+            if args.method == "flow":
+                (loss / args.accum).backward()
             micro_loss += loss.item() / args.accum
             micro += 1
             if micro < args.accum:
@@ -751,18 +788,19 @@ def main() -> int:
                 if ema is not None:
                     live = {k: v.detach().clone() for k, v in model.state_dict().items()}
                     model.load_state_dict(ema.state_dict(model))
-                m = evaluate(model, val_loader, device, amp=amp,
-                             anchor_frame0=args.anchor_frame0,
-                             loss_type=args.loss_type)
+                how = dict(amp=amp, anchor_frame0=args.anchor_frame0,
+                           loss_type=args.loss_type, method=args.method,
+                           refine_iters=args.refine_iters)
+                m = evaluate(model, val_loader, device, **how)
                 if fit_loader is not None:
-                    f = evaluate(model, fit_loader, device, amp=amp,
-                                 anchor_frame0=args.anchor_frame0,
-                                 loss_type=args.loss_type)
+                    f = evaluate(model, fit_loader, device, **how)
                     m["train_apd"] = f["average_pts_within_thresh"]
                     m["train_apd_static"] = f["apd_static"]
                     m["train_apd_2d"] = f["apd_2d"]
                     m["train_apd_moving"] = f["apd_moving"]
                     m["train_apd_moving_static"] = f["apd_moving_static"]
+                    for t in MOVING_THRESHOLDS:
+                        m[f"train_moving_within_{t}"] = f[f"moving_within_{t}"]
                     m["train_eval_loss"] = f["val_loss"]
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
