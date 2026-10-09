@@ -94,7 +94,7 @@ def main() -> int:
         depths = np.stack([resize_depth_bilinear(d, (res[1], res[0])) for d in raw.depths])
         depths = np.stack([_filter_one_depth(d, 0.08, 15, k) for d, k in zip(depths, K_in)])
 
-        gt = c["traj"].float().to(dev)                              # (T, N, 3) frame-0 camera, metres
+        gt = c["traj_metric"].float().to(dev)                              # (T, N, 3) frame-0 camera, metres
         vis = c["visibility"].to(dev)
         E = c["extrinsics"].float().to(dev)                         # cam_0 -> cam_t
         query = torch.cat([torch.zeros_like(gt[0, :, :1]), gt[0]], dim=-1)   # (N, 4): t, x, y, z
