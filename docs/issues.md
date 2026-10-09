@@ -32,6 +32,7 @@ Reference points, moving points only (how many land within tolerance):
 | B8 | Coarse image grid and last-layer features only. The paper uses a finer grid and several layers. | design | medium | open |
 | B9 | Over half the points we train on never move. | design | small | open |
 | B10 | We train far less than the references (12-30k steps against 200k). | resources | - | open |
+| B11 | **The search for "the patch that looks like me" picks the right patch only about half the time** (47% on the 24x24 grid, 60% on 48x48), on frozen features, and nothing trains it. | design | small | built, not yet in a run: `--match-learn 1` adds a small trainable correction to the features the search compares (it starts as today's search exactly) and a loss that names the right patch for every visible point in every frame after the first. The right patch is where the true position lands in that frame's image, from the camera. Works with `--method flow` and `--method regress`; the loss is computed once per step in both. Every validation now also logs how often the search is right (`match_acc`), and right to within one patch (`match_acc_near`), for all visible points and for moving ones, on val and train clips, with or without the flag: on the VAL line as `match exact/near mv exact/near`. Checked on a laptop for correctness only (flag off is unchanged bit for bit, the right patch is right on a made-up scene, gradients arrive); whether the search gets BETTER is not tested. |
 
 ## C. Checked and correct (stop worrying about these)
 

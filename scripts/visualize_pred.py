@@ -85,7 +85,9 @@ def main() -> int:
                      locality=bool(targs.get("locality", 0)),
                      locality_mode=targs.get("locality_mode", "legacy"),
                      locality_wide=targs.get("locality_wide", 8.0),
-                     corr_mode=targs.get("corr_mode", "legacy")).to(device)
+                     corr_mode=targs.get("corr_mode", "legacy"),
+                     match_learn=bool(targs.get("match_learn", 0)),
+                     match_dim=targs.get("match_dim", 64)).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

@@ -14,6 +14,8 @@ that otherwise shows up as "training is mysteriously bad".
   7. locality       a patch beside the point acts, one ten patches away does not
   8. correlation    the patch that looks like the point is found, untrained
   9. window         the prior is wide on a noisy sample and narrow on a clean one
+ 10. match head     starts as the raw cosine, is the MLP it claims to be, trains
+ 11. true patch     a point placed on a patch's own surface point is in that patch
 
 The model is built the way a run builds it (displacement target, its scale,
 cost volume off) and the scene has a run's proportions: patches on a grid 0.05
@@ -28,7 +30,9 @@ import torch
 import torch.nn.functional as F
 
 from genpoint3d.data.transform import TRAJ_SCALE_DISP
-from genpoint3d.models.encoder import VisualEncoder
+from genpoint3d.geometry import batch_unproject
+from genpoint3d.models.encoder import VisualEncoder, patch_centre_xyz
+from genpoint3d.models.match import match_ce, raw_cosine, true_patch
 from genpoint3d.models.model import PointDiT
 
 B, T, N, G, D, FEAT = 2, 8, 5, 12, 64, 48
@@ -341,6 +345,86 @@ def check_corr_optional() -> bool:
     return report("corr optional", not extra, f"--correlate 0 adds {len(extra)} params (want 0)")
 
 
+def check_match_head(x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
+    """--match-learn must start as the model without it, compute the residual
+    MLP it is described as (it never builds the adapted features, so the
+    shortcut is checked against the obvious code), and be reachable by the
+    matching loss. --match-learn 0 must add no parameters."""
+    vm = torch.ones_like(vm)
+    off, on = model(), model(match_learn=True)
+    extra = [n for n in off.state_dict() if n.startswith("match_head")]
+    same = all(torch.equal(v, on.state_dict()[n]) for n, v in off.state_dict().items())
+    with torch.no_grad():
+        a = off(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        b = on(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        s0 = (on.match_scores(ctx, idc, pxyz) - raw_cosine(ctx, idc)).abs().max().item()
+    start = (a - b).abs().max().item()
+
+    head = on.match_head
+    torch.nn.init.normal_(head.out.weight, std=0.3)
+    mlp = lambda f: F.gelu(head.inp(f)) @ head.out.weight.T
+    with torch.no_grad():
+        naive = torch.einsum("bnc,btpc->btnp", F.normalize(idc + mlp(idc), dim=-1),
+                             F.normalize(ctx + mlp(ctx), dim=-1))
+        moved = (naive - raw_cosine(ctx, idc)).abs().max().item()
+        err = (on.match_scores(ctx, idc, pxyz) - naive).abs().max().item()
+
+    target = torch.randint(P, (B, T, N))
+    valid = torch.rand(B, T, N) > 0.3
+    on.zero_grad()
+    match_ce(on.match_scores(ctx, idc, pxyz), head.tau(), target, valid).sum().backward()
+    g = {n: p.grad.abs().max().item() for n, p in head.named_parameters()}
+    dead = [n for n, v in g.items() if v == 0]
+    other = [n for n, p in on.named_parameters()
+             if not n.startswith("match_head") and p.grad is not None and p.grad.abs().sum() > 0]
+    return [
+        report("head optional", not extra and same,
+               f"--match-learn 0 adds {len(extra)} params (want 0); the rest initialise "
+               f"{'the same' if same else 'DIFFERENTLY'} with it on"),
+        report("head starts raw", start == 0.0 and s0 == 0.0,
+               f"at step 0 the output differs by {start:.1e}, the scores by {s0:.1e} (want 0)"),
+        report("head is the MLP", err < 1e-5 and moved > 1e-2,
+               f"scores differ from normalize(f + MLP(f)) by {err:.1e} (want <1e-5),"
+               f" on scores the MLP moved by {moved:.2f}"),
+        report("head trains", not dead and not other,
+               f"matching loss: {len(dead)} of {len(g)} head parameters without gradient {dead or ''},"
+               f" {len(other)} outside the head with one (want 0, 0)"),
+    ]
+
+
+def check_true_patch() -> bool:
+    """A point sitting exactly on the surface point stored for a patch must be
+    assigned that patch -- on a frame that is not square, under a camera that
+    has moved, at both grid sizes. And one behind the camera or outside the
+    frame must be marked as having no patch."""
+    H, W, Tn = 96, 160, 3
+    ok, worst = True, 0
+    for g in (12, 24):
+        gen = torch.Generator().manual_seed(g)
+        depth = 2 + torch.rand(Tn, H, W, generator=gen) * 3
+        K = torch.tensor([[170., 0, W / 2], [0, 150., H / 2], [0, 0, 1]]).expand(Tn, 3, 3)
+        E = torch.eye(4).repeat(Tn, 1, 1)
+        for t in range(1, Tn):                      # a turn about y and a shift
+            a = torch.tensor(0.1 * t)
+            E[t, 0, 0], E[t, 0, 2], E[t, 2, 0], E[t, 2, 2] = a.cos(), a.sin(), -a.sin(), a.cos()
+            E[t, :3, 3] = torch.tensor([0.2, -0.1, 0.3]) * t
+        # Patch positions exactly as the cache builds them: frame-0 camera.
+        E0 = E @ torch.linalg.inv(E[:1])
+        pxyz = patch_centre_xyz(batch_unproject(depth, K, E0), g)     # (T, P, 3)
+        hw = torch.tensor([[H, W]])
+        got, inside = true_patch(pxyz[None], K[None], E0[None], hw, g)
+        wrong = (got[0] != torch.arange(g * g)).sum().item() + (~inside).sum().item()
+        # The same points seen from behind, and pushed out of the side.
+        behind = pxyz[None].clone(); behind[:, 0, :, 2] *= -1
+        out = pxyz[None].clone(); out[:, 0, :, 0] += 100
+        leak = (true_patch(behind, K[None], E0[None], hw, g)[1][:, 0].sum().item()
+                + true_patch(out, K[None], E0[None], hw, g)[1][:, 0].sum().item())
+        ok &= wrong == 0 and leak == 0
+        worst = max(worst, wrong + leak)
+    return report("true patch", ok, f"{worst} points given the wrong patch or a patch "
+                                    "they cannot have, on 12x12 and 24x24 (want 0)")
+
+
 def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool, bool]:
     """The last one is what the old matching failed: its projections sat behind
     gates initialised at zero, so at step 0 their gradient was exactly zero and
@@ -402,6 +486,8 @@ def main() -> int:
     ok &= check_corr_optional()
     ok &= check_cv_optional()
     ok &= all(check_costvol(*args))
+    ok &= all(check_match_head(*args))
+    ok &= check_true_patch()
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")
     return 0 if ok else 1

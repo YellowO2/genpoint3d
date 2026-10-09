@@ -24,6 +24,7 @@ from genpoint3d.models.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
     zero_init,
 )
+from genpoint3d.models.match import MatchHead, raw_cosine
 
 
 class PointDiT(nn.Module):
@@ -65,6 +66,8 @@ class PointDiT(nn.Module):
         cv_k: int = 16,
         cv_support: int = 8,
         cv_dim: int = 32,
+        match_learn: bool = False,
+        match_dim: int = 64,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -224,6 +227,15 @@ class PointDiT(nn.Module):
         self.out_norm = RMSNorm(dim)
         self.out = zero_init(nn.Linear(dim, 3, bias=False))
 
+        # [match head] a trainable residual on the features the correlation
+        # compares, and on nothing else; see `match.py`. Built last, so every
+        # other weight is initialised exactly as it is without it, and it
+        # starts as the raw cosine: the same model at step 0.
+        if match_learn and not self.cosine:
+            raise ValueError("match_learn trains the cosine match, which needs "
+                             "cross_attn, correlate and corr_mode='cosine'")
+        self.match_head = MatchHead(feat_dim, match_dim) if match_learn else None
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -251,6 +263,29 @@ class PointDiT(nn.Module):
                             align_corners=False).to(patch_xyz.dtype)
         xyz = xyz.permute(0, 2, 3, 1).reshape(B, T, P * u * u, 3)
         return c, xyz
+
+    def _cosine(self, feats: torch.Tensor, id_card: torch.Tensor) -> torch.Tensor:
+        """(B, T, P, C) patches, (B, N, C) templates, both fp32 -> (B, T, N, P)."""
+        if self.match_head is not None:
+            return self.match_head(feats, id_card)
+        return raw_cosine(feats, id_card)
+
+    def match_scores(self, context: torch.Tensor, id_card: torch.Tensor,
+                     patch_xyz: torch.Tensor) -> torch.Tensor | None:
+        """(B, T, N, P) the scores `forward` picks its match from, on the grid
+        it picks from (the upsampled one, if any), before any frame is masked.
+
+        They depend on the images and the templates alone -- not on the sample,
+        not on `k` -- so the matching loss and the match accuracy are computed
+        from here, once, whatever the method does with the trunk. None for a
+        model without the cosine match.
+        """
+        if not self.cosine:
+            return None
+        if self.upsample > 1:
+            context, _ = self._upsample(context, patch_xyz)
+        with torch.autocast(device_type=context.device.type, enabled=False):
+            return self._cosine(context.float(), id_card.float())
 
     def _lookup_pos(self, x: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
         """Where each point currently thinks it is, in `patch_xyz`'s space.
@@ -405,10 +440,7 @@ class PointDiT(nn.Module):
             with torch.autocast(device_type=dev.type, enabled=False):
                 # fp32: the match is decided by differences in the third
                 # decimal of a cosine, which bf16 does not hold.
-                feats = context.float()
-                q = F.normalize(id_card.float(), dim=-1)
-                corr = torch.einsum("bnc,btpc->btnp", q, feats)
-                corr = corr / torch.linalg.vector_norm(feats, dim=-1).clamp_min(1e-6)[:, :, None]
+                corr = self._cosine(context.float(), id_card.float())
                 if visual_mask is not None:
                     corr = corr * visual_mask[..., None, None]
                 # The best match, by appearance alone and over the whole frame:
@@ -418,8 +450,10 @@ class PointDiT(nn.Module):
                 # distance from the current estimate as well, and at low k that
                 # estimate is 2-3 patches off: the search was held to the wrong
                 # neighbourhood exactly when the model had nothing else to go
-                # on. The argmax passes no gradient and needs none -- tau gets
-                # its own through the soft-argmax, match_proj through the token.
+                # on. The argmax passes no gradient -- tau gets its own
+                # through the soft-argmax, match_proj through the token. What
+                # makes the argmax land on the right patch is `match_head` and
+                # the matching loss, when there is one (`match.py`).
                 g = math.isqrt(corr.shape[-1])
                 if g * g != corr.shape[-1] or g < 4:
                     raise ValueError("the match needs a square patch grid at least "

@@ -38,6 +38,7 @@ from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.eval.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.flow import flow_matching_loss, sample
+from genpoint3d.models.match import match_accuracy, match_ce, per_clip, true_patch
 from genpoint3d.models.model import PointDiT
 from genpoint3d.models.regress import refine, regress_loss
 
@@ -52,6 +53,10 @@ MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
 # Scoring starts every sample from the same noise, so a checkpoint has one
 # score rather than a slightly different one each time it is asked.
 EVAL_SEED = 0
+
+# What `evaluate` reports about the match, when the model has one.
+MATCH_KEYS = ("match_acc", "match_acc_near", "match_acc_moving",
+              "match_acc_near_moving", "match_loss")
 
 
 class ClipDataset(Dataset):
@@ -166,6 +171,9 @@ class ClipDataset(Dataset):
             # the native intrinsics makes every threshold too tight.
             "intrinsics_256": _resize_intrinsics(clip.intrinsics, clip.hw),
             "extrinsics": clip.extrinsics,
+            # (H, W) of the native frame: with the intrinsics, what says which
+            # patch a point is drawn in (`match_targets`).
+            "hw": torch.tensor(clip.hw),
             "norm_mean": norm.mean,
             "norm_scale": norm.scale,
             "norm_traj_scale": norm.traj_scale,
@@ -243,6 +251,16 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     for k in ("context", "id_card", "patch_xyz"):
         b[k] = None if b[k].numel() == 0 else b[k].float()
     return b
+
+
+def match_line(m: dict, prefix: str = "") -> str:
+    """The match accuracies for the VAL line: exact/within-one-patch over all
+    visible points, then over the moving ones. Empty if there is no match."""
+    if prefix + "match_acc" not in m:
+        return ""
+    v = [m[prefix + k] for k in MATCH_KEYS[:4]]
+    return (f"  {'trainMatch' if prefix else 'match'} {v[0]:.2f}/{v[1]:.2f}"
+            f" mv {v[2]:.2f}/{v[3]:.2f}")
 
 
 def git_commit() -> str:
@@ -355,6 +373,35 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     return scene * scale + b["norm_mean"][:, None, None, :]
 
 
+def match_targets(model, b: dict, visual_mask: torch.Tensor):
+    """The match as a classification: scores, the right answer, and where
+    there is one. None for a model or a batch with no match to score.
+
+    scores  (B, T, N, P) from `PointDiT.match_scores`, with their graph
+    target  (B, T, N)    the patch the ground truth is drawn in
+    valid   (B, T, N)    the point is visible and inside the frame, the frame
+                         has its image, and it is not frame 0
+
+    Frame 0 is left out. The template is read from frame 0 at the point's own
+    pixel, so the match there is right by construction: it would add nothing to
+    the loss and would lift the accuracy by a share that says nothing about
+    finding the point again.
+
+    The target comes from the batch's metres and cameras, so it does not
+    depend on `--target` or the normalisation.
+    """
+    if b["context"] is None or b["id_card"] is None or b["patch_xyz"] is None:
+        return None
+    scores = model.match_scores(b["context"], b["id_card"], b["patch_xyz"])
+    if scores is None:
+        return None
+    target, inside = true_patch(to_metres(b["traj"], b), b["intrinsics"], b["extrinsics"],
+                                b["hw"], math.isqrt(scores.shape[-1]))
+    valid = b["visibility"] & inside & visual_mask[..., None]
+    valid[:, 0] = False
+    return scores, target, valid
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
              anchor_frame0: bool = False, loss_type: str = "l2",
@@ -414,6 +461,24 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
         gt_m = to_metres(traj, b)
+
+        # How often "the patch that looks most like me" is the patch the point
+        # is in. A property of the features and, with --match-learn, the head;
+        # the trunk and the sampler have no part in it.
+        mt = match_targets(model, b, vm)
+        if mt is not None:
+            scores, target, valid = mt
+            # The same rule as the MOVING score below: more than 4px, ever.
+            far = valid & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4)[:, None]
+            for name, mask in (("", valid), ("_moving", far)):
+                acc, near = match_accuracy(scores, target, mask)
+                add("match_acc" + name, acc)
+                add("match_acc_near" + name, near)
+            if model.match_head is not None:
+                add("match_loss", per_clip(
+                    match_ce(scores, model.match_head.tau(), target, valid), valid))
+            del scores
+
         if min_motion_px:
             # Score only points that actually move. `vis` keeps its meaning for
             # the loss above; this narrows what the METRIC counts.
@@ -606,6 +671,21 @@ def main() -> int:
     p.add_argument("--costvol", type=int, default=1, choices=[0, 1])
     p.add_argument("--cv-k", type=int, default=16, help="neighbour patches")
     p.add_argument("--cv-support", type=int, default=8, help="support patches")
+    p.add_argument("--match-learn", type=int, default=0, choices=[0, 1],
+                   help="train the match. The whole-frame search for the patch "
+                        "that looks like the point runs on frozen features and "
+                        "is right about half the time. 1 adds a small residual "
+                        "MLP on the features it compares, starting as the raw "
+                        "cosine, and a loss that names the right patch for "
+                        "every visible point. 0 is every run before it.")
+    p.add_argument("--match-loss-weight", type=float, default=1.0,
+                   help="--match-learn only: weight of the matching loss "
+                        "(cross-entropy over a frame's patches) next to the "
+                        "method's own loss")
+    p.add_argument("--match-dim", type=int, default=64,
+                   help="--match-learn only: hidden width of the residual MLP. "
+                        "Its memory is a few (batch, frames, patches, this) "
+                        "tensors, so it is kept well under the feature width")
     p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
     # Evaluate and checkpoint the averaged weights, not the jittering ones.
     # 0 disables. The paper lists EMA among its training ingredients.
@@ -702,7 +782,9 @@ def main() -> int:
                      corr_mode=args.corr_mode,
                      causal=bool(args.causal),
                      costvol=bool(args.costvol), cv_k=args.cv_k,
-                     cv_support=args.cv_support).to(device)
+                     cv_support=args.cv_support,
+                     match_learn=bool(args.match_learn),
+                     match_dim=args.match_dim).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
@@ -724,6 +806,7 @@ def main() -> int:
     log, step, t0, running = [], 0, time.time(), 0.0
     since_val, since_val_n = 0.0, 0
     micro, micro_loss = 0, 0.0
+    match_sum = 0.0
     best = -float('inf')
     while step < args.steps:
         for batch in train_loader:
@@ -736,6 +819,19 @@ def main() -> int:
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
             w = apd_weight(b, traj) if args.depth_scaled_loss else None
             kx0 = known_frame0(b) if args.anchor_frame0 else None
+            if args.match_learn:
+                # Its own forward and backward, once per step and ahead of the
+                # method: the scores do not depend on the sample, so regress
+                # would otherwise compute the same loss --refine-iters times,
+                # and one path serves both methods. The gradient adds to the
+                # method's in the same buffers. Logged apart from `loss`, so
+                # train_loss stays comparable with runs that do not have it.
+                scores, target, valid = match_targets(model, b, vm)
+                ml = (match_ce(scores, model.match_head.tau(), target, valid).sum()
+                      / valid.sum().clamp(min=1))
+                (ml * args.match_loss_weight / args.accum).backward()
+                match_sum += ml.item() / args.accum
+                del scores, ml
             # Divided by accum so the accumulated gradient is the mean over
             # the effective batch, not its sum -- otherwise the gradient norm
             # scales with accum and clipping would bite differently.
@@ -802,6 +898,12 @@ def main() -> int:
                     for t in MOVING_THRESHOLDS:
                         m[f"train_moving_within_{t}"] = f[f"moving_within_{t}"]
                     m["train_eval_loss"] = f["val_loss"]
+                    for k in MATCH_KEYS:
+                        if k in f:
+                            m[f"train_{k}"] = f[k]
+                if args.match_learn:
+                    m["train_match_loss"] = match_sum / max(since_val_n, 1)
+                match_sum = 0.0
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
@@ -814,6 +916,7 @@ def main() -> int:
                          f" MOVING {m['train_apd_moving']:.3f}"
                          f" (static {m['train_apd_moving_static']:.3f})"
                          if fit_loader is not None else "")
+                      + match_line(m) + match_line(m, "train_")
                       + f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step,
                             "train_loss": since_val / max(since_val_n, 1), **m})

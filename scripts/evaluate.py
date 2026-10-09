@@ -25,7 +25,7 @@ from genpoint3d.eval.metrics import clip_mean, tapvid3d_metrics
 from genpoint3d.models.model import PointDiT
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
-from train import EVAL_SEED, ClipDataset, evaluate, known_frame0, to_device, to_metres
+from train import EVAL_SEED, MATCH_KEYS, ClipDataset, evaluate, known_frame0, to_device, to_metres
 from genpoint3d.models.flow import sample as flow_sample
 from genpoint3d.models.regress import refine
 
@@ -216,7 +216,11 @@ def main() -> int:
                      causal=bool(targs.get("causal", 1)),
                      costvol=bool(targs.get("costvol", 0)),
                      cv_k=targs.get("cv_k", 16),
-                     cv_support=targs.get("cv_support", 8)).to(device)
+                     cv_support=targs.get("cv_support", 8),
+                     # Absent means a checkpoint from before the match could be
+                     # trained: no head in the file, the raw cosine in the model.
+                     match_learn=bool(targs.get("match_learn", 0)),
+                     match_dim=targs.get("match_dim", 64)).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 
@@ -252,7 +256,7 @@ def main() -> int:
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac",
-              "disp_ratio", "disp_cos"):
+              "disp_ratio", "disp_cos", *MATCH_KEYS):
         if k in m:
             print(f"  {k:<26} {m[k]:.4f}")
     if "moving_clips" in m:
