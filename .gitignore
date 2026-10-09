@@ -30,3 +30,5 @@ __pycache__/
 
 # Cloned reference repos. Notes beside them are tracked; the clones are not.
 /references/*/repo/
+# Paper text is for local reading only; link to the source instead of redistributing it.
+/references/*/paper.txt
