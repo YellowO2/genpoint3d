@@ -371,6 +371,14 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         m["apd_static"] = score(
             gt_m[:, :1].expand_as(gt_m)
         )["average_pts_within_thresh"]
+        if space == "3d":
+            # The same prediction, scored in the image plane. Costs no extra
+            # sampling, and the pair separates "cannot find the point" from
+            # "finds it and misplaces it in depth" on every validation.
+            s2 = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
+                                            b["extrinsics"], space="2d")
+            m["apd_2d"] = s2(pred_m)["average_pts_within_thresh"]
+            m["apd_2d_static"] = s2(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
 
         for k, v in m.items():
             sums[k] = sums.get(k, 0.0) + v
@@ -628,13 +636,16 @@ def main() -> int:
                                  loss_type=args.loss_type)
                     m["train_apd"] = f["average_pts_within_thresh"]
                     m["train_apd_static"] = f["apd_static"]
+                    m["train_apd_2d"] = f["apd_2d"]
                     m["train_eval_loss"] = f["val_loss"]
                 print(f"  VAL step {step}  train_loss {since_val / max(since_val_n, 1):.4f}"
                       f"  val_loss {m['val_loss']:.4f}"
                       f"  APD {m['average_pts_within_thresh']:.3f}"
                       f"  (static {m['apd_static']:.3f})"
+                      f"  2D {m['apd_2d']:.3f} (static {m['apd_2d_static']:.3f})"
                       + (f"  trainAPD {m['train_apd']:.3f}"
                          f" (static {m['train_apd_static']:.3f})"
+                         f" 2D {m['train_apd_2d']:.3f}"
                          if fit_loader is not None else "")
                       + f"  ({time.time() - tv:.0f}s)", flush=True)
                 log.append({"step": step,
