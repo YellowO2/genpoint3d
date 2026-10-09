@@ -16,6 +16,14 @@ The user asked for work to continue unattended. Report in the morning, short.
 - A background agent is building `--method regress` (no noise; start at
   "nothing moves", look, correct, 4 iterations) next to `--method flow`.
 
+## Time limit
+The cluster connection is good for about 4 hours from 03:13 local
+time on 2026-10-10, then it drops. Anything that must start has to be
+submitted before then; chain later jobs with `-W depend=` so they start
+without us. Jobs already queued or running are not affected by the drop.
+
+No training on the laptop beyond about 5 steps: it is a weak MacBook Air.
+
 ## To do, in order, without asking
 1. When the agent reports and its tests pass: `git pull` on the cluster, a
    short smoke test, then a regress run otherwise identical to `run15_noloc`
