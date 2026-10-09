@@ -313,7 +313,8 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
              anchor_frame0: bool = False, loss_type: str = "l2",
-             space: str = "3d", oracle_axis: str = "") -> dict:
+             space: str = "3d", oracle_axis: str = "",
+             scaling: str = "median") -> dict:
     """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
@@ -351,7 +352,8 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         # different physical distance in every clip.
         gt_m = to_metres(traj, b)
         score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
-                                           b["extrinsics"], space=space)
+                                           b["extrinsics"], space=space,
+                                           scaling=scaling)
         pred_m = to_metres(pred, b)
         if oracle_axis:
             # Attribution, not an input: the model has already produced its
@@ -376,7 +378,8 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
             # sampling, and the pair separates "cannot find the point" from
             # "finds it and misplaces it in depth" on every validation.
             s2 = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
-                                            b["extrinsics"], space="2d")
+                                            b["extrinsics"], space="2d",
+                                            scaling=scaling)
             m["apd_2d"] = s2(pred_m)["average_pts_within_thresh"]
             m["apd_2d_static"] = s2(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
 

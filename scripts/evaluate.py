@@ -131,6 +131,12 @@ def main() -> int:
                         "tracks into the image and scores the original TAP-Vid "
                         "pixel thresholds, which is blind to depth error. The "
                         "two together say whether depth is what we get wrong.")
+    p.add_argument("--scaling", default="median", choices=["median", "none"],
+                   help="median is the TAPVid-3D protocol: the whole prediction "
+                        "is multiplied by one factor so its median norm matches "
+                        "the truth, because monocular depth has no scale. We "
+                        "have metric depth, so that factor can only move a "
+                        "correct point. none scores the prediction as it is.")
     p.add_argument("--oracle-axis", default="", choices=["", "x", "y", "z"],
                    help="overwrite one channel of the PREDICTION with the truth "
                         "before scoring. An error decomposition, not an input. "
@@ -198,7 +204,8 @@ def main() -> int:
                               anchor_frame0) if args.per_frame else None
     m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp,
                  anchor_frame0=anchor_frame0, loss_type=loss_type,
-                 space=args.space, oracle_axis=args.oracle_axis)
+                 space=args.space, oracle_axis=args.oracle_axis,
+                 scaling=args.scaling)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss"):
