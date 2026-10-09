@@ -24,7 +24,7 @@ from genpoint3d.models.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
     zero_init,
 )
-from genpoint3d.models.match import MatchHead, raw_cosine
+from genpoint3d.models.match import MatchHead, nms_peaks, nms_pool, raw_cosine
 
 
 class PointDiT(nn.Module):
@@ -68,6 +68,7 @@ class PointDiT(nn.Module):
         cv_dim: int = 32,
         match_learn: bool = False,
         match_dim: int = 64,
+        match_topk: int = 1,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -236,6 +237,25 @@ class PointDiT(nn.Module):
                              "cross_attn, correlate and corr_mode='cosine'")
         self.match_head = MatchHead(feat_dim, match_dim) if match_learn else None
 
+        # [more candidates] the single best match is the wrong place for 30-40%
+        # of moving points, and the trunk then has nothing to recover with.
+        # With match_topk > 1 it is handed the K best DISTINCT peaks of the
+        # score map (`nms_peaks`), each described by the same five numbers, in
+        # rank order, and picks among them the way trackers do: by which one
+        # makes a consistent path through time.
+        #
+        # Together with `match_proj` this is one Linear(5 * K, dim) on the
+        # concatenation, kept as two so that the first five columns are
+        # `match_proj` under its own name and initialisation, and the rest
+        # start at zero: at step 0 the model is exactly the single-match one.
+        # Built after everything else for the same reason as the head.
+        if match_topk < 1 or (match_topk > 1 and not self.cosine):
+            raise ValueError("match_topk must be >= 1, and > 1 needs the cosine match")
+        self.match_topk = match_topk
+        if match_topk > 1:
+            self.match_more = zero_init(
+                nn.Linear(5 * (match_topk - 1), dim, bias=False), almost=False)
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -333,6 +353,39 @@ class PointDiT(nn.Module):
         step = (grid[:, :, :, 1:] - grid[:, :, :, :-1]).norm(dim=-1).flatten(2)
         # Floored: patches stacked on one spot would otherwise divide by zero.
         return step.median(dim=-1).values.clamp_min(1e-4)
+
+    def _describe(self, corr, top, best, vals, idx, patch_xyz, anchor, tau) -> torch.Tensor:
+        """The five numbers the trunk is handed about one candidate match.
+
+        corr (B, T, N, P) scores; top (B, T, N) the candidate's patch and
+        `best` its score; vals, idx (B, T, N, >=10) the highest scores of the
+        map and where they are. Returns (B, T, N, 5): the offset from the
+        point's start in target units, the score, and the margin.
+        """
+        B, T, N, P = corr.shape
+        g = math.isqrt(P)
+        # A soft-argmax over the candidate's 3x3 on the grid, for sub-patch
+        # precision. At the border the window slides inward rather than repeat
+        # a patch, so it is always nine different ones.
+        step = torch.arange(-1, 2, device=corr.device)
+        rows = (top // g).clamp(1, g - 2)[..., None, None] + step[:, None]
+        cols = (top % g).clamp(1, g - 2)[..., None, None] + step
+        win = (rows * g + cols).flatten(-2)                           # (B, T, N, 9)
+        w = (corr.gather(-1, win) / tau).softmax(-1)
+        # Gathered by index: a second (B, T, N, P) tensor is the memory
+        # the cosine map already costs once.
+        near = patch_xyz.gather(
+            2, win.reshape(B, T, -1)[..., None].expand(-1, -1, -1, 3)
+        ).reshape(B, T, N, 9, 3)
+        offset = self._target_units((w[..., None] * near).sum(-2), anchor)
+        # Two confidences, so an offset from a poor match can be told from a
+        # good one: how alike the candidate is, and by how much it beats the
+        # best patch OUTSIDE its window -- for the winner a small margin is a
+        # lookalike somewhere else, and for a runner-up it is negative: how
+        # far behind the winner it is. Of the top 10, one is outside.
+        inside = (idx[..., None] == win[..., None, :]).any(-1)
+        rival = vals.masked_fill(inside, -torch.inf).amax(-1)
+        return torch.cat([offset, best[..., None], (best - rival)[..., None]], dim=-1)
 
     def forward(
         self,
@@ -459,28 +512,22 @@ class PointDiT(nn.Module):
                     raise ValueError("the match needs a square patch grid at least "
                                      f"4 wide, got P={corr.shape[-1]}")
                 best, top = corr.max(dim=-1)                          # (B, T, N)
-                # At the border the window slides inward rather than repeat a
-                # patch, so it is always nine different ones.
-                step = torch.arange(-1, 2, device=dev)
-                rows = (top // g).clamp(1, g - 2)[..., None, None] + step[:, None]
-                cols = (top % g).clamp(1, g - 2)[..., None, None] + step
-                win = (rows * g + cols).flatten(-2)                   # (B, T, N, 9)
                 tau = bounded_exp(self.match_log_tau, 1e-3, 1.0)
-                w = (corr.gather(-1, win) / tau).softmax(-1)
-                # Gathered by index: a second (B, T, N, P) tensor is the memory
-                # the cosine map already costs once.
-                near = patch_xyz.float().gather(
-                    2, win.reshape(B, T, -1)[..., None].expand(-1, -1, -1, 3)
-                ).reshape(B, T, N, 9, 3)
-                offset = self._target_units((w[..., None] * near).sum(-2), anchor.float())
-                # Two confidences, so an offset from a poor match can be told
-                # from a good one: how alike the winner is, and by how much it
-                # beats the best patch OUTSIDE its window -- a small margin is
-                # a lookalike somewhere else. Of the top 10, one is outside.
-                vals, idx = corr.topk(10, dim=-1)
-                inside = (idx[..., None] == win[..., None, :]).any(-1)
-                rival = vals.masked_fill(inside, -torch.inf).amax(-1)
-                match = torch.cat([offset, best[..., None], (best - rival)[..., None]], dim=-1)
+                # The runners-up come from this list too: enough of the top
+                # scores that K peaks survive suppressing each other's 3x3.
+                vals, idx = corr.topk(nms_pool(self.match_topk), dim=-1)
+                pxyz, a0 = patch_xyz.float(), anchor.float()
+                match = self._describe(corr, top, best, vals, idx, pxyz, a0, tau)
+                if self.match_topk > 1:
+                    # Which places is decided without a gradient, like the
+                    # argmax; what is read at each has one. Rank 1 is the
+                    # argmax above, so the first five numbers are the
+                    # single-match model's, bit for bit.
+                    peaks = nms_peaks(corr, self.match_topk, first=top, idx=idx)
+                    match = torch.cat([match] + [
+                        self._describe(corr, pk, corr.gather(-1, pk[..., None])[..., 0],
+                                       vals, idx, pxyz, a0, tau)
+                        for pk in peaks.unbind(-1)[1:]], dim=-1)
                 if visual_mask is not None:
                     match = match * visual_mask[..., None, None]
         elif (self.correlate and context is not None and id_card is not None
@@ -558,7 +605,10 @@ class PointDiT(nn.Module):
         if match is not None:
             # Added, not folded into `cond`: conditioning only rescales
             # channels (AdaRMSNorm), and a displacement has to be copied.
-            h = h + self.match_proj(match.to(h.dtype))
+            match = match.to(h.dtype)
+            h = h + self.match_proj(match[..., :5])
+            if self.match_topk > 1:
+                h = h + self.match_more(match[..., 5:])
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in

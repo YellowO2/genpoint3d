@@ -220,7 +220,8 @@ def main() -> int:
                      # Absent means a checkpoint from before the match could be
                      # trained: no head in the file, the raw cosine in the model.
                      match_learn=bool(targs.get("match_learn", 0)),
-                     match_dim=targs.get("match_dim", 64)).to(device)
+                     match_dim=targs.get("match_dim", 64),
+                     match_topk=targs.get("match_topk", 1)).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 

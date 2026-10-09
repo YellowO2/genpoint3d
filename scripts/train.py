@@ -38,7 +38,9 @@ from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.eval.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.flow import flow_matching_loss, sample
-from genpoint3d.models.match import match_accuracy, match_ce, per_clip, true_patch
+from genpoint3d.models.match import (
+    match_accuracy, match_accuracy_topk, match_ce, per_clip, true_patch,
+)
 from genpoint3d.models.model import PointDiT
 from genpoint3d.models.regress import refine, regress_loss
 
@@ -56,7 +58,8 @@ EVAL_SEED = 0
 
 # What `evaluate` reports about the match, when the model has one.
 MATCH_KEYS = ("match_acc", "match_acc_near", "match_acc_moving",
-              "match_acc_near_moving", "match_loss")
+              "match_acc_near_moving", "match_loss",
+              "match_acc_top5_near", "match_acc_top5_near_moving")
 
 
 class ClipDataset(Dataset):
@@ -255,12 +258,16 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
 
 def match_line(m: dict, prefix: str = "") -> str:
     """The match accuracies for the VAL line: exact/within-one-patch over all
-    visible points, then over the moving ones. Empty if there is no match."""
+    visible points, then over the moving ones; then how often the truth is
+    within one patch of any of the 5 best distinct peaks, all/moving. Empty if
+    there is no match."""
     if prefix + "match_acc" not in m:
         return ""
     v = [m[prefix + k] for k in MATCH_KEYS[:4]]
     return (f"  {'trainMatch' if prefix else 'match'} {v[0]:.2f}/{v[1]:.2f}"
-            f" mv {v[2]:.2f}/{v[3]:.2f}")
+            f" mv {v[2]:.2f}/{v[3]:.2f}"
+            f" top5 {m[prefix + 'match_acc_top5_near']:.2f}"
+            f"/{m[prefix + 'match_acc_top5_near_moving']:.2f}")
 
 
 def git_commit() -> str:
@@ -474,6 +481,9 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
                 acc, near = match_accuracy(scores, target, mask)
                 add("match_acc" + name, acc)
                 add("match_acc_near" + name, near)
+                # Always 5, whatever --match-topk is: it says what more
+                # candidates would be worth before a run is spent on them.
+                add("match_acc_top5_near" + name, match_accuracy_topk(scores, target, mask, 5))
             if model.match_head is not None:
                 add("match_loss", per_clip(
                     match_ce(scores, model.match_head.tau(), target, valid), valid))
@@ -678,6 +688,13 @@ def main() -> int:
                         "MLP on the features it compares, starting as the raw "
                         "cosine, and a loss that names the right patch for "
                         "every visible point. 0 is every run before it.")
+    p.add_argument("--match-topk", type=int, default=1,
+                   help="how many candidate matches the model is handed per "
+                        "point and frame. 1 is the single best patch, every "
+                        "run before this. K > 1 adds the next K-1 distinct "
+                        "peaks of the score map (each peak rules out its 3x3 "
+                        "before the next is picked), in rank order; their "
+                        "weights start at zero, so step 0 is the K=1 model")
     p.add_argument("--match-loss-weight", type=float, default=1.0,
                    help="--match-learn only: weight of the matching loss "
                         "(cross-entropy over a frame's patches) next to the "
@@ -784,7 +801,8 @@ def main() -> int:
                      costvol=bool(args.costvol), cv_k=args.cv_k,
                      cv_support=args.cv_support,
                      match_learn=bool(args.match_learn),
-                     match_dim=args.match_dim).to(device)
+                     match_dim=args.match_dim,
+                     match_topk=args.match_topk).to(device)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)

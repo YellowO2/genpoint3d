@@ -16,6 +16,7 @@ that otherwise shows up as "training is mysteriously bad".
   9. window         the prior is wide on a noisy sample and narrow on a clean one
  10. match head     starts as the raw cosine, is the MLP it claims to be, trains
  11. true patch     a point placed on a patch's own surface point is in that patch
+ 12. top-k match    K candidates are K different places, start as the K=1 model, train
 
 The model is built the way a run builds it (displacement target, its scale,
 cost volume off) and the scene has a run's proportions: patches on a grid 0.05
@@ -32,7 +33,9 @@ import torch.nn.functional as F
 from genpoint3d.data.transform import TRAJ_SCALE_DISP
 from genpoint3d.geometry import batch_unproject
 from genpoint3d.models.encoder import VisualEncoder, patch_centre_xyz
-from genpoint3d.models.match import match_ce, raw_cosine, true_patch
+from genpoint3d.models.match import (
+    match_accuracy_topk, match_ce, nms_peaks, raw_cosine, true_patch,
+)
 from genpoint3d.models.model import PointDiT
 
 B, T, N, G, D, FEAT = 2, 8, 5, 12, 64, 48
@@ -392,6 +395,105 @@ def check_match_head(x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
     ]
 
 
+def check_topk(x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
+    """--match-topk K hands the trunk K distinct candidates.
+
+      peaks distinct    on a made-up score map with two adjacent high cells
+                        and a lower peak far away, the candidates are the top
+                        cell and the far peak -- not the neighbour
+      topk optional     K = 1 adds no parameters, and the rest initialise the
+                        same with K = 4
+      topk starts as 1  at step 0 the K = 4 model's output is the K = 1 one's
+      rank 1 is K=1     the first five numbers at K = 4 are the K = 1 match
+      topk is read      each further candidate moves the output once its
+                        weights are not zero, and the loss reaches both those
+                        weights and, through the candidates, the learned head
+      top5 counts       the diagnostic says yes for a truth next to the 2nd
+                        peak and no for one next to nothing
+    """
+    vm = torch.ones_like(vm)
+    K = 4
+    sc = torch.rand(1, 1, 2, P) * 0.1
+    a, b_, far = 3 * G + 3, 3 * G + 4, 9 * G + 8
+    sc[..., a], sc[..., b_], sc[..., far] = 1.0, 0.9, 0.5
+    pk = nms_peaks(sc, 3)
+    cheb = lambda i, j: torch.maximum((i // G - j // G).abs(), (i % G - j % G).abs())
+    apart = min(cheb(pk[..., i], pk[..., j]).min().item()
+                for i in range(3) for j in range(i))
+    # The same answer as masking the map, the obvious way.
+    ref, left = [], sc.clone()
+    for _ in range(3):
+        t = left.argmax(-1)
+        ref.append(t)
+        cells = torch.arange(P)
+        left = left.masked_fill(cheb(cells, t[..., None]) <= 1, -torch.inf)
+    naive = torch.equal(pk, torch.stack(ref, -1))
+    right = bool((pk[..., 0] == a).all() and (pk[..., 1] == far).all())
+
+    tgt = torch.tensor([far + 1, 6 * G + 0]).reshape(1, 1, 2)
+    top5 = match_accuracy_topk(sc, tgt, torch.ones(1, 1, 2, dtype=torch.bool), 5).item()
+
+    one, many = model(), model(match_topk=K)
+    lone, lmany = model(match_learn=True), model(match_learn=True, match_topk=K)
+    extra = [n for n in one.state_dict() if n.startswith("match_more")]
+    same = (all(torch.equal(v, many.state_dict()[n]) for n, v in one.state_dict().items())
+            and all(torch.equal(v, lmany.state_dict()[n]) for n, v in lone.state_dict().items()))
+    kw = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    seen = {}
+    hooks = [one.match_proj.register_forward_pre_hook(lambda _, i: seen.update(one=i[0])),
+             many.match_proj.register_forward_pre_hook(lambda _, i: seen.update(first=i[0])),
+             many.match_more.register_forward_pre_hook(lambda _, i: seen.update(more=i[0]))]
+    with torch.no_grad():
+        o1 = one(x, k, anchor, **kw)
+        oK = many(x, k, anchor, **kw)
+        start = (o1 - oK).abs().max().item()
+        rank1 = torch.equal(seen["one"], seen["first"])
+        # Every candidate is a different place, with a lower score than the last.
+        cand = torch.cat([seen["first"], seen["more"]], -1).reshape(B, T, N, K, 5)
+        ordered = bool((cand[..., 1:, 3] <= cand[..., :-1, 3]).all())
+        differ = (cand[..., 1:, :3] - cand[..., :-1, :3]).norm(dim=-1).min().item()
+        torch.nn.init.normal_(many.match_more.weight, std=0.5)
+        base = many(x, k, anchor, **kw)
+        moved = []
+        for j in range(1, K):
+            w = many.match_more.weight.clone()
+            many.match_more.weight[:, 5 * (j - 1):5 * j] = 0
+            moved.append((many(x, k, anchor, **kw) - base).abs().max().item())
+            many.match_more.weight.copy_(w)
+    for h in hooks:
+        h.remove()
+
+    # The weights start at exactly zero and must still get a gradient there.
+    lmany.zero_grad()
+    h = lmany.match_more.register_forward_pre_hook(lambda _, i: seen.update(more=i[0]))
+    lmany(x, k, anchor, **kw).pow(2).sum().backward(retain_graph=True)
+    h.remove()
+    gm = lmany.match_more.weight.grad.abs().max().item()
+    # What the runners-up hand over, traced back to the learned head: only
+    # them, since the head is reached through rank 1 and the attention anyway.
+    gh = torch.autograd.grad(seen["more"].pow(2).sum(),
+                             lmany.match_head.out.weight)[0].abs().max().item()
+    return [
+        report("peaks distinct", right and naive and apart >= 2 and top5 == 0.5,
+               f"candidates {pk[0, 0, 0].tolist()} (want [{a}, {far}, ..], never {b_}),"
+               f" closest pair {apart} cells apart (want >=2), "
+               f"{'same' if naive else 'DIFFERENT'} as masking the map; "
+               f"top-5 diagnostic {top5:.2f} (want 0.50)"),
+        report("topk optional", not extra and same,
+               f"--match-topk 1 adds {len(extra)} params (want 0); the rest initialise "
+               f"{'the same' if same else 'DIFFERENTLY'} with K={K}"),
+        report("topk starts as 1", start == 0.0 and rank1,
+               f"at step 0 the K={K} output differs from K=1 by {start:.1e} (want 0); "
+               f"rank 1 is {'the' if rank1 else 'NOT the'} K=1 match"),
+        report("topk is read", min(moved) > 1e-8 and ordered and differ > 0.0,
+               f"dropping candidate 2..{K} moved output {min(moved):.1e}..{max(moved):.1e}"
+               f" (want >0); scores {'fall' if ordered else 'DO NOT fall'} with rank"),
+        report("topk trains", gm > 0 and gh > 0,
+               f"gradient on the candidates' weights {gm:.1e}, on the learned head "
+               f"through candidates 2..{K} {gh:.1e} (want >0)"),
+    ]
+
+
 def check_true_patch() -> bool:
     """A point sitting exactly on the surface point stored for a patch must be
     assigned that patch -- on a frame that is not square, under a camera that
@@ -487,6 +589,7 @@ def main() -> int:
     ok &= check_cv_optional()
     ok &= all(check_costvol(*args))
     ok &= all(check_match_head(*args))
+    ok &= all(check_topk(*args))
     ok &= check_true_patch()
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")
