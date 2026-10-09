@@ -43,3 +43,9 @@ No training on the laptop beyond about 5 steps: it is a weak MacBook Air.
 - A queued job runs whatever code is on the cluster when it STARTS, so pass
   every flag that matters explicitly.
 - Commits as the user, no co-author or session lines.
+
+## Order of attack (user, 03:30)
+
+Work down the tolerances, on train first: rough trajectory (<16px, train 0.86
+against TAPIP3D 1.00), then <8, <4, <2. Keep testing fixes after the
+regress-against-flow test ends; do not stop at one result.
