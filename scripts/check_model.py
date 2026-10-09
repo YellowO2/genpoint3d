@@ -11,6 +11,14 @@ that otherwise shows up as "training is mysteriously bad".
   4. null is used   the null embedding receives gradient
   5. id card        the query feature reaches the output
   6. encoder shapes grid / tokens / bilinear lookup all line up
+  7. locality       a patch beside the point acts, one ten patches away does not
+  8. correlation    the patch that looks like the point is found, untrained
+
+The model is built the way a run builds it (displacement target, its scale,
+cost volume off) and the scene has a run's proportions: patches on a grid 0.05
+apart, points 0.01-0.02 from the nearest one, features wider than the model.
+Checks 7 and 8 passed for years on numbers no scene has -- a "far" patch 50
+units away, gates opened by hand -- while the real model could do neither.
 
 Run:  .venv/bin/python scripts/check_model.py
 """
@@ -18,10 +26,13 @@ Run:  .venv/bin/python scripts/check_model.py
 import torch
 import torch.nn.functional as F
 
+from genpoint3d.data.transform import TRAJ_SCALE_DISP
 from genpoint3d.models.encoder import VisualEncoder
 from genpoint3d.models.model import PointDiT
 
-B, T, N, P, D = 2, 8, 5, 16, 64
+B, T, N, G, D, FEAT = 2, 8, 5, 12, 64, 48
+P = G * G
+SPACING = 0.05  # between neighbouring patches; Kubric at 24x24 gives 0.04-0.11
 CUT = 4  # frames [0, CUT) keep their images; the rest are forecast
 
 
@@ -30,17 +41,35 @@ def report(name: str, ok: bool, detail: str) -> bool:
     return ok
 
 
-def build():
+def model(**kw) -> PointDiT:
+    """The model as scripts/train.py builds it for a run, scaled down."""
     torch.manual_seed(0)
-    m = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True).eval()
+    kw = {"costvol": False, **kw}
+    return PointDiT(dim=D, depth=2, num_heads=4, cross_attn=True, feat_dim=FEAT,
+                    displacement=True, traj_scale=TRAJ_SCALE_DISP, **kw).eval()
+
+
+def grid_xyz() -> torch.Tensor:
+    """(P, 3) patch positions, row-major, on a flat G x G grid one unit deep."""
+    i = (torch.arange(G) - (G - 1) / 2) * SPACING
+    ys, xs = torch.meshgrid(i, i, indexing="ij")
+    return torch.stack([xs, ys, torch.ones_like(xs)], dim=-1).reshape(P, 3)
+
+
+def build():
+    m = model()
     x = torch.randn(B, T, N, 3)
+    x[:, 0] = 0                             # frame 0 is pinned to the anchor
     k = torch.rand(B)
-    anchor = torch.randn(B, N, 3)
-    ctx = torch.randn(B, T, P, D)
+    grid = grid_xyz()
+    # Not quite regular and not quite still, as a depth map under a moving
+    # camera is not.
+    pxyz = grid + torch.randn(B, T, P, 3) * 0.1 * SPACING
+    anchor = grid[torch.randint(P, (B, N))] + torch.randn(B, N, 3) * 0.2 * SPACING
+    ctx = torch.randn(B, T, P, FEAT)
     vm = torch.zeros(B, T, dtype=torch.bool)
     vm[:, :CUT] = True
-    idc = torch.randn(B, N, D)
-    pxyz = torch.randn(B, T, P, 3)
+    idc = torch.randn(B, N, FEAT)
     return m, x, k, anchor, ctx, vm, idc, pxyz
 
 
@@ -99,79 +128,113 @@ def check_patch_pos(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
 
 
 def check_locality(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
-    """A point must be moved more by patches NEAR it than by distant ones.
+    """A point must be moved by the patch BESIDE it and not by one ten patches off.
 
     Without this the model has to discover which of P patches is its own, from
     scratch, with no supervision on attention -- and the measured result was a
     model that ignored the video entirely. Geometry answers it instead.
 
     Both patches are perturbed by the same amount, so any difference in effect is
-    the distance prior and nothing else.
+    the distance prior and nothing else. Ten patch spacings is 0.5 scene units:
+    the old prior, a strength of 1.3 per unit squared, gave that patch 0.72 of
+    the nearby one's weight, and this check is what would have said so.
     """
-    P = ctx.shape[2]
-    pxyz = pxyz.clone()
-    pxyz[:, :, 0] = 0.0                     # patch 0 sits exactly on the points
-    pxyz[:, :, 1] = 50.0                    # patch 1 is far away
-    x = torch.zeros_like(x)                 # every point at the origin, beside patch 0
+    row = G // 2
+    near, far = row * G + 1, row * G + 10   # 1 and 10 spacings right of patch 0
+    anchor = pxyz[:, 0, row * G].unsqueeze(1).expand(B, N, 3).clone()
+    x = torch.zeros_like(x)                 # every point sits on its anchor
+    bump = torch.randn(FEAT)
     with torch.no_grad():
         base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-        near = ctx.clone(); near[:, :, 0] += 1.0
-        a = m(x, k, anchor, context=near, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-        far = ctx.clone(); far[:, :, 1] += 1.0
-        b = m(x, k, anchor, context=far, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        c = ctx.clone(); c[:, :, near] += bump
+        a = m(x, k, anchor, context=c, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        c = ctx.clone(); c[:, :, far] += bump
+        b = m(x, k, anchor, context=c, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
 
     d_near = (a - base).abs().max().item()
     d_far = (b - base).abs().max().item()
     return (
-        report("near patch acts", d_near > 1e-8, f"nearby patch moved output {d_near:.1e} (want >0)"),
-        report("far patch muted", d_far < d_near, f"distant patch moved it {d_far:.1e}, "
-                                                  f"{d_far / max(d_near, 1e-30):.2f}x the nearby one (want <1)"),
+        report("near patch acts", d_near > 1e-8, f"patch 1 spacing away moved output {d_near:.1e} (want >0)"),
+        report("far patch muted", d_far < 0.1 * d_near,
+               f"patch 10 spacings away moved it {d_far:.1e}, "
+               f"{d_far / max(d_near, 1e-30):.3f}x the nearby one (want <0.1)"),
     )
 
 
-def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
-    """A patch that MATCHES the query template must act more than one that does not.
+def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
+    """The patch that looks like the point must be found, and found UNTRAINED.
 
-    Every patch is placed at the same position here, so the distance prior is
-    identical for all of them and appearance is the only thing left that can
-    differentiate. Before this existed the model held the template and the patches
-    but never compared them, and the ablation showed it ignored the video.
+    Each point's own feature is planted in one patch per frame, two patches
+    further along the row every frame, among patches of noise. Nothing is opened
+    by hand and no weight is consulted to build the matching patch: the feature
+    is simply the same one. The old score put that patch at rank P/2, and its
+    "best match" was the centre of the grid.
 
-    The gates are opened by hand: they init at zero on purpose, so an untrained
-    model is bit-identical to the locality-only one. This asks whether the wiring
-    is there, not whether it is active at step 0.
+      match ranked 1st  the planted patch has the highest score of all P
+      match offset      the offset handed to the model is the planted
+                        displacement, to within a patch spacing
+      match acts        of two patches equally near, the lookalike is the one read
     """
-    for cb in m.cross_blocks:
-        cb.corr_w.data.fill_(4.0)
-    m.match_gate.data.fill_(1.0)
+    vm = torch.ones_like(vm)
+    grid = grid_xyz()
+    pxyz = grid.expand(B, T, P, 3)
+    rows = torch.arange(N) + 1                                  # one row per point
+    home = rows * G                                             # column 0
+    anchor = grid[home].expand(B, N, 3).clone()
+    planted = home[None] + 2 * torch.arange(T).clamp(max=4)[:, None]   # (T, N)
+    ctx = ctx.clone()
+    ctx[:, torch.arange(T)[:, None], planted] = idc[:, None]
+    want = (grid[planted] - grid[home]) / TRAJ_SCALE_DISP       # (T, N, 3)
+    x = want.expand(B, T, N, 3) + torch.randn(B, T, N, 3) * 0.5  # a noisy guess
+    x[:, 0] = 0
 
-    pxyz = torch.ones_like(pxyz)            # every patch equidistant from every point
+    seen = {}
+    hooks = [
+        m.cross_blocks[0].register_forward_pre_hook(
+            lambda _, a, kw: seen.update(corr=kw["corr"]), with_kwargs=True),
+        m.match_proj.register_forward_pre_hook(lambda _, a: seen.update(match=a[0])),
+    ]
     with torch.no_grad():
-        # The feature whose corr_k projection equals point 0's corr_q projection,
-        # i.e. the patch that looks exactly like that point.
-        q0 = m.corr_q(idc)[:, 0]                                    # (B, D)
-        f = q0 @ torch.linalg.pinv(m.corr_k.weight).T               # (B, D_feat)
-        ctx = ctx.clone()
-        ctx[:, :, 0] = f[:, None]                                   # patch 0 matches
-        ctx[:, :, 1] = -f[:, None]                                  # patch 1 anti-matches
+        m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    for h in hooks:
+        h.remove()
 
+    top = seen["corr"].reshape(B, T, N, P).argmax(-1)
+    hit = (top == planted).float().mean().item()
+    err = (seen["match"][..., :3] - want).norm(dim=-1).max().item() * TRAJ_SCALE_DISP / SPACING
+    out = [
+        report("match ranked 1st", hit == 1.0, f"planted patch scored highest for {hit:.0%} of points (want 100%)"),
+        report("match offset", err < 1.0, f"offset is off by at most {err:.2f} patch spacings (want <1)"),
+    ]
+
+    # Point 0 sits on a patch; its left and right neighbours are equally near.
+    # One looks exactly like it, the other exactly unlike. Every other point is
+    # parked in the far corner: one close by would read both patches itself
+    # and pass the change on through spatial attention.
+    anchor = grid[P - 1].expand(B, N, 3).clone()
+    anchor[:, 0] = grid[home[0] + 2]
+    x = torch.zeros_like(x)
+    like, unlike = home[0] + 1, home[0] + 3
+    ctx = torch.randn_like(ctx)
+    ctx[:, :, like], ctx[:, :, unlike] = idc[:, None, 0], -idc[:, None, 0]
+    bump = torch.randn(FEAT) * 0.1
+    with torch.no_grad():
         base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-        hit = ctx.clone(); hit[:, :, 0] += 1.0
-        a = m(x, k, anchor, context=hit, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-        miss = ctx.clone(); miss[:, :, 1] += 1.0
-        b = m(x, k, anchor, context=miss, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
-
-    # Point 0 is the one whose template was matched; only its output is evidence.
+        c = ctx.clone(); c[:, :, like] += bump
+        a = m(x, k, anchor, context=c, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        c = ctx.clone(); c[:, :, unlike] += bump
+        b = m(x, k, anchor, context=c, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    # Only point 0's own output is evidence; the others have other templates.
     d_hit = (a - base)[:, :, 0].abs().max().item()
     d_miss = (b - base)[:, :, 0].abs().max().item()
-    return (
+    return out + [
         report("match acts", d_hit > 1e-8, f"matching patch moved output {d_hit:.1e} (want >0)"),
-        report("mismatch muted", d_miss < d_hit, f"non-matching patch moved it {d_miss:.1e}, "
-               f"{d_miss / max(d_hit, 1e-30):.2f}x the matching one (want <1)"),
-    )
+        report("mismatch muted", d_miss < 0.1 * d_hit, f"non-matching patch moved it {d_miss:.1e}, "
+               f"{d_miss / max(d_hit, 1e-30):.3f}x the matching one (want <0.1)"),
+    ]
 
 
-def check_costvol(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+def check_costvol(x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     """The support window must matter, and only from frame 0.
 
     Nothing else in this suite touches it: `id card` tests the single-vector
@@ -180,7 +243,9 @@ def check_costvol(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     at frame 0 -- and it is the thing CoTracker has and our first attempt did not.
 
     Gate opened by hand; it inits at zero so an untrained model matches run6.
+    Runs leave the cost volume off, so this is the one check built with it on.
     """
+    m = model(costvol=True)
     m.cv_gate.data.fill_(1.0)
     with torch.no_grad():
         base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
@@ -202,9 +267,7 @@ def check_costvol(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
 
 def check_cv_optional() -> bool:
     """--costvol 0 must create no parameters, so run6/7/8 checkpoints still load."""
-    torch.manual_seed(0)
-    off = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True, costvol=False)
-    extra = [n for n in off.state_dict() if n.startswith("cv_")]
+    extra = [n for n in model(costvol=False).state_dict() if n.startswith("cv_")]
     return report("cv optional", not extra, f"--costvol 0 adds {len(extra)} params (want 0)")
 
 
@@ -214,9 +277,7 @@ def check_bidirectional(x, k, anchor, ctx, vm, idc, pxyz) -> bool:
     The mirror of `check_causality`. A flag that silently does nothing is worse
     than no flag, because the run it produces looks like an answer.
     """
-    torch.manual_seed(0)
-    m = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True,
-                 causal=False).eval()
+    m = model(causal=False)
     with torch.no_grad():
         base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
         x2 = x.clone(); x2[:, CUT:] += 10.0
@@ -232,20 +293,25 @@ def check_corr_optional() -> bool:
     Same contract as --locality 0: a checkpoint trained before this existed has
     to keep loading, which it only does if the state dict has no extra keys.
     """
-    torch.manual_seed(0)
-    off = PointDiT(dim=D, depth=2, num_heads=4, cond_dim=D, cross_attn=True,
-                   correlate=False)
-    extra = [n for n in off.state_dict() if "corr" in n or "match" in n]
+    extra = [n for n in model(correlate=False).state_dict() if "corr" in n or "match" in n]
     return report("corr optional", not extra, f"--correlate 0 adds {len(extra)} params (want 0)")
 
 
-def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool, bool]:
+    """The last one is what the old matching failed: its projections sat behind
+    gates initialised at zero, so at step 0 their gradient was exactly zero and
+    the gates were only ever shown a random score."""
     m.zero_grad()
     idc = idc.clone().requires_grad_(True)
     m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz).sum().backward()
     null_g = m.null_ctx.grad.abs().sum().item()
     idc_g = idc.grad.abs().sum().item()
+    live = {n: p.grad.abs().max().item() for n, p in m.named_parameters()
+            if "match" in n or "corr" in n or "sigma" in n}
+    dead = [n for n, g in live.items() if g == 0]
     return (
+        report("match is live", not dead, f"{len(dead)} of {len(live)} locality and match "
+               f"parameters have zero gradient at step 0 {dead or ''} (want 0)"),
         report("null is used", null_g > 0, f"null_ctx grad {null_g:.2e}"),
         report("id card", idc_g > 0, f"id_card grad {idc_g:.2e}"),
     )
@@ -279,19 +345,18 @@ def check_encoder() -> bool:
 
 
 def main() -> int:
-    print(f"B={B} T={T} N={N} P={P} D={D}, cutoff T_C={CUT}\n")
+    print(f"B={B} T={T} N={N} P={P} D={D} feat={FEAT}, cutoff T_C={CUT}\n")
     m, *args = build()
     ok = check_causality(m, *args)
     ok &= all(check_mask(m, *args))
     ok &= all(check_patch_pos(m, *args))
     ok &= all(check_locality(m, *args))
+    ok &= all(check_correlation(m, *args))
     ok &= all(check_grads(m, *args))
-    # Last: it opens the correlation gates, which mutates the model.
     ok &= check_bidirectional(*args)
     ok &= check_corr_optional()
     ok &= check_cv_optional()
-    ok &= all(check_costvol(m, *args))
-    ok &= all(check_correlation(m, *args))
+    ok &= all(check_costvol(*args))
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")
     return 0 if ok else 1
