@@ -47,6 +47,43 @@ _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
 
 
+def patch_centre_xyz(pointmap: torch.Tensor, grid: int) -> torch.Tensor:
+    """(T, 3, H, W) scene points -> (T, grid*grid, 3): the point at each patch's centre.
+
+    One pixel is READ per patch; nothing is averaged. Until 2026-10-10 this was
+    the mean over the patch footprint, which at an object edge mixes foreground
+    and background and lands in mid-air between them (typically 21 cm from any
+    surface), so "where is the patch that looks like me" pointed at nothing.
+
+    Which pixel: the one that contains the patch centre. Patch j spans
+    `[j, j+1) * W / grid` in continuous pixel coordinates, so its centre is at
+    `(j + 0.5) * W / grid` and lies inside pixel `floor` of that. This is the
+    same convention `sample_at` uses, so the position stored for a patch is the
+    surface under the spot its feature is addressed by. The footprint is rarely
+    a whole odd number of pixels (512 / 24 = 21.33, 512 / 48 = 10.67), so there
+    is not always one middle pixel; when the centre falls exactly on a pixel
+    boundary, `floor` takes the pixel below/right of it -- one of the four
+    tied central pixels, always the same one, and still a single real surface
+    point. Integer arithmetic, so the choice cannot flip with float rounding
+    between the machine that built a cache and the one that rebuilds it.
+
+    A median over the footprint was the alternative. It also never blends, but
+    it picks a different pixel per coordinate unless done on depth alone, and
+    then the point can sit anywhere in the patch rather than at its centre.
+
+    Flattened in the order `VisualEncoder.tokens()` uses, so patch i of the
+    feature sequence and row i here are the same patch by construction.
+
+    A free function so `scripts/recache_xyz.py` can rewrite an existing cache
+    without building a backbone.
+    """
+    H, W = pointmap.shape[-2:]
+    j = torch.arange(grid, device=pointmap.device)
+    rows = ((2 * j + 1) * H) // (2 * grid)
+    cols = ((2 * j + 1) * W) // (2 * grid)
+    return pointmap[:, :, rows][:, :, :, cols].flatten(2).transpose(1, 2)
+
+
 class VisualEncoder(nn.Module):
     """Frozen backbone -> per-patch features, at the backbone's own width.
 
@@ -151,19 +188,15 @@ class VisualEncoder(nn.Module):
     def patch_xyz(self, pointmap: torch.Tensor) -> torch.Tensor:
         """(T, 3, H, W) scene points -> (T, P, 3), one 3D position per patch.
 
-        Averaged over each patch's footprint. TAPIP3D's feature cloud: the patch
-        feature says *what*, this says *where*, and the two are combined inside
-        the model where the combining weights can be learnt.
-
-        Flattened with `tokens()` so patch i of the feature sequence and row i
-        here are the same patch by construction, not by a matching convention
-        two files apart.
+        TAPIP3D's feature cloud: the patch feature says *what*, this says
+        *where*, and the two are combined inside the model where the combining
+        weights can be learnt. See `patch_centre_xyz` for which point is taken.
 
         Units are whatever `pointmap` is in. `preprocess.py` passes METRES, so
         the cache stores a fact and the load path normalises it -- the same rule
         the trajectory follows.
         """
-        return self.tokens(F.adaptive_avg_pool2d(pointmap, self.grid))
+        return patch_centre_xyz(pointmap, self.grid)
 
     @staticmethod
     def sample_at(feat: torch.Tensor, uv: torch.Tensor, hw: tuple[int, int]) -> torch.Tensor:

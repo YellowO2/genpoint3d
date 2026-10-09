@@ -1,0 +1,48 @@
+#!/bin/bash
+# Rewrite patch_xyz in an existing cache (patch average -> patch centre), into
+# a NEW directory. No GPU: DINOv3 is not re-run, only the depth maps are read.
+# The source cache is never written to, so a training job can keep reading it.
+#
+#   qsub -v SRC=cache/kubric,DST=cache/kubric_ctr scripts/recache_xyz.pbs
+#   qsub -v SRC=cache/kubric_768_3493,DST=cache/kubric_768_3493_ctr -l walltime=02:00:00 scripts/recache_xyz.pbs
+#
+# Paths are relative to ~/scratch. RAW defaults to the training download.
+# Resubmitting the same command resumes: finished clips are skipped.
+#
+#PBS -N recache_xyz
+#PBS -l select=1:ncpus=16:mem=64gb
+# Per clip: read 24 depth PNGs and one cache file, write one cache file. About
+# 1 s on a laptop SSD for an 11 MB clip; on Lustre allow a few seconds. With 16
+# workers 3500 clips of the 24x24 cache should take 10-20 min. Walltime is a
+# cap, not a reservation.
+#PBS -l walltime=01:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/recache_xyz.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+# PBS only writes its -o file when the job ENDS. Tee to scratch so
+# progress can be watched live with: tail -f ~/scratch/<name>.live.log
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+
+SRC=${SRC:?set SRC, e.g. -v SRC=cache/kubric,DST=cache/kubric_ctr}
+DST=${DST:?set DST to a NEW directory}
+RAW=${RAW:-kubric}
+
+# 16 processes each reading 24 files; 4 read threads apiece is plenty.
+export KUBRIC_READ_WORKERS=4
+
+python scripts/recache_xyz.py \
+  --src $ROOT/$SRC \
+  --raw $ROOT/$RAW \
+  --dst $ROOT/$DST \
+  --workers 16
+
+echo "=== RECACHE DONE ==="

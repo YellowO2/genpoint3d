@@ -65,12 +65,16 @@ def _imread(path: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
     return img
 
 
+def _read_distance(frames_dir: str, t: int, depth_range: np.ndarray) -> np.ndarray:
+    """Decode frame t's depth png to distance-from-camera in metres."""
+    depth_png = _imread(os.path.join(frames_dir, f"{t:03d}_depth.png"), cv2.IMREAD_UNCHANGED)
+    return depth_range[0] + depth_png.astype(np.float32) * (depth_range[1] - depth_range[0]) / 65535.0
+
+
 def _load_frames_and_depths(frames_dir: str, num_frames: int, depth_range: np.ndarray):
     def one(t: int):
         rgb = _imread(os.path.join(frames_dir, f"{t:03d}.png"))
-        depth_png = _imread(os.path.join(frames_dir, f"{t:03d}_depth.png"), cv2.IMREAD_UNCHANGED)
-        distance = depth_range[0] + depth_png.astype(np.float32) * (depth_range[1] - depth_range[0]) / 65535.0
-        return cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB), distance
+        return cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB), _read_distance(frames_dir, t, depth_range)
 
     # `map` preserves order, so frame t stays at index t.
     with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
@@ -78,6 +82,32 @@ def _load_frames_and_depths(frames_dir: str, num_frames: int, depth_range: np.nd
 
     frames, depths = zip(*pairs)
     return np.stack(frames), np.stack(depths)  # depths here are still *distance*, converted to z-depth by caller
+
+
+def _pixel_intrinsics(data: dict, H: int, W: int) -> np.ndarray:
+    """The .npy's normalised intrinsics -> pixel units."""
+    intrinsics = np.abs(data["intrinsics"]).astype(np.float32)  # negative entries are a Kubric quirk
+    intrinsics[:, 0, :] *= W
+    intrinsics[:, 1, :] *= H
+    return intrinsics
+
+
+def load_depths(root_dir: str, seq_id: str) -> np.ndarray:
+    """(T, H, W) float32 z-depth in metres for one clip, without decoding RGB.
+
+    The same numbers `KubricSequenceDataset.__getitem__` puts in `.depths`,
+    through the same functions, for callers that need geometry only
+    (`scripts/recache_xyz.py`).
+    """
+    seq_dir = os.path.join(root_dir, seq_id)
+    data = np.load(os.path.join(seq_dir, f"{seq_id}.npy"), allow_pickle=True).item()
+    frames_dir = os.path.join(seq_dir, "frames")
+    num_frames = data["intrinsics"].shape[0]
+    with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
+        distances = np.stack(list(ex.map(
+            lambda t: _read_distance(frames_dir, t, data["depth_range"]), range(num_frames))))
+    H, W = distances.shape[1:3]
+    return _distance_to_depth(distances, _pixel_intrinsics(data, H, W))
 
 
 def _distance_to_depth(distances: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
@@ -136,10 +166,7 @@ class KubricSequenceDataset:
         frames, distances = _load_frames_and_depths(frames_dir, num_frames, depth_range)
         H, W = frames.shape[1:3]
 
-        # intrinsics are normalized -> scale to pixel units
-        intrinsics = np.abs(data["intrinsics"]).astype(np.float32)  # negative entries are a Kubric quirk
-        intrinsics[:, 0, :] *= W
-        intrinsics[:, 1, :] *= H
+        intrinsics = _pixel_intrinsics(data, H, W)
 
         depths = _distance_to_depth(distances, intrinsics)
 
