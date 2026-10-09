@@ -163,6 +163,7 @@ def main() -> int:
                      num_heads=targs["heads"], cross_attn=has_feats,
                      feat_dim=feat_dim,
                      adapter_depth=targs.get("adapter_depth", 1),
+                     upsample=targs.get("upsample", 1),
                      # Absent means a checkpoint from before the prior existed.
                      locality=bool(targs.get("locality", 0)),
                      correlate=bool(targs.get("correlate", 0)),

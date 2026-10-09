@@ -14,7 +14,10 @@ stage 4 arrive in step 3 of the build order. Until then the model sees no
 images at all.
 """
 
+import math
+
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.models.layers import (
@@ -46,6 +49,7 @@ class PointDiT(nn.Module):
         cross_attn: bool = False,
         feat_dim: int | None = None,
         adapter_depth: int = 1,
+        upsample: int = 1,
         locality: bool = True,
         correlate: bool = True,
         causal: bool = True,
@@ -99,6 +103,20 @@ class PointDiT(nn.Module):
                 layers += [nn.GELU(), nn.Linear(dim, dim, bias=False)]
             self.frame_proj = nn.Sequential(*layers)
         self.patch_pos = FourierEmbedding(3, dim) if cross_attn else None
+
+        # [feature upsampler] the paper's recipe for a finer grid: nearest
+        # interpolation, then a convolution (Gen-points sec. 3, "Visual
+        # Conditioning"). Nearest alone only repeats each patch into a block of
+        # identical cells; the conv is what lets neighbouring cells differ.
+        # Applied to the RAW features, ahead of everything, so the correlation
+        # and the locality bias see the fine grid too and not only the
+        # cross-attention. Residual and zero-initialised: at step 0 the model
+        # is exactly the un-upsampled one looking at repeated patches.
+        self.upsample = upsample if cross_attn else 1
+        if self.upsample > 1:
+            self.up_conv = nn.Conv2d(feat_dim, feat_dim, 3, padding=1)
+            nn.init.zeros_(self.up_conv.weight)
+            nn.init.zeros_(self.up_conv.bias)
         self.id_feature_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
 
         # [correlation] "does this patch look like me?", computed instead of
@@ -167,6 +185,31 @@ class PointDiT(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
+    def _upsample(self, context: torch.Tensor, patch_xyz: torch.Tensor):
+        """(B, T, P, F) features and (B, T, P, 3) positions -> the same on a
+        grid `upsample` times finer per side, so P grows by upsample^2.
+
+        Positions are interpolated bilinearly, not repeated: four cells sharing
+        one position would make the finer grid no finer for the locality bias.
+        The cost is that a cell straddling a depth edge gets a position between
+        the two surfaces. Caching positions at the fine grid from the depth map
+        would remove that; this is the version that needs no new cache.
+        """
+        B, T, P, Fd = context.shape
+        g = math.isqrt(P)
+        if g * g != P:
+            raise ValueError(f"upsampling needs a square patch grid, got P={P}")
+        u = self.upsample
+        c = context.reshape(B * T, g, g, Fd).permute(0, 3, 1, 2)
+        c = F.interpolate(c, scale_factor=u, mode="nearest")
+        c = c + self.up_conv(c).to(c.dtype)
+        c = c.permute(0, 2, 3, 1).reshape(B, T, P * u * u, Fd)
+        xyz = patch_xyz.reshape(B * T, g, g, 3).permute(0, 3, 1, 2)
+        xyz = F.interpolate(xyz.float(), scale_factor=u, mode="bilinear",
+                            align_corners=False).to(patch_xyz.dtype)
+        xyz = xyz.permute(0, 2, 3, 1).reshape(B, T, P * u * u, 3)
+        return c, xyz
+
     def forward(
         self,
         x: torch.Tensor,
@@ -196,6 +239,9 @@ class PointDiT(nn.Module):
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
+
+        if self.upsample > 1 and context is not None and patch_xyz is not None:
+            context, patch_xyz = self._upsample(context, patch_xyz)
 
         # --- where each point currently thinks it is, relative to every patch ---
         # x and patch_xyz share one normalised space, so this is a plain distance

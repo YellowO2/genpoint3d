@@ -439,6 +439,10 @@ def main() -> int:
                         "DINOv3 to tracking; at depth 1 it is a single linear "
                         "layer. Deepening it is the cheap stand-in for "
                         "unfreezing the backbone, which the cache forbids.")
+    p.add_argument("--upsample", type=int, default=1,
+                   help="feature-grid upsampling factor per side, the paper's "
+                        "nearest-interpolation-plus-conv block. 2 turns a "
+                        "48x48 grid into 96x96, and P grows 4x with it.")
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
@@ -533,6 +537,7 @@ def main() -> int:
     model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
                      cross_attn=has_feats, feat_dim=feat_dim,
                      adapter_depth=args.adapter_depth,
+                     upsample=args.upsample,
                      locality=bool(args.locality),
                      correlate=bool(args.correlate),
                      causal=bool(args.causal),
