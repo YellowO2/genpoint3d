@@ -173,6 +173,8 @@ def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
       match ranked 1st  the planted patch has the highest score of all P
       match offset      the offset handed to the model is the planted
                         displacement, to within a patch spacing
+      match ignores x   and is the same whatever the noisy sample is: it is
+                        evidence only while it is not the model's own guess
       match acts        of two patches equally near, the lookalike is the one read
     """
     vm = torch.ones_like(vm)
@@ -196,15 +198,19 @@ def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
     ]
     with torch.no_grad():
         m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        found = seen["match"]
+        m(torch.randn_like(x) * 3, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
     for h in hooks:
         h.remove()
+    moved = (seen["match"] - found).abs().max().item()
 
     top = seen["corr"].reshape(B, T, N, P).argmax(-1)
     hit = (top == planted).float().mean().item()
-    err = (seen["match"][..., :3] - want).norm(dim=-1).max().item() * TRAJ_SCALE_DISP / SPACING
+    err = (found[..., :3] - want).norm(dim=-1).max().item() * TRAJ_SCALE_DISP / SPACING
     out = [
         report("match ranked 1st", hit == 1.0, f"planted patch scored highest for {hit:.0%} of points (want 100%)"),
         report("match offset", err < 1.0, f"offset is off by at most {err:.2f} patch spacings (want <1)"),
+        report("match ignores x", moved == 0.0, f"another noisy sample moved the match {moved:.1e} (want 0)"),
     ]
 
     # Point 0 sits on a patch; its left and right neighbours are equally near.

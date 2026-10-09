@@ -151,11 +151,10 @@ class PointDiT(nn.Module):
             # model gets from it is the best match's OFFSET from the point's
             # start, in the units of its own target, added to the token -- so
             # copying it to the output is something a linear layer can do.
-            # Softmax temperature of the match, and how many patch spacings
-            # from the current estimate a match may be.
+            # Softmax temperature of the match's sub-patch refinement. The
+            # model is handed the offset and two confidences.
             self.match_log_tau = log_param(0.03)
-            self.match_log_sigma = log_param(1.0)
-            self.match_proj = nn.Linear(4, dim, bias=False)
+            self.match_proj = nn.Linear(5, dim, bias=False)
         elif self.correlate:
             # LEGACY. Two independent random projections, so a patch identical
             # to the template was not preferred; and both readers of the score
@@ -339,14 +338,14 @@ class PointDiT(nn.Module):
         with torch.autocast(device_type=dev.type, enabled=False):
             pos = self._lookup_pos(x.float(), anchor.float())
             if context is not None and patch_xyz is not None and (
-                    self.locality or self.costvol or self.cosine):
+                    self.locality or self.costvol):
                 patch_xyz = patch_xyz.float()
                 # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
                 # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
                 dist2 = (pos.pow(2).sum(-1)[..., None]
                          + patch_xyz.pow(2).sum(-1)[:, :, None]
                          - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
-                if self.patch_locality or self.cosine:
+                if self.patch_locality:
                     # The same distances counted in patch spacings, which is
                     # the unit "near" is meant in: a scene-unit distance says
                     # nothing until you know the grid. Measured from the
@@ -405,18 +404,42 @@ class PointDiT(nn.Module):
                 corr = corr / torch.linalg.vector_norm(feats, dim=-1).clamp_min(1e-6)[:, :, None]
                 if visual_mask is not None:
                     corr = corr * visual_mask[..., None, None]
-                # The best match, softly: a patch has to look like the point
-                # AND be near where the point currently is. Appearance alone
-                # picks any lookalike in the scene; distance alone is the
-                # model's own guess echoed back.
+                # The best match, by appearance alone and over the whole frame:
+                # the patch that looks most like the point, then a soft-argmax
+                # over its 3x3 on the grid for sub-patch precision (TAPIR's
+                # global match, local refinement). It used to be weighted by
+                # distance from the current estimate as well, and at low k that
+                # estimate is 2-3 patches off: the search was held to the wrong
+                # neighbourhood exactly when the model had nothing else to go
+                # on. The argmax passes no gradient and needs none -- tau gets
+                # its own through the soft-argmax, match_proj through the token.
+                g = math.isqrt(corr.shape[-1])
+                if g * g != corr.shape[-1] or g < 4:
+                    raise ValueError("the match needs a square patch grid at least "
+                                     f"4 wide, got P={corr.shape[-1]}")
+                best, top = corr.max(dim=-1)                          # (B, T, N)
+                # At the border the window slides inward rather than repeat a
+                # patch, so it is always nine different ones.
+                step = torch.arange(-1, 2, device=dev)
+                rows = (top // g).clamp(1, g - 2)[..., None, None] + step[:, None]
+                cols = (top % g).clamp(1, g - 2)[..., None, None] + step
+                win = (rows * g + cols).flatten(-2)                   # (B, T, N, 9)
                 tau = bounded_exp(self.match_log_tau, 1e-3, 1.0)
-                sigma = bounded_exp(self.match_log_sigma, 1e-2, 1e2)
-                w = (corr / tau - near2 / (2 * sigma ** 2)).softmax(-1)
-                offset = self._target_units(
-                    torch.einsum("btnp,btpc->btnc", w, patch_xyz), anchor.float())
-                # How well the chosen patches actually look like the point, so
-                # an offset from a poor match can be told from a good one.
-                match = torch.cat([offset, (w * corr).sum(-1, keepdim=True)], dim=-1)
+                w = (corr.gather(-1, win) / tau).softmax(-1)
+                # Gathered by index: a second (B, T, N, P) tensor is the memory
+                # the cosine map already costs once.
+                near = patch_xyz.float().gather(
+                    2, win.reshape(B, T, -1)[..., None].expand(-1, -1, -1, 3)
+                ).reshape(B, T, N, 9, 3)
+                offset = self._target_units((w[..., None] * near).sum(-2), anchor.float())
+                # Two confidences, so an offset from a poor match can be told
+                # from a good one: how alike the winner is, and by how much it
+                # beats the best patch OUTSIDE its window -- a small margin is
+                # a lookalike somewhere else. Of the top 10, one is outside.
+                vals, idx = corr.topk(10, dim=-1)
+                inside = (idx[..., None] == win[..., None, :]).any(-1)
+                rival = vals.masked_fill(inside, -torch.inf).amax(-1)
+                match = torch.cat([offset, best[..., None], (best - rival)[..., None]], dim=-1)
                 if visual_mask is not None:
                     match = match * visual_mask[..., None, None]
         elif (self.correlate and context is not None and id_card is not None
