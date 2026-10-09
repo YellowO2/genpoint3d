@@ -34,10 +34,24 @@ passes only if the current one ends far below the one without.
                        of neighbouring patches are far more alike, and nothing
                        here has seen a real feature.
 
+  3, 4. the same two at the run's noise, locality off / patch / sched
+                       Task 1 with the target scale at 0.0992, so the lookup
+                       position is two patches off at k = 0, and task 2 as it
+                       is. Reported, not judged: neither can tell the three
+                       apart, and the numbers are here so nobody reads them
+                       as if they could.
+     why not           In 3 the answer stays under the point's START while the
+                       clean sample sits two patches from it, so no window
+                       centred on the sample is the right one at any k. In 4
+                       the right patch is the only one that looks like the
+                       point, and the match hands it over whatever the window.
+                       A test of the window needs lookalikes: several patches
+                       that match, of which only position can pick one.
+
 Reported for each: the flow-matching loss (mean of the last 100 steps, on fresh
 data every step, so it is not memorised) and the error of sampled trajectories.
 
-Run:  .venv/bin/python scripts/check_learning.py      (about five minutes)
+Run:  .venv/bin/python scripts/check_learning.py      (about ten minutes)
 """
 
 import time
@@ -114,7 +128,8 @@ def run(data, **kw) -> tuple[float, float]:
     return sum(tail[-100:]) / 100, err
 
 
-def compare(name: str, data, unit: str, per_unit: float, variants: dict) -> bool:
+def compare(name: str, data, unit: str, per_unit: float, variants: dict,
+            judged: bool = True) -> bool:
     print(f"{name}  ({STEPS} steps each)")
     got = {}
     for label, kw in variants.items():
@@ -123,6 +138,9 @@ def compare(name: str, data, unit: str, per_unit: float, variants: dict) -> bool
         got[label] = loss
         print(f"    {label:<7} loss {loss:.3f}   sampled error {err * per_unit:.2f} {unit}"
               f"   ({time.time() - t0:.0f}s)", flush=True)
+    if not judged:
+        print(flush=True)
+        return True
     ok = got["new"] < 0.5 * got["off"]
     print(f"  {'PASS' if ok else 'FAIL'}  new {got['new']:.3f} vs off {got['off']:.3f}"
           f" (want under half), legacy {got['legacy']:.3f}\n", flush=True)
@@ -131,16 +149,30 @@ def compare(name: str, data, unit: str, per_unit: float, variants: dict) -> bool
 
 def main() -> int:
     torch.set_num_threads(1)                # the same numbers on any machine
+    # 1 and 2 hold the window fixed: they are about whether the image is read
+    # at all, and in 1 the sample is never far enough off for a schedule to
+    # have anything to do.
+    fixed = dict(locality_mode="patch")
     ok = compare(
         "1. read the patch", read_the_patch, "target std", 1.0,
-        {"new": dict(traj_scale=0.005, correlate=False),
+        {"new": dict(traj_scale=0.005, correlate=False, **fixed),
          "legacy": dict(traj_scale=0.005, correlate=False, locality_mode="legacy"),
          "off": dict(traj_scale=0.005, correlate=False, locality=False)})
     ok &= compare(
         "2. follow the match", follow_the_match, "patch spacings", TRAJ_SCALE_DISP / SPACING,
-        {"new": dict(traj_scale=TRAJ_SCALE_DISP),
-         "legacy": dict(traj_scale=TRAJ_SCALE_DISP, corr_mode="legacy"),
-         "off": dict(traj_scale=TRAJ_SCALE_DISP, correlate=False)})
+        {"new": dict(traj_scale=TRAJ_SCALE_DISP, **fixed),
+         "legacy": dict(traj_scale=TRAJ_SCALE_DISP, corr_mode="legacy", **fixed),
+         "off": dict(traj_scale=TRAJ_SCALE_DISP, correlate=False, **fixed)})
+    window = {"off": dict(locality=False), "patch": fixed, "sched": dict(locality_mode="sched")}
+    compare(
+        "3. read the patch, real noise", read_the_patch, "target std", 1.0,
+        {n: dict(traj_scale=TRAJ_SCALE_DISP, correlate=False, **kw) for n, kw in window.items()},
+        judged=False)
+    compare(
+        "4. follow the match, by window", follow_the_match, "patch spacings",
+        TRAJ_SCALE_DISP / SPACING,
+        {n: dict(traj_scale=TRAJ_SCALE_DISP, **kw) for n, kw in window.items()},
+        judged=False)
     print("ALL PASS" if ok else "SOME FAILED")
     return 0 if ok else 1
 

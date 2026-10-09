@@ -549,11 +549,17 @@ def main() -> int:
                         "sampled up to half a patch off, as every run before "
                         "2026-10-09 did.")
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
-    p.add_argument("--locality-mode", default="patch", choices=["legacy", "patch"],
+    p.add_argument("--locality-mode", default="sched", choices=["legacy", "patch", "sched"],
                    help="patch: the prior is a Gaussian one patch spacing wide, "
-                        "measured on each frame's own grid. legacy: a strength "
-                        "of 1.3 in scene units squared, which at real patch "
-                        "spacing is flat, as every run up to run14 had it.")
+                        "measured on each frame's own grid. sched: the same, "
+                        "but --locality-wide spacings wide at k = 0 and "
+                        "narrowing to one as the sample gets clean. legacy: a "
+                        "strength of 1.3 in scene units squared, which at real "
+                        "patch spacing is flat, as every run up to run14 had it.")
+    p.add_argument("--locality-wide", type=float, default=8.0,
+                   help="sched only: the prior's starting width at pure noise, "
+                        "in patch spacings. 8 is a third of a 24x24 frame. "
+                        "Both ends are learned from there.")
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
     p.add_argument("--correlate", type=int, default=1, choices=[0, 1])
@@ -664,6 +670,7 @@ def main() -> int:
                      locality=bool(args.locality),
                      correlate=bool(args.correlate),
                      locality_mode=args.locality_mode,
+                     locality_wide=args.locality_wide,
                      corr_mode=args.corr_mode,
                      causal=bool(args.causal),
                      costvol=bool(args.costvol), cv_k=args.cv_k,

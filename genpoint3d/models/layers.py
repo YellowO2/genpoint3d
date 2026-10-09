@@ -255,7 +255,8 @@ class CrossBlock(nn.Module):
 
     def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int,
                  locality: bool = True, correlate: bool = True,
-                 locality_mode: str = "patch", corr_mode: str = "cosine") -> None:
+                 locality_mode: str = "patch", corr_mode: str = "cosine",
+                 locality_wide: float = 8.0) -> None:
         super().__init__()
         self.norm_q = AdaRMSNorm(dim, cond_dim)
         self.norm_kv = RMSNorm(dim)
@@ -277,7 +278,15 @@ class CrossBlock(nn.Module):
         # The same prior as a Gaussian whose width is counted in patch spacings,
         # so it means the same thing on any grid and in any scene. Starts one
         # spacing wide: sharp enough to read the patch under the point.
-        self.log_sigma = log_param(1.0) if locality and locality_mode == "patch" else None
+        self.log_sigma = (log_param(1.0)
+                          if locality and locality_mode in ("patch", "sched") else None)
+        # "sched": that width is for a clean sample, and this one for pure
+        # noise, where the point's position is a guess 2-3 spacings off and a
+        # sharp window looks at the wrong patches. In between the width slides
+        # from one to the other. Both train, so how fast the window narrows is
+        # learned rather than chosen.
+        self.log_sigma_wide = (log_param(locality_wide)
+                               if locality and locality_mode == "sched" else None)
         # How much appearance match steers the lookup.
         # LEGACY: starts at zero, on a score that starts random, so neither
         # ever received a useful gradient. Kept for old checkpoints.
@@ -288,12 +297,13 @@ class CrossBlock(nn.Module):
         # the full range of this block's own QK-normalised logits.
         self.corr_log_scale = log_param(10.0) if correlate and corr_mode == "cosine" else None
 
-    def forward(self, x, cond, context, dist2=None, corr=None):
+    def forward(self, x, cond, context, dist2=None, corr=None, noise=None):
         """`dist2` (B, N, P): squared distance from each point's current position
         estimate to each patch -- in patch spacings, measured from the nearest
         patch (see `PointDiT.forward`), or in the shared normalised space for
         the legacy prior. `corr` (B, N, P): how well each patch matches the
-        point's query template.
+        point's query template. `noise` (B, 1, 1): 1 - k, how far each frame's
+        sample is from clean; only the "sched" prior reads it.
 
         Added to the attention logits as a Gaussian log-prior, which turns the
         search "which of 576 patches is mine?" into the arithmetic "which are
@@ -306,6 +316,10 @@ class CrossBlock(nn.Module):
         bias = None
         if dist2 is not None and self.log_sigma is not None:
             sigma = bounded_exp(self.log_sigma, 1e-2, 1e2)
+            if self.log_sigma_wide is not None and noise is not None:
+                # Log-linear in the noise level: sigma at k = 1, wide at k = 0.
+                wide = bounded_exp(self.log_sigma_wide, 1e-2, 1e2)
+                sigma = sigma * (wide / sigma) ** noise
             bias = (-dist2 / (2 * sigma ** 2)).clamp_min(-self.FAR)[:, None]
         elif dist2 is not None and self.locality is not None:
             bias = (-dist2 * F.softplus(self.locality))[:, None].to(context.dtype)

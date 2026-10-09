@@ -84,6 +84,7 @@ def main() -> int:
                      time_norm=bool(targs.get("time_norm", 0)),
                      locality=bool(targs.get("locality", 0)),
                      locality_mode=targs.get("locality_mode", "legacy"),
+                     locality_wide=targs.get("locality_wide", 8.0),
                      corr_mode=targs.get("corr_mode", "legacy")).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()

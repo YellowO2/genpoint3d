@@ -194,6 +194,7 @@ def main() -> int:
                      # Absent means trained with the flat prior and the random
                      # projections; their parameters are what the file holds.
                      locality_mode=targs.get("locality_mode", "legacy"),
+                     locality_wide=targs.get("locality_wide", 8.0),
                      corr_mode=targs.get("corr_mode", "legacy"),
                      # Absent means a checkpoint from before the flag existed,
                      # and every one of those was causal.

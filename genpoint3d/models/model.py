@@ -57,7 +57,8 @@ class PointDiT(nn.Module):
         time_norm: bool = True,
         locality: bool = True,
         correlate: bool = True,
-        locality_mode: str = "patch",
+        locality_mode: str = "sched",
+        locality_wide: float = 8.0,
         corr_mode: str = "cosine",
         causal: bool = True,
         costvol: bool = True,
@@ -88,9 +89,14 @@ class PointDiT(nn.Module):
         # "legacy" on either is the prior / the matching as every run up to
         # run14 had them (docs/issues.md B1, B2), only so those checkpoints
         # still evaluate as they were trained.
-        if locality_mode not in ("legacy", "patch") or corr_mode not in ("legacy", "cosine"):
+        if (locality_mode not in ("legacy", "patch", "sched")
+                or corr_mode not in ("legacy", "cosine")):
             raise ValueError(f"unknown mode: locality {locality_mode!r}, corr {corr_mode!r}")
-        self.patch_locality = self.locality and locality_mode == "patch"
+        self.patch_locality = self.locality and locality_mode in ("patch", "sched")
+        # "sched" is the patch prior with a width that follows the noise level:
+        # the lookup position is the noisy sample, 2-3 patch spacings off at
+        # k = 0 and nearly exact at k = 1, and one fixed width cannot suit both.
+        self.sched_locality = self.locality and locality_mode == "sched"
         self.cosine = self.correlate and corr_mode == "cosine"
         # Off lets a frame attend to later frames. Tracking has every image in
         # hand, so bidirectional context is legitimate and is what every tracker
@@ -208,7 +214,8 @@ class PointDiT(nn.Module):
             self.cross_blocks = nn.ModuleList(
                 CrossBlock(dim, num_heads, mlp_mult, cond_dim,
                            locality=self.locality, correlate=self.correlate,
-                           locality_mode=locality_mode, corr_mode=corr_mode)
+                           locality_mode=locality_mode, corr_mode=corr_mode,
+                           locality_wide=locality_wide)
                 for _ in range(depth)
             )
             self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
@@ -504,6 +511,13 @@ class PointDiT(nn.Module):
             dist2 = None
         if corr is not None:
             corr = corr.reshape(B * T, N, -1)
+        # How noisy each frame's lookup position is, laid out like `dist2`.
+        # Per frame, so diffusion forcing gets a window per frame. Frame 0 is
+        # pinned to the truth by the loss and the sampler, but nothing passed
+        # in here says so: it gets its batch's `k` unless the caller hands a
+        # per-frame `k` with 1 there.
+        noise = ((1 - k.float()).clamp(0, 1).reshape(B * T, 1, 1)
+                 if self.sched_locality else None)
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
@@ -542,7 +556,7 @@ class PointDiT(nn.Module):
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:
                 h = cross(h, cs, context.reshape(B * T, -1, self.dim),
-                          dist2=dist2, corr=corr)
+                          dist2=dist2, corr=corr, noise=noise)
             h = h.view(B, T, N, -1)
 
         # --- [5] head ---

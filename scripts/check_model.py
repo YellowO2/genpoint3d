@@ -13,6 +13,7 @@ that otherwise shows up as "training is mysteriously bad".
   6. encoder shapes grid / tokens / bilinear lookup all line up
   7. locality       a patch beside the point acts, one ten patches away does not
   8. correlation    the patch that looks like the point is found, untrained
+  9. window         the prior is wide on a noisy sample and narrow on a clean one
 
 The model is built the way a run builds it (displacement target, its scale,
 cost volume off) and the scene has a run's proportions: patches on a grid 0.05
@@ -143,6 +144,7 @@ def check_locality(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
     near, far = row * G + 1, row * G + 10   # 1 and 10 spacings right of patch 0
     anchor = pxyz[:, 0, row * G].unsqueeze(1).expand(B, N, 3).clone()
     x = torch.zeros_like(x)                 # every point sits on its anchor
+    k = torch.ones_like(k)                  # and is clean, so the window is narrow
     bump = torch.randn(FEAT)
     with torch.no_grad():
         base = m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
@@ -238,6 +240,42 @@ def check_correlation(m, x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
         report("mismatch muted", d_miss < 0.1 * d_hit, f"non-matching patch moved it {d_miss:.1e}, "
                f"{d_miss / max(d_hit, 1e-30):.3f}x the matching one (want <0.1)"),
     ]
+
+
+def check_window(x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
+    """The scheduled prior must be `locality_wide` times wider at k = 0 than at
+    k = 1, frame by frame, and at k = 1 be the fixed prior exactly.
+
+    Each frame is given its own k, rising from 0 to 1 along the clip, so a
+    width laid out against the wrong axis shows as the wrong ratio in some
+    frame. Correlation is off: the bias the block receives is the prior alone.
+    """
+    W = 8.0
+    vm = torch.ones_like(vm)
+    k = torch.linspace(0, 1, T).expand(B, T)
+    got = {}
+    for mode in ("patch", "sched"):
+        m = model(correlate=False, locality_mode=mode, locality_wide=W)
+        h = m.cross_blocks[0].attn.register_forward_pre_hook(
+            lambda _, a, kw, mode=mode: got.update({mode: kw["attn_mask"]}), with_kwargs=True)
+        with torch.no_grad():
+            m(x, k, anchor, context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        h.remove()
+    fixed, sched = (got[n].reshape(B, T, N, P) for n in ("patch", "sched"))
+    # Where neither sits on the floor or on the nearest patch's zero, the two
+    # biases differ by the squared ratio of the widths and nothing else.
+    use = (fixed > -90) & (fixed < -1e-3)
+    ratio = torch.stack([(fixed[:, t] / sched[:, t])[use[:, t]].sqrt().median() for t in range(T)])
+    want = W ** (1 - k[0])
+    off = (ratio / want - 1).abs().max().item()
+    same = (sched[:, -1] - fixed[:, -1]).abs().max().item()
+    return (
+        report("window narrows", off < 1e-3,
+               f"{ratio[0]:.2f}x wider at k=0, {ratio[T // 2]:.2f}x at k={k[0, T // 2]:.2f}, "
+               f"{ratio[-1]:.2f}x at k=1 (want {W:.0f}^(1-k), worst frame off by {off:.1e})"),
+        report("window at k=1", same == 0.0,
+               f"scheduled prior differs from the fixed one by {same:.1e} at k=1 (want 0)"),
+    )
 
 
 def check_costvol(x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool]:
@@ -359,6 +397,7 @@ def main() -> int:
     ok &= all(check_locality(m, *args))
     ok &= all(check_correlation(m, *args))
     ok &= all(check_grads(m, *args))
+    ok &= all(check_window(*args))
     ok &= check_bidirectional(*args)
     ok &= check_corr_optional()
     ok &= check_cv_optional()
