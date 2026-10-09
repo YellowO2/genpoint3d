@@ -46,7 +46,10 @@ SPACE=${SPACE:-3d}
 # budget, so z is only the culprit if it buys more than x and y do.
 AXIS=${AXIS:-}
 [ -n "$AXIS" ] && OZ="--oracle-axis $AXIS" || OZ=""
-WORK=$ROOT/fit_check
+# Per job, not shared: split_dir.py clears the directory before relinking, so
+# two fit_check jobs pointed at one WORK would delete each other's links. The
+# three axis jobs are meant to run at the same time.
+WORK=$ROOT/fit_check/${PBS_JOBNAME:-job}
 
 # val_frac and seed must match the run's run.json, or these are not the clips
 # it actually trained on.
