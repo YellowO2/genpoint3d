@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 from genpoint3d.eval.metrics import tapvid3d_metrics
 from genpoint3d.models.model import PointDiT
 from genpoint3d.data.cache import CachedClip
+from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from train import ClipDataset, evaluate, known_frame0, to_device, to_metres
 from genpoint3d.models.flow import sample as flow_sample
 
@@ -175,6 +176,12 @@ def main() -> int:
                      feat_dim=feat_dim,
                      adapter_depth=targs.get("adapter_depth", 1),
                      upsample=targs.get("upsample", 1),
+                     traj_scale=(TRAJ_SCALE_DISP if targs.get("target", "absolute") == "displacement"
+                                 else TRAJ_SCALE),
+                     displacement=targs.get("target", "absolute") == "displacement",
+                     # Absent means trained before the lookup was fixed, and a
+                     # checkpoint has to be evaluated the way it was trained.
+                     legacy_lookup=bool(targs.get("legacy_lookup", 1)),
                      # Absent means a checkpoint from before the prior existed.
                      locality=bool(targs.get("locality", 0)),
                      correlate=bool(targs.get("correlate", 0)),

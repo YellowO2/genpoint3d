@@ -50,6 +50,9 @@ class PointDiT(nn.Module):
         feat_dim: int | None = None,
         adapter_depth: int = 1,
         upsample: int = 1,
+        traj_scale: float = 1.0,
+        displacement: bool = False,
+        legacy_lookup: bool = False,
         locality: bool = True,
         correlate: bool = True,
         causal: bool = True,
@@ -68,6 +71,10 @@ class PointDiT(nn.Module):
         self.cross_attn = cross_attn
         # Off reproduces the model that scored the static baseline while ignoring
         # which video it was given, which is the comparison this exists against.
+        # What turns the sample `x` back into a position in `patch_xyz`'s space;
+        # see `_lookup_pos`.
+        self.traj_scale, self.displacement = traj_scale, displacement
+        self.legacy_lookup = legacy_lookup
         self.locality = locality and cross_attn
         self.correlate = correlate and cross_attn
         # Off lets a frame attend to later frames. Tracking has every image in
@@ -210,6 +217,25 @@ class PointDiT(nn.Module):
         xyz = xyz.permute(0, 2, 3, 1).reshape(B, T, P * u * u, 3)
         return c, xyz
 
+    def _lookup_pos(self, x: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        """Where each point currently thinks it is, in `patch_xyz`'s space.
+
+        `x` is what gets denoised, and that is not a position: it is divided by
+        `traj_scale`, and with a displacement target it is measured from each
+        point's own start. `patch_xyz` is an absolute scene-normalised position.
+        Every lookup "near the point" has to undo both first.
+
+        Until 2026-10-09 the lookups used `x` as it was. With a displacement
+        target that centred them on the scene origin instead of on the point --
+        the locality bias and the cost volume were looking in the wrong place
+        for every run since run3493_disp. `legacy_lookup` reproduces that, only
+        so checkpoints trained that way still evaluate as they were trained.
+        """
+        if self.legacy_lookup:
+            return x
+        pos = x * self.traj_scale
+        return pos + anchor[:, None] if self.displacement else pos
+
     def forward(
         self,
         x: torch.Tensor,
@@ -249,12 +275,13 @@ class PointDiT(nn.Module):
         # projecting into the image and sampling there; in 3D the projection is
         # unnecessary. Computed once, used by the cost volume and by every block.
         dist2 = None
+        pos = self._lookup_pos(x, anchor)
         if context is not None and patch_xyz is not None and (self.locality or self.costvol):
             # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
             # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
-            dist2 = (x.pow(2).sum(-1)[..., None]
+            dist2 = (pos.pow(2).sum(-1)[..., None]
                      + patch_xyz.pow(2).sum(-1)[:, :, None]
-                     - 2 * torch.einsum("btnc,btpc->btnp", x, patch_xyz)).clamp_min(0)
+                     - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
 
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
@@ -278,7 +305,7 @@ class PointDiT(nn.Module):
             # Offsets, not absolute positions: "two cells up-left of you" is the
             # part a single similarity score cannot express.
             off = patch_xyz.gather(2, flat.expand(-1, -1, -1, 3)) \
-                           .reshape(B, T, N, self.cv_k, 3) - x[..., None, :]
+                           .reshape(B, T, N, self.cv_k, 3) - pos[..., None, :]
 
             cost = torch.einsum("bnsc,btnkc->btnsk", sup, nb) * self.cv_dim ** -0.5
             cv = self.cv_mlp(torch.cat([cost.flatten(3), off.flatten(3)], dim=-1))

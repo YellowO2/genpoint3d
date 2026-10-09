@@ -494,6 +494,10 @@ def main() -> int:
                    help="feature-grid upsampling factor per side, the paper's "
                         "nearest-interpolation-plus-conv block. 2 turns a "
                         "48x48 grid into 96x96, and P grows 4x with it.")
+    p.add_argument("--legacy-lookup", type=int, default=0, choices=[0, 1],
+                   help="1 reproduces the lookups as they were before 2026-10-09, "
+                        "centred on the raw sample instead of the point's "
+                        "position. Only for a like-for-like control run.")
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
@@ -589,6 +593,10 @@ def main() -> int:
                      cross_attn=has_feats, feat_dim=feat_dim,
                      adapter_depth=args.adapter_depth,
                      upsample=args.upsample,
+                     traj_scale=(TRAJ_SCALE_DISP if args.target == "displacement"
+                                 else TRAJ_SCALE),
+                     displacement=args.target == "displacement",
+                     legacy_lookup=bool(args.legacy_lookup),
                      locality=bool(args.locality),
                      correlate=bool(args.correlate),
                      causal=bool(args.causal),
