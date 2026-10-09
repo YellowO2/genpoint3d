@@ -58,14 +58,14 @@ Moving points only, no rescale. "Nothing moves" scores about 0.25. Val / train.
 |---|---|---|---|---|---|
 | run15_noloc | 24 | diffusion, baseline | 10,000 | 0.370 | 0.430 |
 | run16_48 | 48 | finer grid | 12,000 | 0.444 | 0.494 |
-| run18_ctr_flow | 24 | sharper patch positions (B6) | 8,000 of 12,000 | 0.386 | 0.423 |
+| run18_ctr_flow | 24 | sharper patch positions (B6) | 10,000 of 12,000 | 0.393 | 0.443 |
 | run19_c24 | 24 | B6, short schedule (control) | 5,000 | 0.372 | 0.392 |
 | run19_m24 | 24 | B6 + trained matcher (B11) | 5,000 | 0.405 | 0.422 |
 | run19_mk24 | 24 | B6 + trained matcher + top-4 candidates (B12) | 5,000 | 0.404 | 0.421 |
 | run17_rg_sched | 24 | no-noise method, shrinking window | 2,500 | 0.384 | 0.420 |
 | run17_rg_noloc | 24 | no-noise method, whole frame only | 2,500 | 0.381 | 0.413 |
-| run21_rg_m24 | 24 | no-noise + B6 + trained matcher | 1,000 of 4,000 | 0.418 | 0.424 |
-| run20_m48 | 48 | diffusion + B6 + trained matcher | 2,000 of 12,000 | 0.418 | 0.418 |
+| run21_rg_m24 | 24 | no-noise + B6 + trained matcher | 2,000 of 4,000 | 0.441 | 0.455 |
+| run20_m48 | 48 | diffusion + B6 + trained matcher | 4,000 of 12,000 | 0.456 | 0.461 |
 
 Per tolerance, val, moving points (<1, <2, <4, <8, <16 px):
 
@@ -75,7 +75,8 @@ Per tolerance, val, moving points (<1, <2, <4, <8, <16 px):
 | run15_sched (24, 12k) | 0.15 | 0.19 | 0.31 | 0.53 | 0.73 |
 | run19_m24 (5k) | 0.15 | 0.20 | 0.34 | 0.57 | 0.77 |
 | run17_rg_sched (2.5k) | 0.15 | 0.19 | 0.31 | 0.53 | 0.74 |
-| run21_rg_m24 (1k) | 0.16 | 0.21 | 0.36 | 0.59 | 0.78 |
+| run21_rg_m24 (2k) | 0.16 | 0.22 | 0.39 | 0.62 | 0.81 |
+| run20_m48 (4k) | 0.16 | 0.25 | 0.42 | 0.64 | 0.81 |
 | run16_48 (12k) | 0.17 | 0.26 | 0.44 | 0.63 | 0.80 |
 | TAPIP3D | 0.78 | 0.91 | 0.97 | 0.99 | 1.00 |
 
@@ -102,3 +103,5 @@ Queued when the connection dropped (all read their flags from the qsub line):
 | run24_rg_mc24 | gdev | run21 plus the local cost volume (`--costvol 1`), for precision |
 | run24_rg_mc48_short | gdev | the same on the 48 grid, 1,400 steps |
 | run23_rg_m48 | g1, after run20_m48 | no-noise + B6 + matcher on 48 grid, 6,000 steps |
+
+Updated 06:50. The wider matcher head (run19_md24) is at 0.390 val at step 2,500 against 0.381 for the narrow one, with the match within one patch 79% against 78%.
