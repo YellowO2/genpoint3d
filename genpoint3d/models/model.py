@@ -21,7 +21,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.models.layers import (
-    Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
+    Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
+    zero_init,
 )
 
 
@@ -56,6 +57,8 @@ class PointDiT(nn.Module):
         time_norm: bool = True,
         locality: bool = True,
         correlate: bool = True,
+        locality_mode: str = "patch",
+        corr_mode: str = "cosine",
         causal: bool = True,
         costvol: bool = True,
         cv_k: int = 16,
@@ -82,6 +85,13 @@ class PointDiT(nn.Module):
         self.time_norm = time_norm
         self.locality = locality and cross_attn
         self.correlate = correlate and cross_attn
+        # "legacy" on either is the prior / the matching as every run up to
+        # run14 had them (docs/issues.md B1, B2), only so those checkpoints
+        # still evaluate as they were trained.
+        if locality_mode not in ("legacy", "patch") or corr_mode not in ("legacy", "cosine"):
+            raise ValueError(f"unknown mode: locality {locality_mode!r}, corr {corr_mode!r}")
+        self.patch_locality = self.locality and locality_mode == "patch"
+        self.cosine = self.correlate and corr_mode == "cosine"
         # Off lets a frame attend to later frames. Tracking has every image in
         # hand, so bidirectional context is legitimate and is what every tracker
         # in the benchmark table uses. The mask is NOT what keeps forecasting
@@ -134,9 +144,22 @@ class PointDiT(nn.Module):
         # [correlation] "does this patch look like me?", computed instead of
         # discovered. Both sides read the RAW backbone features, not the adapter's
         # output, so matching is not entangled with the patch position that the
-        # adapter adds in. Separate q/k projections because a template and a
-        # patch are not the same kind of thing.
-        if self.correlate:
+        # adapter adds in.
+        if self.cosine:
+            # The score is the cosine between the two raw features, so a patch
+            # identical to the template wins before any training. What the
+            # model gets from it is the best match's OFFSET from the point's
+            # start, in the units of its own target, added to the token -- so
+            # copying it to the output is something a linear layer can do.
+            # Softmax temperature of the match, and how many patch spacings
+            # from the current estimate a match may be.
+            self.match_log_tau = log_param(0.03)
+            self.match_log_sigma = log_param(1.0)
+            self.match_proj = nn.Linear(4, dim, bias=False)
+        elif self.correlate:
+            # LEGACY. Two independent random projections, so a patch identical
+            # to the template was not preferred; and both readers of the score
+            # were gated at zero, so the projections got no gradient at all.
             self.corr_q = nn.Linear(feat_dim, dim, bias=False)
             self.corr_k = nn.Linear(feat_dim, dim, bias=False)
             # Where in this frame the template matches best, as a 3D position.
@@ -185,7 +208,8 @@ class PointDiT(nn.Module):
         if cross_attn:
             self.cross_blocks = nn.ModuleList(
                 CrossBlock(dim, num_heads, mlp_mult, cond_dim,
-                           locality=self.locality, correlate=self.correlate)
+                           locality=self.locality, correlate=self.correlate,
+                           locality_mode=locality_mode, corr_mode=corr_mode)
                 for _ in range(depth)
             )
             self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
@@ -241,6 +265,34 @@ class PointDiT(nn.Module):
         pos = x * self.traj_scale
         return pos + anchor[:, None] if self.displacement else pos
 
+    def _target_units(self, pos: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        """The inverse of `_lookup_pos`: a position in `patch_xyz`'s space,
+        expressed the way the model's own target is."""
+        if self.legacy_lookup:
+            return pos
+        if self.displacement:
+            pos = pos - anchor[:, None]
+        return pos / self.traj_scale
+
+    @staticmethod
+    def _patch_spacing(patch_xyz: torch.Tensor) -> torch.Tensor:
+        """(B, T, P, 3) -> (B, T): how far apart neighbouring patches are.
+
+        The median distance from a patch to its right-hand neighbour on the
+        grid. Median, because a pair straddling a depth edge is metres apart
+        and a mean would follow those. Per frame, because the camera moves:
+        on two Kubric clips it drifted 10% over the clip, at most 5% between
+        frames, so a per-frame value is steady and a per-clip one is stale.
+        """
+        B, T, P, _ = patch_xyz.shape
+        g = math.isqrt(P)
+        if g * g != P:
+            raise ValueError(f"patch spacing needs a square patch grid, got P={P}")
+        grid = patch_xyz.reshape(B, T, g, g, 3)
+        step = (grid[:, :, :, 1:] - grid[:, :, :, :-1]).norm(dim=-1).flatten(2)
+        # Floored: patches stacked on one spot would otherwise divide by zero.
+        return step.median(dim=-1).values.clamp_min(1e-4)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -283,16 +335,26 @@ class PointDiT(nn.Module):
         # Every position computation in this method is taken out of autocast:
         # bf16 keeps 8 bits of mantissa, so a coordinate near 1 is only known to
         # about 1/256, and autocast ran the einsum below in it.
-        dist2 = None
+        dist2 = near2 = None
         with torch.autocast(device_type=dev.type, enabled=False):
             pos = self._lookup_pos(x.float(), anchor.float())
-            if context is not None and patch_xyz is not None and (self.locality or self.costvol):
+            if context is not None and patch_xyz is not None and (
+                    self.locality or self.costvol or self.cosine):
                 patch_xyz = patch_xyz.float()
                 # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
                 # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
                 dist2 = (pos.pow(2).sum(-1)[..., None]
                          + patch_xyz.pow(2).sum(-1)[:, :, None]
                          - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
+                if self.patch_locality or self.cosine:
+                    # The same distances counted in patch spacings, which is
+                    # the unit "near" is meant in: a scene-unit distance says
+                    # nothing until you know the grid. Measured from the
+                    # nearest patch -- a softmax cannot tell the difference,
+                    # and it keeps the numbers small where they matter, so a
+                    # point far from every patch still sees its closest ones.
+                    near2 = dist2 / self._patch_spacing(patch_xyz).pow(2)[..., None, None]
+                    near2 = near2 - near2.amin(dim=-1, keepdim=True)
 
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
@@ -331,8 +393,33 @@ class PointDiT(nn.Module):
         # the template and the patches but nothing that compared them, so the
         # one route from image to position had to be discovered from position
         # error alone -- while "predict little motion" cut the loss immediately.
-        corr = match_xyz = None
-        if (self.correlate and context is not None and id_card is not None
+        corr = match_xyz = match = None
+        if (self.cosine and context is not None and id_card is not None
+                and patch_xyz is not None):
+            with torch.autocast(device_type=dev.type, enabled=False):
+                # fp32: the match is decided by differences in the third
+                # decimal of a cosine, which bf16 does not hold.
+                feats = context.float()
+                q = F.normalize(id_card.float(), dim=-1)
+                corr = torch.einsum("bnc,btpc->btnp", q, feats)
+                corr = corr / torch.linalg.vector_norm(feats, dim=-1).clamp_min(1e-6)[:, :, None]
+                if visual_mask is not None:
+                    corr = corr * visual_mask[..., None, None]
+                # The best match, softly: a patch has to look like the point
+                # AND be near where the point currently is. Appearance alone
+                # picks any lookalike in the scene; distance alone is the
+                # model's own guess echoed back.
+                tau = bounded_exp(self.match_log_tau, 1e-3, 1.0)
+                sigma = bounded_exp(self.match_log_sigma, 1e-2, 1e2)
+                w = (corr / tau - near2 / (2 * sigma ** 2)).softmax(-1)
+                offset = self._target_units(
+                    torch.einsum("btnp,btpc->btnc", w, patch_xyz), anchor.float())
+                # How well the chosen patches actually look like the point, so
+                # an offset from a poor match can be told from a good one.
+                match = torch.cat([offset, (w * corr).sum(-1, keepdim=True)], dim=-1)
+                if visual_mask is not None:
+                    match = match * visual_mask[..., None, None]
+        elif (self.correlate and context is not None and id_card is not None
                 and patch_xyz is not None):
             q = self.corr_q(id_card)                                  # (B, N, D)
             corr = torch.einsum("bnc,btpc->btnp", q, self.corr_k(context))
@@ -378,6 +465,8 @@ class PointDiT(nn.Module):
                 )
 
         # --- the same distances, folded into the attention bias ---
+        if self.patch_locality:
+            dist2 = near2
         if dist2 is not None and self.locality:
             # A masked frame is one the model is not allowed to see, and its
             # patch positions come from that frame's depth. Its features are
@@ -395,6 +484,10 @@ class PointDiT(nn.Module):
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
+        if match is not None:
+            # Added, not folded into `cond`: conditioning only rescales
+            # channels (AdaRMSNorm), and a displacement has to be copied.
+            h = h + self.match_proj(match.to(h.dtype))
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in

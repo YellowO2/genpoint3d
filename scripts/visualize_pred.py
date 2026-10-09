@@ -82,7 +82,9 @@ def main() -> int:
                      cross_attn=probe.context is not None,
                      feat_dim=probe.feat_dim,
                      time_norm=bool(targs.get("time_norm", 0)),
-                     locality=bool(targs.get("locality", 0))).to(device)
+                     locality=bool(targs.get("locality", 0)),
+                     locality_mode=targs.get("locality_mode", "legacy"),
+                     corr_mode=targs.get("corr_mode", "legacy")).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

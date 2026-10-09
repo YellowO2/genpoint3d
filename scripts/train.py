@@ -549,9 +549,20 @@ def main() -> int:
                         "sampled up to half a patch off, as every run before "
                         "2026-10-09 did.")
     p.add_argument("--locality", type=int, default=1, choices=[0, 1])
+    p.add_argument("--locality-mode", default="patch", choices=["legacy", "patch"],
+                   help="patch: the prior is a Gaussian one patch spacing wide, "
+                        "measured on each frame's own grid. legacy: a strength "
+                        "of 1.3 in scene units squared, which at real patch "
+                        "spacing is flat, as every run up to run14 had it.")
     # Score each patch against the query template, so "does this look like me"
     # is an input rather than something to be discovered. 0 is the run5 model.
     p.add_argument("--correlate", type=int, default=1, choices=[0, 1])
+    p.add_argument("--corr-mode", default="cosine", choices=["legacy", "cosine"],
+                   help="cosine: score patches by cosine similarity of the raw "
+                        "features, and hand the model the best match's offset "
+                        "in the units of its target. legacy: two random "
+                        "projections behind zero gates, as every run up to "
+                        "run14 had it.")
     # 0 lets a frame see later frames. Legitimate for tracking, where every
     # image is available, and what the published trackers do. Forecasting does
     # not depend on it: a masked frame holds only `null_ctx`.
@@ -652,6 +663,8 @@ def main() -> int:
                      time_norm=bool(args.time_norm),
                      locality=bool(args.locality),
                      correlate=bool(args.correlate),
+                     locality_mode=args.locality_mode,
+                     corr_mode=args.corr_mode,
                      causal=bool(args.causal),
                      costvol=bool(args.costvol), cv_k=args.cv_k,
                      cv_support=args.cv_support).to(device)

@@ -191,6 +191,10 @@ def main() -> int:
                      # Absent means a checkpoint from before the prior existed.
                      locality=bool(targs.get("locality", 0)),
                      correlate=bool(targs.get("correlate", 0)),
+                     # Absent means trained with the flat prior and the random
+                     # projections; their parameters are what the file holds.
+                     locality_mode=targs.get("locality_mode", "legacy"),
+                     corr_mode=targs.get("corr_mode", "legacy"),
                      # Absent means a checkpoint from before the flag existed,
                      # and every one of those was causal.
                      causal=bool(targs.get("causal", 1)),

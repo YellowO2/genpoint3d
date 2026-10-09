@@ -32,6 +32,22 @@ from torch import nn
 
 # ------------------------------------------------------------ normalisation
 
+def log_param(value: float) -> nn.Parameter:
+    """A positive scalar stored as its log, so an optimiser step scales it.
+
+    Adam moves a parameter about `lr` per step whatever its size. Stored raw, a
+    sharpness of 1 that needs to be 200 never gets there; stored as a log, the
+    same step is a fixed percentage and any scale is a few thousand steps away.
+    """
+    return nn.Parameter(torch.tensor(math.log(value)))
+
+
+def bounded_exp(log_value: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """`exp` of a `log_param`, held inside [lo, hi] so it can never reach 0 or
+    inf and turn an attention bias into NaN."""
+    return log_value.clamp(math.log(lo), math.log(hi)).exp()
+
+
 def zero_init(layer: nn.Linear, almost: bool = True) -> nn.Linear:
     """Start a residual branch at (almost) zero so the block begins as identity."""
     if almost:
@@ -232,8 +248,14 @@ class CrossBlock(nn.Module):
     null embedding to forecast. No branching anywhere else in the model.
     """
 
+    # Far patches reach -6000 on a real scene. Past -100 a patch is switched
+    # off either way, and a bounded bias stays finite and coarse-grained
+    # nowhere that matters once it is cast to bf16.
+    FAR = 100.0
+
     def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int,
-                 locality: bool = True, correlate: bool = True) -> None:
+                 locality: bool = True, correlate: bool = True,
+                 locality_mode: str = "patch", corr_mode: str = "cosine") -> None:
         super().__init__()
         self.norm_q = AdaRMSNorm(dim, cond_dim)
         self.norm_kv = RMSNorm(dim)
@@ -247,33 +269,59 @@ class CrossBlock(nn.Module):
         # patches far away, which is never what is wanted.
         # Created only when enabled, so a checkpoint from before this existed
         # still loads under `--locality 0`.
-        self.locality = nn.Parameter(torch.tensor(1.0)) if locality else None
-        # How much appearance match steers the lookup. Starts at zero, so at
-        # init this block is bit-identical to the locality-only model and the
-        # correlation term has to earn its weight.
-        self.corr_w = nn.Parameter(torch.zeros(1)) if correlate else None
+        # LEGACY: in scene units squared, where neighbouring patches are 0.05
+        # apart, a strength of 1.3 is a flat prior, and a raw scalar cannot
+        # climb to the ~200 it would need. Kept for checkpoints trained with it.
+        self.locality = (nn.Parameter(torch.tensor(1.0))
+                         if locality and locality_mode == "legacy" else None)
+        # The same prior as a Gaussian whose width is counted in patch spacings,
+        # so it means the same thing on any grid and in any scene. Starts one
+        # spacing wide: sharp enough to read the patch under the point.
+        self.log_sigma = log_param(1.0) if locality and locality_mode == "patch" else None
+        # How much appearance match steers the lookup.
+        # LEGACY: starts at zero, on a score that starts random, so neither
+        # ever received a useful gradient. Kept for old checkpoints.
+        self.corr_w = (nn.Parameter(torch.zeros(1))
+                       if correlate and corr_mode == "legacy" else None)
+        # Logits a perfect match is worth. The score is a cosine, so it is
+        # meaningful before any training and can be trusted from step 0; 10 is
+        # the full range of this block's own QK-normalised logits.
+        self.corr_log_scale = log_param(10.0) if correlate and corr_mode == "cosine" else None
 
     def forward(self, x, cond, context, dist2=None, corr=None):
         """`dist2` (B, N, P): squared distance from each point's current position
-        estimate to each patch, in the shared normalised space. `corr` (B, N, P):
-        how well each patch matches the point's query template.
+        estimate to each patch -- in patch spacings, measured from the nearest
+        patch (see `PointDiT.forward`), or in the shared normalised space for
+        the legacy prior. `corr` (B, N, P): how well each patch matches the
+        point's query template.
 
-        Added to the attention logits as `-dist2 * locality`, which turns the
+        Added to the attention logits as a Gaussian log-prior, which turns the
         search "which of 576 patches is mine?" into the arithmetic "which are
         near me?". Geometry answers it; the model only has to compare
         appearances among the survivors -- what a correlation volume does in
         CoTracker and TAPIP3D, expressed as an attention prior.
         """
+        # Each term is (B, 1, N, P) and broadcasts over heads: a per-head bias
+        # would cost num_heads times the memory for the same prior.
         bias = None
-        if dist2 is not None and self.locality is not None:
-            # (B, 1, N, P) broadcasts over heads: a per-head bias would cost
-            # num_heads times the memory for the same prior.
+        if dist2 is not None and self.log_sigma is not None:
+            sigma = bounded_exp(self.log_sigma, 1e-2, 1e2)
+            bias = (-dist2 / (2 * sigma ** 2)).clamp_min(-self.FAR)[:, None]
+        elif dist2 is not None and self.locality is not None:
             bias = (-dist2 * F.softplus(self.locality))[:, None].to(context.dtype)
-        if corr is not None and self.corr_w is not None:
-            # Distance says which patches are reachable; correlation says which
-            # one looks like the point. Summing the two biases asks for both.
+        # Distance says which patches are reachable; correlation says which
+        # one looks like the point. Summing the two biases asks for both.
+        term = None
+        if corr is not None and self.corr_log_scale is not None:
+            term = (corr * bounded_exp(self.corr_log_scale, 1e-2, 1e2))[:, None]
+        elif corr is not None and self.corr_w is not None:
             term = (corr * self.corr_w)[:, None].to(context.dtype)
+        if term is not None:
             bias = term if bias is None else bias + term
+        if bias is not None:
+            # Summed in fp32 and cast once, here: bf16 rounds each term to 8
+            # bits, and near the point the two are the same size.
+            bias = bias.to(context.dtype)
         x = x + self.attn(self.norm_q(x, cond), context=self.norm_kv(context),
                           attn_mask=bias)
         x = x + self.ff_down(self.ff_up(self.norm_ff(x, cond)))
