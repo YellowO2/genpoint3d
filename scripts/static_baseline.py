@@ -17,12 +17,8 @@ Run:  python scripts/static_baseline.py --cache ~/scratch/cache/kubric
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 from torch.utils.data import DataLoader

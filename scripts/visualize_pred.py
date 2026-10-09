@@ -21,11 +21,7 @@ Then drag the .rrd into https://rerun.io/viewer (or `rerun out.rrd`).
 """
 
 import argparse
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
 import torch

@@ -13,12 +13,8 @@ Run:  python scripts/bench.py --cache ~/scratch/cache/kubric --what speed
 """
 
 import argparse
-import sys
 import time
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 from torch.utils.data import DataLoader

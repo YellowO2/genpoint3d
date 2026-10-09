@@ -1,0 +1,15 @@
+# Makes `import genpoint3d` work from anywhere, after a one-time:
+#   pip install -e .
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genpoint3d"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+# Named explicitly: setuptools refuses to guess when the repo root also holds
+# scripts/, docs/, runs/ and local/.
+[tool.setuptools.packages.find]
+include = ["genpoint3d*"]
