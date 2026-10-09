@@ -1,0 +1,42 @@
+#!/bin/bash
+# Score the published TAPIP3D checkpoint on our validation clips, with our
+# scorer. See scripts/ref_tapip3d.py. The environment and checkpoint come from
+# ~/scratch/tapip3d_setup.sh (one-time, on the login node).
+#
+#   qsub scripts/ref_tapip3d.pbs
+#
+#PBS -N ref_tapip3d
+#PBS -l select=1:ncpus=8:ngpus=1:mem=48gb
+#PBS -l walltime=01:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/ref_tapip3d.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+OURS=$ROOT/genpoint3d
+REF=$ROOT/refs/tapip3d
+N=${N:-100}
+ARGS=${ARGS:-}
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+
+# The same val clips our own runs are scored on, picked by our own split code.
+source $ROOT/venvs/fyp/bin/activate
+python $OURS/scripts/split_dir.py --cache $ROOT/cache/kubric --split val --n "$N" \
+  --val-frac 0.1 --seed 0 --out $ROOT/ref_eval/val$N
+deactivate
+
+source $ROOT/venvs/tapip3d/bin/activate
+# Their kNN is a compiled CUDA extension; build it once.
+if ! python -c "import pointops2_cuda" 2>/dev/null; then
+  (cd $REF/third_party/pointops2 && python setup.py install > $ROOT/pointops2_build.log 2>&1) \
+    || { tail -30 $ROOT/pointops2_build.log; exit 1; }
+fi
+
+python $OURS/scripts/ref_tapip3d.py --ref-repo $REF --clips $ROOT/ref_eval/val$N \
+  --raw $ROOT/kubric --out $ROOT/ref_preds/tapip3d $ARGS
+echo "=== REF TAPIP3D DONE ==="
