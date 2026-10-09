@@ -137,6 +137,11 @@ def main() -> int:
                         "the truth, because monocular depth has no scale. We "
                         "have metric depth, so that factor can only move a "
                         "correct point. none scores the prediction as it is.")
+    p.add_argument("--min-motion-px", type=float, default=0.0,
+                   help="score only points that move more than this many "
+                        "(back-projected) pixels from their start. A point that "
+                        "never moves is tracked perfectly by doing nothing, so "
+                        "an average dominated by them hides the tracking.")
     p.add_argument("--oracle-axis", default="", choices=["", "x", "y", "z"],
                    help="overwrite one channel of the PREDICTION with the truth "
                         "before scoring. An error decomposition, not an input. "
@@ -205,11 +210,12 @@ def main() -> int:
     m = evaluate(model, loader, device, steps=args.sample_steps, amp=amp,
                  anchor_frame0=anchor_frame0, loss_type=loss_type,
                  space=args.space, oracle_axis=args.oracle_axis,
-                 scaling=args.scaling)
+                 scaling=args.scaling, min_motion_px=args.min_motion_px)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
-    for k in ("average_pts_within_thresh", "apd_static", "val_loss"):
-        print(f"  {k:<26} {m[k]:.4f}")
+    for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac"):
+        if k in m:
+            print(f"  {k:<26} {m[k]:.4f}")
     print()
     for t in (1, 2, 4, 8, 16):
         print(f"  pts_within_{t:<15} {m[f'pts_within_{t}']:.4f}")

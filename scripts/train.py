@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
-from genpoint3d.eval.metrics import _to_camera_t, tapvid3d_metrics
+from genpoint3d.eval.metrics import _to_camera_t, motion_px, tapvid3d_metrics
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.model import PointDiT
 
@@ -314,7 +314,7 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
              anchor_frame0: bool = False, loss_type: str = "l2",
              space: str = "3d", oracle_axis: str = "",
-             scaling: str = "median") -> dict:
+             scaling: str = "median", min_motion_px: float = 0.0) -> dict:
     """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
@@ -351,6 +351,12 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         # Scored in metres, per clip -- a threshold in model units would mean a
         # different physical distance in every clip.
         gt_m = to_metres(traj, b)
+        if min_motion_px:
+            # Score only points that actually move. `vis` keeps its meaning for
+            # the loss above; this narrows what the METRIC counts.
+            moving = motion_px(gt_m, vis, b["intrinsics"], b["extrinsics"]) > min_motion_px
+            sums["moving_frac"] = sums.get("moving_frac", 0.0) + moving.float().mean().item()
+            vis = vis & moving[:, None]
         score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
                                            b["extrinsics"], space=space,
                                            scaling=scaling)

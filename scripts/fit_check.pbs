@@ -47,6 +47,8 @@ SPACE=${SPACE:-3d}
 AXIS=${AXIS:-}
 # SCALING=none scores the prediction without the protocol's global rescale.
 SCALING=${SCALING:-median}
+# MOTION=4 scores only points that move more than 4 back-projected pixels.
+MOTION=${MOTION:-0}
 [ -n "$AXIS" ] && OZ="--oracle-axis $AXIS" || OZ=""
 # Per job, not shared: split_dir.py clears the directory before relinking, so
 # two fit_check jobs pointed at one WORK would delete each other's links. The
@@ -64,8 +66,8 @@ for SPLIT in train val; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" $OZ \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_$SCALING.json"
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION.json"
 done
 
 echo "=== FIT CHECK DONE ==="

@@ -87,6 +87,23 @@ def _scale_factor(pred: torch.Tensor, gt: torch.Tensor, valid: torch.Tensor,
 
 
 @torch.no_grad()
+def motion_px(gt: torch.Tensor, visible: torch.Tensor, intrinsics: torch.Tensor,
+              extrinsics: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """(B, N): how far each point ever gets from its frame-0 position, in the
+    metric's own units -- pixels back-projected at the point's depth.
+
+    A point that never moves is tracked perfectly by predicting "it stays where
+    it started". If most query points are like that, the average says little
+    about tracking; this is what lets a score be restricted to the rest.
+    """
+    gt_cam = _to_camera_t(gt, extrinsics) if extrinsics is not None else gt
+    focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
+    mult = (gt_cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
+    disp = (gt - gt[:, :1]).norm(dim=-1) / mult                   # (B, T, N)
+    return disp.masked_fill(~visible, 0).amax(dim=1)
+
+
+@torch.no_grad()
 def tapvid3d_metrics(
     pred: torch.Tensor,
     gt: torch.Tensor,
