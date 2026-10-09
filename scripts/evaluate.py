@@ -213,7 +213,8 @@ def main() -> int:
                  scaling=args.scaling, min_motion_px=args.min_motion_px)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
-    for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac"):
+    for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac",
+              "disp_ratio", "disp_cos"):
         if k in m:
             print(f"  {k:<26} {m[k]:.4f}")
     print()

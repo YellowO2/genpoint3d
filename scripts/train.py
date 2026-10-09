@@ -361,6 +361,16 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
                                            b["extrinsics"], space=space,
                                            scaling=scaling)
         pred_m = to_metres(pred, b)
+        if min_motion_px and vis.any():
+            # On the moving points: how much motion does the model predict, and
+            # in the right direction? ratio ~0 means it predicts "stays put";
+            # cos ~0 means the motion it does predict is unrelated to the truth.
+            d_gt = (gt_m - gt_m[:, :1])[vis]
+            d_pr = (pred_m - gt_m[:, :1])[vis]
+            sums["disp_ratio"] = sums.get("disp_ratio", 0.0) + (
+                d_pr.norm(dim=-1).mean() / d_gt.norm(dim=-1).mean().clamp(min=1e-9)).item()
+            sums["disp_cos"] = sums.get("disp_cos", 0.0) + torch.nn.functional.cosine_similarity(
+                d_pr, d_gt, dim=-1).mean().item()
         if oracle_axis:
             # Attribution, not an input: the model has already produced its
             # answer, and this only overwrites one channel of that answer before
