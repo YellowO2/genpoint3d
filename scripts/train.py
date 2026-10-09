@@ -316,7 +316,7 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 @torch.no_grad()
 def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
              anchor_frame0: bool = False, loss_type: str = "l2",
-             space: str = "3d", oracle_z: bool = False) -> dict:
+             space: str = "3d", oracle_axis: str = "") -> dict:
     """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME flow-matching objective as training, on held-out clips.
@@ -356,13 +356,18 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         score = lambda p: tapvid3d_metrics(p, gt_m, vis, b["intrinsics"],
                                            b["extrinsics"], space=space)
         pred_m = to_metres(pred, b)
-        if oracle_z:
+        if oracle_axis:
             # Attribution, not an input: the model has already produced its
-            # answer, and this only replaces the depth channel of that answer
-            # before scoring. Nothing is fed back, so it cannot tell the model
-            # where to look. The gap between this and the plain 3D score is the
-            # part of the 3D error that is purely depth.
-            pred_m = torch.cat([pred_m[..., :2], gt_m[..., 2:]], dim=-1)
+            # answer, and this only overwrites one channel of that answer before
+            # scoring. Nothing is fed back, so it cannot tell the model where to
+            # look.
+            #
+            # Run all three axes. Correcting ANY of the three removes a third of
+            # the error budget, so a jump on z alone proves nothing -- z only
+            # matters if it buys MORE than x and y do.
+            a = "xyz".index(oracle_axis)
+            pred_m = pred_m.clone()
+            pred_m[..., a] = gt_m[..., a]
         m = score(pred_m)
         # Static Baseline: each point stays where it started. Free -- no
         # sampling -- and the number a reader will ask for first.

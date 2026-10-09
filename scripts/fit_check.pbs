@@ -41,10 +41,11 @@ N=${N:-50}
 # depth error stops counting. Run both and the pair says whether depth is what
 # we get wrong.
 SPACE=${SPACE:-3d}
-# ORACLE_Z=1 replaces the prediction's depth channel with the truth before
-# scoring, which attributes the 3D error between lateral and depth.
-ORACLE_Z=${ORACLE_Z:-0}
-[ "$ORACLE_Z" = 1 ] && OZ="--oracle-z" || OZ=""
+# AXIS=x|y|z overwrites that channel of the prediction with the truth before
+# scoring. Run all three: correcting any one axis removes part of the error
+# budget, so z is only the culprit if it buys more than x and y do.
+AXIS=${AXIS:-}
+[ -n "$AXIS" ] && OZ="--oracle-axis $AXIS" || OZ=""
 WORK=$ROOT/fit_check
 
 # val_frac and seed must match the run's run.json, or these are not the clips
@@ -56,10 +57,10 @@ done
 
 for SPLIT in train val; do
   echo
-  echo "########## $SPLIT split, $SPACE score ($N clips) ##########"
+  echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
     --space "$SPACE" $OZ \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${OZ:+_oracleZ}.json"
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}.json"
 done
 
 echo "=== FIT CHECK DONE ==="
