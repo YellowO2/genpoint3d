@@ -105,3 +105,37 @@ Queued when the connection dropped (all read their flags from the qsub line):
 | run23_rg_m48 | g1, after run20_m48 | no-noise + B6 + matcher on 48 grid, 6,000 steps |
 
 Updated 06:50. The wider matcher head (run19_md24) is at 0.390 val at step 2,500 against 0.381 for the narrow one, with the match within one patch 79% against 78%.
+
+## State at 15:00 on 2026-10-10, and the next step
+
+Finished runs, moving points, val / train: run20_m48 (diffusion, 48 grid, B6 +
+trained matcher, 12k steps) 0.511 / 0.547; all points 0.718 / 0.742.
+run21_rg_m24 (no-noise, 24 grid, same fixes, 4k) 0.455 / 0.495. The local cost
+volume (run24) and top-4 candidates (run19_mk24) added nothing. The wider
+matcher head (`--match-dim 256`) gave 0.414 against 0.405 at 24 grid.
+
+Still running: run23_rg_m48 (no-noise, 48 grid, B6 + trained matcher, 6k steps,
+job 25742718, ends about 15:30). Step 5,000: all points val 0.746 / train
+0.781, moving 0.549 / 0.589. This is the number to report as our best.
+
+TAPIP3D on our 100 val clips: all points 0.965 (standard scoring), moving 0.926.
+"Nothing moves": all points 0.32 val / 0.35 train, moving 0.25.
+
+What is left is precision. Train, moving points, <1/<2/<4/<8/<16 px:
+0.20 / 0.34 / 0.55 / 0.75 / 0.90, against TAPIP3D 0.78 / 0.91 / 0.97 / 0.99 /
+1.00. Train and val are close, so it is missing information, not memorising.
+
+Why (checked in the reference code): TAPIP3D, DELTA, SpatialTrackerV2 and genpt
+all track on the same small CNN (RAFT / CoTracker `BasicEncoder`, 128-d, one
+feature per 4 px of a 384x512 frame, 96x128 cells), trained with the tracker.
+TAPIP3D starts it from CoTracker3's weights; genpt from scratch. They compare a
+7x7 window around the current guess with a 7x7 window around the start, at 3 or
+4 zoom levels (4, 8, 16, 32 px cells), and correct 4 to 6 times. Only 4RC uses
+a ViT, with an upsampling head. We use frozen DINOv3 at one feature per 16 px.
+
+Next step (agreed with the user): keep DINOv3 for finding the object, and add
+that CNN at 4 px cells as the "relative finder", with the zoom levels, read by
+the no-noise method around its clean guess. Start from CoTracker3's weights.
+Training then needs the real frames as well as the cached DINOv3 features, so
+the cache and data loading change. Test at 24 grid first against run21_rg_m24
+and read <1 / <2 / <4 px; if they rise, run at 48 grid.
