@@ -30,6 +30,7 @@ import math
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -37,6 +38,7 @@ from genpoint3d.data.cache import CachedClip
 from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.eval.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.models.encoder import VisualEncoder
+from genpoint3d.models.fine import image_projection
 from genpoint3d.models.flow import flow_matching_loss, sample
 from genpoint3d.models.match import (
     match_accuracy, match_accuracy_topk, match_ce, per_clip, true_patch,
@@ -78,8 +80,18 @@ class ClipDataset(Dataset):
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
                  norm_mode: str = "median", target: str = "absolute",
-                 fix_idcard: bool = True):
+                 fix_idcard: bool = True, frames: Path | None = None,
+                 features: bool = True):
         self.clips, self.num_points, self.resample = clips, num_points, resample
+        # The RGB frames, for the relative finder: a directory from
+        # `scripts/cache_frames.py` holding one uint8 array per clip, named
+        # like the clip. Every frame is served, in order and untouched --
+        # nothing here crops, flips or drops frames, and which POINTS are
+        # drawn does not concern an image.
+        self.frames = frames
+        # Off serves no DINOv3 feature, ID card or patch position at all, for
+        # a model that is to track from the CNN alone.
+        self.features = features
         # The cached ID card was read with a lookup that was up to half a patch
         # off (see `VisualEncoder.sample_at`). The cache also holds frame 0's
         # whole feature grid and the query pixels, so it is read again here
@@ -159,12 +171,23 @@ class ClipDataset(Dataset):
         # only for autocast to cast it straight back down. `to_device` restores
         # fp32 when autocast is off.
         ctx = clip.context
+        if not self.features:
+            ctx = id_card = pxyz = None
+        frames = torch.zeros(0)
+        if self.frames is not None:
+            frames = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}.npy"))
+            if frames.shape[0] != traj.shape[0]:
+                raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
+                                 f"for a {traj.shape[0]}-frame track")
         norm = clip.norm(self.norm_mode, traj_scale=self.traj_scale)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis,
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),
+            # (T, R, R, 3) uint8, and it stays uint8 until the CNN takes a
+            # clip of it: as floats a batch of 16 is 2 GB.
+            "frames": frames,
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
             # The benchmark defines its pixel thresholds on a frame whose short
@@ -253,7 +276,91 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     b = {k: v.to(device) for k, v in batch.items()}
     for k in ("context", "id_card", "patch_xyz"):
         b[k] = None if b[k].numel() == 0 else b[k].float()
+    if b["frames"].numel() == 0:
+        b["frames"] = None
     return b
+
+
+def frames_dir(path: str | None, clips: list, res: int) -> Path:
+    """The frames cache for `clips`, checked before anything is trained on it:
+    a clip with no frames, or frames at another size than the model was told,
+    should stop the run now and not at the step that first draws it."""
+    if not path:
+        raise SystemExit("the relative finder reads RGB frames: pass --frames-cache, "
+                         "a directory from scripts/cache_frames.py")
+    d = Path(path)
+    missing = [c.stem for c in clips if not (d / f"{c.stem}.npy").exists()]
+    if missing:
+        raise SystemExit(f"{len(missing)} of {len(clips)} clips have no frames in {d} "
+                         f"({' '.join(missing[:5])}{' ...' if len(missing) > 5 else ''})"
+                         " -- run scripts/cache_frames.py")
+    got = np.load(d / f"{clips[0].stem}.npy", mmap_mode="r").shape[1:3]
+    if got != (res, res):
+        raise SystemExit(f"frames in {d} are {got[0]}x{got[1]}, --fine-res is {res}")
+    return d
+
+
+def build_model(a: dict, feat_dim: int | None, has_feats: bool) -> PointDiT:
+    """The model a run's arguments describe: `vars(args)` here, the `args` of
+    a checkpoint in evaluate.py and visualize_pred.py.
+
+    A key missing from a checkpoint means it was trained before that flag
+    existed, and the default given here is how every model was built until
+    then -- a checkpoint has to be evaluated the way it was trained.
+    """
+    displacement = a.get("target", "absolute") == "displacement"
+    return PointDiT(dim=a["dim"], depth=a["depth"], num_heads=a["heads"],
+                    # --dino 0 is a model with no DINOv3 input of any kind.
+                    cross_attn=has_feats and bool(a.get("dino", 1)),
+                    feat_dim=feat_dim,
+                    adapter_depth=a.get("adapter_depth", 1),
+                    upsample=a.get("upsample", 1),
+                    traj_scale=TRAJ_SCALE_DISP if displacement else TRAJ_SCALE,
+                    displacement=displacement,
+                    # Absent means trained before the lookup was fixed.
+                    legacy_lookup=bool(a.get("legacy_lookup", 1)),
+                    time_norm=bool(a.get("time_norm", 0)),
+                    # Absent means a checkpoint from before the prior existed.
+                    locality=bool(a.get("locality", 0)),
+                    correlate=bool(a.get("correlate", 0)),
+                    # Absent means trained with the flat prior and the random
+                    # projections; their parameters are what the file holds.
+                    locality_mode=a.get("locality_mode", "legacy"),
+                    locality_wide=a.get("locality_wide", 8.0),
+                    corr_mode=a.get("corr_mode", "legacy"),
+                    # Absent means a checkpoint from before the flag existed,
+                    # and every one of those was causal.
+                    causal=bool(a.get("causal", 1)),
+                    costvol=bool(a.get("costvol", 0)),
+                    cv_k=a.get("cv_k", 16),
+                    cv_support=a.get("cv_support", 8),
+                    # Absent means a checkpoint from before the match could be
+                    # trained: no head in the file, the raw cosine in the model.
+                    match_learn=bool(a.get("match_learn", 0)),
+                    match_dim=a.get("match_dim", 64),
+                    match_topk=a.get("match_topk", 1),
+                    fine=bool(a.get("fine", 0)),
+                    fine_levels=a.get("fine_levels", 4),
+                    fine_radius=a.get("fine_radius", 3))
+
+
+def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
+    """What the relative finder adds to a forward pass: the CNN's feature map
+    for the batch's frames, and each frame's camera. Empty for a model without
+    one, or a batch without frames.
+
+    The map is computed once and shared by every forward pass of the step. It
+    comes back with no graph; with `grad` it is a leaf that collects the
+    gradient of each backward pass, for `FineFinder.replay` to carry into the
+    CNN once they are all done.
+    """
+    if model.fine is None or b["frames"] is None:
+        return {}
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+        fmap = model.fine.encode(b["frames"])
+    return {"fine_map": fmap.requires_grad_(grad),
+            "fine_proj": image_projection(b["intrinsics"], b["extrinsics"], b["hw"],
+                                          b["norm_scale"], b["norm_mean"])}
 
 
 def match_line(m: dict, prefix: str = "") -> str:
@@ -450,7 +557,8 @@ def evaluate(model, loader, device, steps: int = 50, amp: bool = False,
         kx0 = known_frame0(b) if anchor_frame0 else None
         # The same autocast as the training step: a model trained in bf16 and
         # scored in fp32 is being scored on numerics it never saw.
-        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                    **fine_inputs(model, b, amp))
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             if method == "regress":
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
@@ -703,6 +811,35 @@ def main() -> int:
                    help="--match-learn only: hidden width of the residual MLP. "
                         "Its memory is a few (batch, frames, patches, this) "
                         "tensors, so it is kept well under the feature width")
+    p.add_argument("--fine", type=int, default=0, choices=[0, 1],
+                   help="the relative finder: a small CNN on the RGB frames, "
+                        "one cell per 4 px, trained with the model, and a "
+                        "7x7 window of it around the current guess compared "
+                        "with one around the query. What gives the reference "
+                        "trackers their last few pixels. Needs --frames-cache. "
+                        "0 is every run before it.")
+    p.add_argument("--frames-cache", default=None,
+                   help="--fine only: directory from scripts/cache_frames.py, "
+                        "one uint8 array of frames per clip of --cache")
+    p.add_argument("--fine-res", type=int, default=384,
+                   help="--fine only: side of the square frame the CNN is "
+                        "given, which is the side --frames-cache was written "
+                        "at. A cell is 4 px of it: 384 is 96x96 cells.")
+    p.add_argument("--fine-levels", type=int, default=4,
+                   help="--fine only: pyramid levels, each half as fine")
+    p.add_argument("--fine-radius", type=int, default=3,
+                   help="--fine only: the window is this many cells either "
+                        "side of its centre, at every level. 3 is 7x7")
+    p.add_argument("--fine-init", default=None,
+                   help="--fine only: weights for the CNN, as saved by "
+                        "scripts/fetch_fnet.py (CoTracker3's). Without it "
+                        "the CNN starts from random")
+    p.add_argument("--dino", type=int, default=1, choices=[0, 1],
+                   help="0 gives the model nothing from DINOv3: no patch "
+                        "tokens to attend to, no match, no cost volume, no ID "
+                        "card. With --fine 1 that is a tracker on the CNN "
+                        "alone, as the reference trackers are, and the query "
+                        "is described by its window of CNN features")
     p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
     # Evaluate and checkpoint the averaged weights, not the jittering ones.
     # 0 disables. The paper lists EMA among its training ingredients.
@@ -741,20 +878,27 @@ def main() -> int:
         # clips is the easiest thing a network does, so failing here means a
         # bug in the pipeline -- no data or capacity excuse is available.
         train_clips = val_clips = (train_clips + val_clips)[: args.overfit]
+    has_feats = has_feats and bool(args.dino)
+    frames = (frames_dir(args.frames_cache, train_clips + val_clips, args.fine_res)
+              if args.fine else None)
     print(f"device {device} | {len(train_clips)} train clips, {len(val_clips)} val clips"
           f"{' | OVERFIT (train == val)' if args.overfit else ''}"
-          f" | {'TRACKING (with images)' if has_feats else 'no images (step 2)'}", flush=True)
+          + (" | TRACKING (with images)" if has_feats
+             else " | no DINOv3" if args.fine else " | no images (step 2)")
+          + (f" | fine CNN at {args.fine_res}px" if args.fine else ""),
+          flush=True)
 
+    # What every loader shares: how a clip is turned into a sample.
+    how_data = dict(norm_mode=args.norm_mode, target=args.target,
+                    fix_idcard=bool(args.fix_idcard), frames=frames,
+                    features=has_feats)
     train_loader = DataLoader(
-        ClipDataset(train_clips, args.points, norm_mode=args.norm_mode,
-                    target=args.target, fix_idcard=bool(args.fix_idcard)),
+        ClipDataset(train_clips, args.points, **how_data),
         batch_size=args.batch, shuffle=True, num_workers=args.workers,
         drop_last=True, persistent_workers=args.workers > 0,
     )
     val_loader = DataLoader(
-        ClipDataset(val_clips, args.points, resample=False,
-                    norm_mode=args.norm_mode, target=args.target,
-                    fix_idcard=bool(args.fix_idcard)),
+        ClipDataset(val_clips, args.points, resample=False, **how_data),
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     )
 
@@ -763,8 +907,7 @@ def main() -> int:
     # confound the comparison the number exists to make.
     fit_loader = DataLoader(
         ClipDataset(train_clips[: args.train_eval], args.points, resample=False,
-                    norm_mode=args.norm_mode, target=args.target,
-                    fix_idcard=bool(args.fix_idcard)),
+                    **how_data),
         batch_size=args.batch, shuffle=False, num_workers=args.workers,
     ) if args.train_eval else None
 
@@ -783,26 +926,11 @@ def main() -> int:
             f" --target {args.target}")
     del probe
 
-    model = PointDiT(dim=args.dim, depth=args.depth, num_heads=args.heads,
-                     cross_attn=has_feats, feat_dim=feat_dim,
-                     adapter_depth=args.adapter_depth,
-                     upsample=args.upsample,
-                     traj_scale=(TRAJ_SCALE_DISP if args.target == "displacement"
-                                 else TRAJ_SCALE),
-                     displacement=args.target == "displacement",
-                     legacy_lookup=bool(args.legacy_lookup),
-                     time_norm=bool(args.time_norm),
-                     locality=bool(args.locality),
-                     correlate=bool(args.correlate),
-                     locality_mode=args.locality_mode,
-                     locality_wide=args.locality_wide,
-                     corr_mode=args.corr_mode,
-                     causal=bool(args.causal),
-                     costvol=bool(args.costvol), cv_k=args.cv_k,
-                     cv_support=args.cv_support,
-                     match_learn=bool(args.match_learn),
-                     match_dim=args.match_dim,
-                     match_topk=args.match_topk).to(device)
+    model = build_model(vars(args), feat_dim, has_feats).to(device)
+    if args.fine and args.fine_init:
+        # Strict: a file that is not this CNN should not half-load.
+        model.fine.fnet.load_state_dict(torch.load(args.fine_init, map_location="cpu"))
+        print(f"fine CNN initialised from {args.fine_init}", flush=True)
     print(f"model {model.num_parameters() / 1e6:.2f}M params", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
@@ -837,6 +965,8 @@ def main() -> int:
             vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
             w = apd_weight(b, traj) if args.depth_scaled_loss else None
             kx0 = known_frame0(b) if args.anchor_frame0 else None
+            # Before any backward pass of the step, and shared by all of them.
+            fine = fine_inputs(model, b, amp, grad=True)
             if args.match_learn:
                 # Its own forward and backward, once per step and ahead of the
                 # method: the scores do not depend on the sample, so regress
@@ -861,13 +991,21 @@ def main() -> int:
                     loss, _ = regress_loss(model, traj, anchor, mask=vis, weight=w,
                                            known_x0=kx0, loss_type=args.loss_type,
                                            iters=args.refine_iters, backward=1 / args.accum,
-                                           context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+                                           context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                                           **fine)
                 else:
                     loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
                                                  known_x0=kx0, loss_type=args.loss_type,
-                                                 context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+                                                 context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                                                 **fine)
             if args.method == "flow":
                 (loss / args.accum).backward()
+            if fine:
+                # Every backward pass above stopped at the feature map. This
+                # takes what they left there the rest of the way into the CNN.
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    model.fine.replay(b["frames"], fine["fine_map"])
+                del fine
             micro_loss += loss.item() / args.accum
             micro += 1
             if micro < args.accum:

@@ -9,6 +9,8 @@ Four checks, each of which fails loudly if the geometry is wrong:
   3. reprojection   -- projecting the 3D trajectory back into each frame
                        reproduces the dataset's own 2D pixel coordinates
   4. scale sanity   -- normalised values land in a trainable range
+  5. fine projection -- the matrix the relative finder projects with puts the
+                       ground-truth tracks on the dataset's 2D pixels
 
 Run:  .venv/bin/python scripts/check_transform.py [data_root]
 """
@@ -19,6 +21,7 @@ import torch
 
 from genpoint3d.data.kubric import KubricSequenceDataset
 from genpoint3d.data.transform import project_to_frames, scene_pointmap, transform
+from genpoint3d.models.fine import image_projection, project
 
 PASS, FAIL = "  PASS", "  FAIL"
 
@@ -64,6 +67,28 @@ def check_reprojection(inputs, sample) -> bool:
     return report("reprojection", med < 1.0, f"median error {med:.3f} px over {vis.sum()} visible samples")
 
 
+def check_fine_projection(inputs, sample) -> bool:
+    """The relative finder's camera, on the real thing.
+
+    `image_projection` folds normalisation, pose and intrinsics into one
+    matrix and `project` returns a fraction of the frame, so this is every
+    convention it depends on at once: a ground-truth track, in the
+    scene-normalised units the model looks things up in, has to come out on
+    the pixel Kubric says it is drawn at. Tight, because the finder's cells
+    are 4 px and the point of it is the last one.
+    """
+    H, W = inputs.frames.shape[1:3]
+    proj = image_projection(inputs.intrinsics[None], inputs.extrinsics[None],
+                            torch.tensor([[H, W]]), inputs.norm.scale[None],
+                            inputs.norm.mean[None])
+    uv, _ = project(inputs.norm.apply(inputs.traj_metric)[None], proj)
+    gt = torch.from_numpy(sample.coords_2d).float()             # (T, N, 2)
+    err = (uv[0] * torch.tensor([W, H]) - gt).norm(dim=-1)[inputs.visibility]
+    return report("fine projection", err.max().item() < 0.05,
+                  f"worst error {err.max():.4f} px, median {err.median():.4f} px"
+                  f" over {inputs.visibility.sum()} visible samples")
+
+
 def check_scale(inputs) -> bool:
     """Geometry should be O(1); the *denoising target* must be near unit variance.
 
@@ -97,6 +122,7 @@ def main() -> int:
         all_ok &= check_static_scene(inputs)
         all_ok &= check_reprojection(inputs, sample)
         all_ok &= check_scale(inputs)
+        all_ok &= check_fine_projection(inputs, sample)
         print()
 
     print("ALL CHECKS PASSED" if all_ok else "SOME CHECKS FAILED")

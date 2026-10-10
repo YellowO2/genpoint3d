@@ -110,6 +110,21 @@ def load_depths(root_dir: str, seq_id: str) -> np.ndarray:
     return _distance_to_depth(distances, _pixel_intrinsics(data, H, W))
 
 
+def load_frames(root_dir: str, seq_id: str) -> np.ndarray:
+    """(T, H, W, 3) uint8 RGB for one clip, without decoding depth.
+
+    The same pixels `KubricSequenceDataset.__getitem__` puts in `.frames`, for
+    callers that need the images only (`scripts/cache_frames.py`).
+    """
+    frames_dir = os.path.join(root_dir, seq_id, "frames")
+    data = np.load(os.path.join(root_dir, seq_id, f"{seq_id}.npy"), allow_pickle=True).item()
+    num_frames = data["intrinsics"].shape[0]
+    with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
+        return np.stack(list(ex.map(
+            lambda t: cv2.cvtColor(_imread(os.path.join(frames_dir, f"{t:03d}.png")),
+                                   cv2.COLOR_BGR2RGB), range(num_frames))))
+
+
 def _distance_to_depth(distances: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
     """distances: (T, H, W) distance-from-camera. intrinsics: (T, 3, 3) pixel-space. -> (T, H, W) z-depth."""
     h, w = distances.shape[-2:]

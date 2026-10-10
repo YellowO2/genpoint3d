@@ -38,6 +38,10 @@ ARGS=${ARGS:-}
 # An `if`, not `[ ... ] && ...`: under `set -e` a false test as the last
 # command of the line would end the job.
 if [ -n "$RAW" ]; then ARGS="--root $RAW $ARGS"; fi
+# FRAMES=cache/kubric_frames384 (relative to ~/scratch) is the RGB frames cache
+# of CACHE's clips, which a --fine 1 checkpoint needs.
+FRAMES=${FRAMES:-}
+if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
 
 exec > >(tee -a $ROOT/${OUT}.viz.log) 2>&1
 

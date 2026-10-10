@@ -32,6 +32,11 @@ source $ROOT/venvs/fyp/bin/activate
 # This cache chose nothing, which is what makes its number reportable.
 CKPT=${CKPT:-outputs/run3493/best.pt}
 ARGS=${ARGS:-}
+# FRAMES=cache/kubric_test_frames384 (relative to ~/scratch) is the RGB frames
+# cache of the TEST clips, which a --fine 1 checkpoint needs:
+#   qsub -v SRC=cache/kubric_test,DST=cache/kubric_test_frames384,RAW=<test download> scripts/cache_frames.pbs
+FRAMES=${FRAMES:-}
+if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
 
 python scripts/evaluate.py \
   --ckpt "$CKPT" --per-frame $ARGS \

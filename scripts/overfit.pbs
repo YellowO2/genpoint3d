@@ -37,6 +37,10 @@ cd $ROOT/genpoint3d
 
 OUT=${OUT:-overfit2}
 ARGS=${ARGS:-}
+# FRAMES=cache/kubric_frames384 (relative to ~/scratch) is the RGB frames cache
+# that a --fine 1 model reads, from scripts/cache_frames.pbs.
+FRAMES=${FRAMES:-}
+if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
 
 exec > >(tee -a $ROOT/${OUT}.live.log) 2>&1
 

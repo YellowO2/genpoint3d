@@ -54,6 +54,10 @@ MOTION=${MOTION:-0}
 # checkpoint trained with.
 POINTS=${POINTS:-}
 [ -n "$POINTS" ] && PTS="--points $POINTS" || PTS=""
+# FRAMES=cache/kubric_frames384 (relative to ~/scratch) is the RGB frames cache
+# of CACHE's clips, which a --fine 1 checkpoint needs.
+FRAMES=${FRAMES:-}
+[ -n "$FRAMES" ] && FR="--frames-cache $ROOT/$FRAMES" || FR=""
 # Per job, not shared: split_dir.py clears the directory before relinking, so
 # two fit_check jobs pointed at one WORK would delete each other's links. The
 # three axis jobs are meant to run at the same time.
@@ -70,7 +74,7 @@ for SPLIT in train val; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS \
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR \
     --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}.json"
 done
 

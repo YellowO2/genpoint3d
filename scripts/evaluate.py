@@ -22,10 +22,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.eval.metrics import clip_mean, tapvid3d_metrics
-from genpoint3d.models.model import PointDiT
 from genpoint3d.data.cache import CachedClip
-from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
-from train import EVAL_SEED, MATCH_KEYS, ClipDataset, evaluate, known_frame0, to_device, to_metres
+from train import (
+    EVAL_SEED, MATCH_KEYS, ClipDataset, build_model, evaluate, fine_inputs, frames_dir,
+    known_frame0, to_device, to_metres,
+)
 from genpoint3d.models.flow import sample as flow_sample
 from genpoint3d.models.regress import refine
 
@@ -56,7 +57,8 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
         ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
         vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
         kx0 = known_frame0(b) if anchor_frame0 else None
-        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                    **fine_inputs(model, b, amp))
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             if method == "regress":
                 pred = refine(model, anchor, num_frames=traj.shape[1],
@@ -87,7 +89,12 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
 #   shuffle-pos     right patches, scrambled 3D positions
 #   swap-id         another clip's query ID cards
 #   blind           no features at all -- the forecasting null embedding
-ABLATIONS = ("none", "swap-features", "noise-features", "shuffle-pos", "swap-id", "blind")
+#   swap-frames     another clip's RGB frames, for the relative finder's CNN
+#   no-fine         no RGB frames: the relative finder is skipped
+# The first five are about DINOv3 and leave the frames alone; on a checkpoint
+# without the relative finder the last two change nothing.
+ABLATIONS = ("none", "swap-features", "noise-features", "shuffle-pos", "swap-id", "blind",
+             "swap-frames", "no-fine")
 
 
 class Ablated:
@@ -120,6 +127,10 @@ class Ablated:
                 # to_device turns an empty tensor into None, and the model skips
                 # cross-attention entirely -- no features, no positions.
                 b["context"] = b["patch_xyz"] = b["id_card"] = torch.zeros(0)
+            elif self.kind == "swap-frames":
+                b["frames"] = b["frames"].roll(1, 0)
+            elif self.kind == "no-fine":
+                b["frames"] = torch.zeros(0)
             yield b
 
 
@@ -127,6 +138,9 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="best.pt or ckpt.pt from a run")
     p.add_argument("--cache", required=True, help="cache DIRECTORY to score")
+    p.add_argument("--frames-cache", default=None,
+                   help="--fine checkpoints only: RGB frames of --cache's clips,"
+                        " from scripts/cache_frames.py at the checkpoint's --fine-res")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--points", type=int, default=None,
                    help="default: whatever the checkpoint trained with")
@@ -191,37 +205,7 @@ def main() -> int:
           + (f"{refine_iters} refinement iterations" if method == "regress"
              else f"{args.sample_steps} sampling steps"), flush=True)
 
-    model = PointDiT(dim=targs["dim"], depth=targs["depth"],
-                     num_heads=targs["heads"], cross_attn=has_feats,
-                     feat_dim=feat_dim,
-                     adapter_depth=targs.get("adapter_depth", 1),
-                     upsample=targs.get("upsample", 1),
-                     traj_scale=(TRAJ_SCALE_DISP if targs.get("target", "absolute") == "displacement"
-                                 else TRAJ_SCALE),
-                     displacement=targs.get("target", "absolute") == "displacement",
-                     # Absent means trained before the lookup was fixed, and a
-                     # checkpoint has to be evaluated the way it was trained.
-                     legacy_lookup=bool(targs.get("legacy_lookup", 1)),
-                     time_norm=bool(targs.get("time_norm", 0)),
-                     # Absent means a checkpoint from before the prior existed.
-                     locality=bool(targs.get("locality", 0)),
-                     correlate=bool(targs.get("correlate", 0)),
-                     # Absent means trained with the flat prior and the random
-                     # projections; their parameters are what the file holds.
-                     locality_mode=targs.get("locality_mode", "legacy"),
-                     locality_wide=targs.get("locality_wide", 8.0),
-                     corr_mode=targs.get("corr_mode", "legacy"),
-                     # Absent means a checkpoint from before the flag existed,
-                     # and every one of those was causal.
-                     causal=bool(targs.get("causal", 1)),
-                     costvol=bool(targs.get("costvol", 0)),
-                     cv_k=targs.get("cv_k", 16),
-                     cv_support=targs.get("cv_support", 8),
-                     # Absent means a checkpoint from before the match could be
-                     # trained: no head in the file, the raw cosine in the model.
-                     match_learn=bool(targs.get("match_learn", 0)),
-                     match_dim=targs.get("match_dim", 64),
-                     match_topk=targs.get("match_topk", 1)).to(device)
+    model = build_model(targs, feat_dim, has_feats).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 
@@ -234,7 +218,10 @@ def main() -> int:
                     norm_mode=targs.get("norm_mode", "median"),
                     target=targs.get("target", "absolute"),
                     # Absent means trained on the ID cards as they were cached.
-                    fix_idcard=bool(targs.get("fix_idcard", 0))),
+                    fix_idcard=bool(targs.get("fix_idcard", 0)),
+                    frames=(frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
+                            if targs.get("fine", 0) else None),
+                    features=bool(targs.get("dino", 1))),
         batch_size=args.batch, shuffle=False, num_workers=4,
     )
 

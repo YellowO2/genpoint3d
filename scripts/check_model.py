@@ -17,6 +17,11 @@ that otherwise shows up as "training is mysteriously bad".
  10. match head     starts as the raw cosine, is the MLP it claims to be, trains
  11. true patch     a point placed on a patch's own surface point is in that patch
  12. top-k match    K candidates are K different places, start as the K=1 model, train
+ 13. projection     the relative finder's pixel is the camera's pixel
+ 14. fine window    a window reads the cells it says it reads, at every pyramid level
+ 15. fine finder    starts as the model without it, looks where the guess is, and
+                    its CNN is trained through a map that four passes share
+ 16. CNN alone      with DINOv3 off the finder is the only image input, and is live
 
 The model is built the way a run builds it (displacement target, its scale,
 cost volume off) and the scene has a run's proportions: patches on a grid 0.05
@@ -31,12 +36,15 @@ import torch
 import torch.nn.functional as F
 
 from genpoint3d.data.transform import TRAJ_SCALE_DISP
+from genpoint3d.eval.metrics import _project, _to_camera_t
 from genpoint3d.geometry import batch_unproject
 from genpoint3d.models.encoder import VisualEncoder, patch_centre_xyz
+from genpoint3d.models.fine import FineFinder, image_projection, project
 from genpoint3d.models.match import (
     match_accuracy_topk, match_ce, nms_peaks, raw_cosine, true_patch,
 )
 from genpoint3d.models.model import PointDiT
+from genpoint3d.models.regress import regress_loss
 
 B, T, N, G, D, FEAT = 2, 8, 5, 12, 64, 48
 P = G * G
@@ -527,6 +535,204 @@ def check_true_patch() -> bool:
                                     "they cannot have, on 12x12 and 24x24 (want 0)")
 
 
+# The relative finder's scene: 64 px frames, so a 16x16 map of 4 px cells, and
+# two pyramid levels, whose windows reach 8 cells -- small enough that "far
+# from the point" exists inside the frame.
+RES, FINE = 64, dict(fine=True, fine_levels=2)
+
+
+def cameras(anchor: torch.Tensor):
+    """A camera per frame that keeps `anchor` (B, N, 3) well inside the frame:
+    intrinsics, extrinsics and frame size as a batch holds them, and a clip
+    normalisation that is not the identity."""
+    torch.manual_seed(1)
+    hw = torch.tensor([[480, 640]] * B)
+    K = torch.zeros(B, T, 3, 3)
+    K[..., 0, 0], K[..., 1, 1], K[..., 2, 2] = 500.0, 520.0, 1.0
+    K[..., 0, 2], K[..., 1, 2] = 320.0, 240.0
+    E = torch.eye(4).repeat(B, T, 1, 1)
+    E[:, 1:, :3, 3] = torch.randn(B, T - 1, 3) * 0.02           # the camera drifts
+    scale, mean = torch.tensor([2.0, 0.5])[:B], torch.randn(B, 3) * 0.1
+    # Chosen so the normalised anchor is the scene's: metres = p * scale + mean.
+    return K, E, hw, scale, mean
+
+
+def check_projection(anchor) -> bool:
+    """A position in the model's own units, through `_lookup_pos` and the one
+    matrix `image_projection` builds, must land on the pixel the metric's
+    camera puts it at -- the path `tapvid3d_metrics` scores with, which shares
+    no code with it. scripts/check_transform.py repeats this against Kubric's
+    own 2D tracks."""
+    m = model()
+    K, E, hw, scale, mean = cameras(anchor)
+    x = torch.randn(B, T, N, 3) * 0.3
+    pos = m._lookup_pos(x, anchor)                               # scene-normalised
+    uv, z = project(pos, image_projection(K, E, hw, scale, mean))
+    metres = pos * scale[:, None, None, None] + mean[:, None, None]
+    cam = _to_camera_t(metres, E)
+    want = _project(cam, K)
+    err = (uv * hw.flip(-1)[:, None, None] - want).abs().max().item()
+    zerr = (z - cam[..., 2]).abs().max().item()
+    return report("projection", err < 1e-3 and zerr < 1e-5,
+                  f"worst disagreement with the metric's camera {err:.1e} px on a "
+                  f"640x480 frame, depth {zerr:.1e} m (want 0)")
+
+
+def check_fine_window() -> bool:
+    """A map whose every cell holds its own (x, y) index reads back the
+    coordinates it was sampled at. At level l a pooled cell holds the mean
+    index of the 2^l x 2^l cells under it, so the same test says the pyramid's
+    cells are where `_windows` believes they are, and that the window's
+    offsets are `2^l` level-0 cells apart."""
+    f = FineFinder(levels=3, radius=3)
+    h = w = 32
+    ys, xs = torch.meshgrid(torch.arange(h).float(), torch.arange(w).float(), indexing="ij")
+    fmap = torch.stack([xs, ys])[None]                           # (1, 2, h, w)
+    # Far enough from the border that the coarsest window stays inside.
+    cell = 14 + torch.rand(1, N, 2) * 3
+    worst = 0.0
+    for lvl, win in enumerate(f._windows(fmap, cell)):
+        want = cell[:, :, None] + f.delta * 2 ** lvl
+        worst = max(worst, (win - want).abs().max().item())
+    return report("fine window", worst < 1e-4,
+                  f"worst misread over 3 levels {worst:.1e} cells (want 0)")
+
+
+def check_fine(x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
+    """The relative finder beside DINOv3."""
+    K, E, hw, scale, mean = cameras(anchor)
+    proj = image_projection(K, E, hw, scale, mean)
+    frames = torch.randint(0, 255, (B, T, RES, RES, 3), dtype=torch.uint8)
+    cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    x = x * 0.1          # guesses that stay in the frame
+    m = model(**FINE)
+    fmap = m.fine.encode(frames)
+    fine = dict(fine_map=fmap, fine_proj=proj)
+
+    # Built last and read through zeros: every other weight is the plain
+    # model's, and so is the output.
+    with torch.no_grad():
+        plain = model()(x, k, anchor, **cond)
+        same = torch.equal(m(x, k, anchor, **cond, **fine), plain)
+    extra = [n for n in model().state_dict() if "fine" in n]
+    out = [report("fine starts off", same and not extra,
+                  f"--fine 1 at step 0 {'equals' if same else 'DIFFERS from'} the model "
+                  f"without it; --fine 0 adds {len(extra)} params (want 0)")]
+
+    # Readers opened by hand, as the cost volume's gate is above.
+    for lin in (m.fine_cond, m.fine_tok):
+        torch.nn.init.normal_(lin.weight, std=0.5)
+    with torch.no_grad():
+        base = m(x, k, anchor, **cond, **fine)
+        # Where each point's guess is drawn, in cells of the map.
+        uv, _ = project(m._lookup_pos(x, anchor), proj)
+        cell = (uv * (RES // 4) - 0.125).round().long()          # (B, T, N, 2)
+        # The cell under one point's guess in one visible frame...
+        hit = fmap.clone()
+        cx, cy = cell[0, 1, 0]
+        hit[0, 1, :, cy, cx] += 1.0
+        d_hit = (m(x, k, anchor, **cond, fine_map=hit, fine_proj=proj) - base).abs().max().item()
+        # ...and every cell further from any guess or query than a window reaches.
+        d = (torch.stack(torch.meshgrid(torch.arange(RES // 4), torch.arange(RES // 4),
+                                        indexing="xy"), -1)[None, None, None]
+             - cell[:, :, :, None, None]).abs().amax(-1)          # (B, T, N, h, w)
+        far = d.amin(2) > 3 * 2 + 3                               # (B, T, h, w)
+        # Frame 0 is also read around the query, which is the frame-0 guess.
+        miss = fmap + far[:, :, None] * 1.0
+        d_far = (m(x, k, anchor, **cond, fine_map=miss, fine_proj=proj) - base).abs().max().item()
+        # A frame the model may not see must not reach it through the CNN.
+        hid = fmap.clone(); hid[:, CUT:] += 1.0
+        d_hid = (m(x, k, anchor, **cond, fine_map=hid, fine_proj=proj) - base)[:, :CUT].abs().max().item()
+    out.append(report("fine looks here", d_hit > 1e-8 and d_far < 1e-8 and far.any().item(),
+                      f"the cell under a guess moved output {d_hit:.1e} (want >0), "
+                      f"{int(far.sum())} cells out of every window's reach {d_far:.1e} (want 0)"))
+    out.append(report("fine not leaking", d_hid < 1e-8,
+                      f"masked-frame CNN features moved visible output {d_hid:.1e} (want 0)"))
+
+    # One map, four passes, a backward after each: what a regress step does.
+    # What that leaves on the map, and on every weight outside the CNN, must
+    # be the gradient of the same loss back-propagated in one piece.
+    m.train()
+    x1 = torch.randn(B, T, N, 3)
+    grads = lambda: {n: p.grad.clone() for n, p in m.named_parameters() if p.grad is not None}
+    worst = lambda a, b: max(((a[n] - b[n]).abs().max() / b[n].abs().max().clamp_min(1e-12)).item()
+                             for n in b)
+    m.zero_grad()
+    one = fmap.clone().requires_grad_()
+    with torch.enable_grad():
+        loss, _ = regress_loss(m, x1, anchor, iters=4, **cond, fine_map=one, fine_proj=proj)
+        loss.backward()
+    want = grads()
+    m.zero_grad()
+    leaf = fmap.clone().requires_grad_()
+    try:
+        split, _ = regress_loss(m, x1, anchor, iters=4, backward=1.0, **cond,
+                                fine_map=leaf, fine_proj=proj)
+        err = max(worst(grads(), want),
+                  ((leaf.grad - one.grad).abs().max() / one.grad.abs().max()).item())
+        size = leaf.grad.abs().max().item()
+        ok = err < 1e-3 and size > 0 and abs(split.item() - loss.item()) < 1e-5
+        note = (f"four backward passes vs one: worst gradient mismatch {err:.1e} of its "
+                f"size (want 0), gradient on the map {size:.1e} (want >0)")
+    except RuntimeError as e:
+        ok, note = False, f"{e}"
+    out.append(report("fine shared map", ok, note))
+
+    # And `replay` must carry what is on the map into the CNN as one backward
+    # through the whole batch would. In fp64: a clip at a time and all at once
+    # round differently, and through instance norms fp32 shows it.
+    cnn = m.fine.double()
+    g = torch.randn_like(fmap, dtype=torch.float64)
+    cnn.zero_grad()
+    with torch.enable_grad():
+        cnn._features(frames.flatten(0, 1)).unflatten(0, (B, T)).backward(g)
+    want = {n: p.grad.clone() for n, p in cnn.fnet.named_parameters()}
+    cnn.zero_grad()
+    leaf = cnn.encode(frames).requires_grad_()
+    leaf.grad = g
+    cnn.replay(frames, leaf)
+    got = {n: p.grad for n, p in cnn.fnet.named_parameters()}
+    err, size = worst(got, want), min(v.abs().max().item() for n, v in got.items() if "weight" in n)
+    out.append(report("fine replay", err < 1e-9 and size > 0,
+                      f"a clip at a time vs all at once: worst CNN gradient mismatch {err:.1e} "
+                      f"(want 0), smallest weight gradient {size:.1e} (want >0)"))
+    return out
+
+
+def check_cnn_alone(x, k, anchor, ctx, vm, idc, pxyz) -> list[bool]:
+    """--dino 0 --fine 1: no DINOv3 input exists to be given, and a regression
+    starting from "nothing moves" -- an all-zero input -- still has a gradient
+    to start learning from."""
+    K, E, hw, scale, mean = cameras(anchor)
+    proj = image_projection(K, E, hw, scale, mean)
+    frames = torch.randint(0, 255, (B, T, RES, RES, 3), dtype=torch.uint8)
+    torch.manual_seed(0)
+    m = PointDiT(dim=D, depth=2, num_heads=4, cross_attn=False, displacement=True,
+                 traj_scale=TRAJ_SCALE_DISP, **FINE)
+    dino = [n for n in m.state_dict()
+            if n.split(".")[0] in ("frame_proj", "patch_pos", "id_feature_proj", "cross_blocks",
+                                   "null_ctx", "up_conv", "match_head")
+            or n.startswith(("match_", "cv_", "corr_"))]
+    out = [report("CNN alone", not dino, f"--dino 0 leaves {len(dino)} parameters that read "
+                                         f"DINOv3 {dino[:3] or ''} (want 0)")]
+
+    zero = torch.zeros(B, T, N, 3)
+    m.zero_grad()
+    m(zero, torch.zeros(B), anchor, fine_map=m.fine.encode(frames), fine_proj=proj).sum().backward()
+    g = m.fine_tok.weight.grad.abs().max().item()
+    out.append(report("CNN alone live", g > 0,
+                      f"from an all-zero guess the finder's reader has gradient {g:.1e} (want >0)"))
+
+    torch.nn.init.normal_(m.fine_tok.weight, std=0.5)
+    with torch.no_grad():
+        a = m(zero, torch.zeros(B), anchor, fine_map=m.fine.encode(frames), fine_proj=proj)
+        other = m.fine.encode(frames.roll(1, 0))
+        b = m(zero, torch.zeros(B), anchor, fine_map=other, fine_proj=proj)
+    d = (a - b).abs().max().item()
+    out.append(report("CNN alone sees", d > 1e-8, f"another clip's frames moved output {d:.1e} (want >0)"))
+    return out
+
+
 def check_grads(m, x, k, anchor, ctx, vm, idc, pxyz) -> tuple[bool, bool, bool]:
     """The last one is what the old matching failed: its projections sat behind
     gates initialised at zero, so at step 0 their gradient was exactly zero and
@@ -591,6 +797,10 @@ def main() -> int:
     ok &= all(check_match_head(*args))
     ok &= all(check_topk(*args))
     ok &= check_true_patch()
+    ok &= check_projection(args[2])
+    ok &= check_fine_window()
+    ok &= all(check_fine(*args))
+    ok &= all(check_cnn_alone(*args))
     ok &= check_encoder()
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")
     return 0 if ok else 1

@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from genpoint3d.models.fine import FineFinder, project
 from genpoint3d.models.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
     zero_init,
@@ -69,6 +70,9 @@ class PointDiT(nn.Module):
         match_learn: bool = False,
         match_dim: int = 64,
         match_topk: int = 1,
+        fine: bool = False,
+        fine_levels: int = 4,
+        fine_radius: int = 3,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -256,6 +260,27 @@ class PointDiT(nn.Module):
             self.match_more = zero_init(
                 nn.Linear(5 * (match_topk - 1), dim, bias=False), almost=False)
 
+        # [relative finder] a CNN on the RGB frames at 4 px per cell, and a
+        # 7x7 window of it around the current guess compared with a 7x7 window
+        # around the query; see `fine.py`. The one part of the model that sees
+        # anything finer than a 16 px patch, and the one part that needs
+        # nothing from DINOv3: it stands with `cross_attn` off, which is the
+        # CNN-only tracker the references are.
+        #
+        # Read twice, both from zero, so step 0 is exactly the model without
+        # it. Into the conditioning, where the cost volume goes; and into the
+        # token, because the table says WHICH WAY the match lies and the
+        # conditioning can only rescale channels -- without DINOv3 a
+        # regression's first guess is all zeros, and a token of zeros has
+        # nothing to rescale. Built last, like the two above.
+        if fine and legacy_lookup:
+            raise ValueError("the relative finder projects the point's position, "
+                             "which legacy_lookup does not compute")
+        self.fine = FineFinder(fine_levels, fine_radius) if fine else None
+        if fine:
+            self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
+            self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -396,6 +421,8 @@ class PointDiT(nn.Module):
         visual_mask: torch.Tensor | None = None,
         id_card: torch.Tensor | None = None,
         patch_xyz: torch.Tensor | None = None,
+        fine_map: torch.Tensor | None = None,
+        fine_proj: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x:           (B, T, N, 3)    noisy trajectory, in model units
@@ -409,6 +436,11 @@ class PointDiT(nn.Module):
         id_card:     (B, N, D)       DINOv3 feature sampled at the query  [3]
         patch_xyz:   (B, T, P, 3)    each patch's 3D position, `anchor`'s space.
                                      Required with `context`: *what* plus *where*.
+        fine_map:    (B, T, C, h, w) CNN features from `FineFinder.encode`
+        fine_proj:   (B, T, 3, 4)    `anchor`'s space -> the image, per frame
+                                     (`fine.image_projection`). Required with
+                                     `fine_map`; the pair is independent of the
+                                     four above.
 
         returns      (B, T, N, 3)    predicted velocity
 
@@ -481,6 +513,22 @@ class PointDiT(nn.Module):
             cv = self.cv_mlp(torch.cat([cost.flatten(3), off.flatten(3)], dim=-1))
             if visual_mask is not None:
                 cv = cv * visual_mask[..., None, None]
+
+        # --- [relative finder] the window at the guess vs the window at the query ---
+        # The lookup the comment at the top says is unnecessary in 3D, done
+        # anyway: the pixels are in the image, so that is where to look. The
+        # support window is read around the anchor's own projection into frame
+        # 0 rather than around the cached query pixel, so both windows go
+        # through one camera model and cannot disagree by a convention.
+        fine = None
+        if self.fine is not None and fine_map is not None:
+            with torch.autocast(device_type=dev.type, enabled=False):
+                proj = fine_proj.float()
+                uv, _ = project(pos, proj)
+                uv0, _ = project(anchor.float()[:, None], proj[:, :1])
+            fine = self.fine(fine_map, uv, uv0[:, 0])
+            if visual_mask is not None:
+                fine = fine * visual_mask[..., None, None]
 
         # --- [correlation] template vs every patch, on the RAW features ---
         # Read before the adapter overwrites `context`. The model previously had
@@ -556,6 +604,8 @@ class PointDiT(nn.Module):
             cond = cond + self.match_gate * self.match_emb(match_xyz)  # "and here"
         if cv is not None:
             cond = cond + self.cv_gate * cv.to(cond.dtype)   # "and this is the fit"
+        if fine is not None:
+            cond = cond + self.fine_cond(fine).to(cond.dtype)  # "and this, to the pixel"
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         # --- [feature adapter] raw backbone width -> model width, plus position ---
@@ -609,6 +659,8 @@ class PointDiT(nn.Module):
             h = h + self.match_proj(match[..., :5])
             if self.match_topk > 1:
                 h = h + self.match_more(match[..., 5:])
+        if fine is not None:
+            h = h + self.fine_tok(fine).to(h.dtype)
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in

@@ -31,11 +31,14 @@ import rerun
 import rerun.blueprint as rrb
 
 from genpoint3d.eval.metrics import tapvid3d_metrics
-from genpoint3d.models.model import PointDiT
 from genpoint3d.models.flow import sample as flow_sample
+from genpoint3d.models.regress import refine
 from genpoint3d.data.cache import CachedClip
 from genpoint3d.viz import rerun_log as rl
-from train import ClipDataset, known_frame0, split, to_device, to_metres
+from train import (
+    ClipDataset, build_model, fine_inputs, frames_dir, known_frame0, split, to_device,
+    to_metres,
+)
 
 GT, PRED = (0.2, 0.9, 0.3), (0.95, 0.25, 0.2)
 
@@ -45,6 +48,9 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True)
     p.add_argument("--cache", required=True, help="cache DIRECTORY")
+    p.add_argument("--frames-cache", default=None,
+                   help="--fine checkpoints only: RGB frames of --cache's clips,"
+                        " from scripts/cache_frames.py at the checkpoint's --fine-res")
     p.add_argument("--root", default=None,
                    help="raw Kubric dir, for the RGB and point cloud backdrop."
                         " The cache does not keep frames, so without this you"
@@ -78,17 +84,7 @@ def main() -> int:
     print(f"clip {seq_id} | step {ckpt['step']} | {device}"
           f" | target {targs.get('target', 'absolute')}", flush=True)
 
-    model = PointDiT(dim=targs["dim"], depth=targs["depth"], num_heads=targs["heads"],
-                     cross_attn=probe.context is not None,
-                     feat_dim=probe.feat_dim,
-                     time_norm=bool(targs.get("time_norm", 0)),
-                     locality=bool(targs.get("locality", 0)),
-                     locality_mode=targs.get("locality_mode", "legacy"),
-                     locality_wide=targs.get("locality_wide", 8.0),
-                     corr_mode=targs.get("corr_mode", "legacy"),
-                     match_learn=bool(targs.get("match_learn", 0)),
-                     match_dim=targs.get("match_dim", 64),
-                     match_topk=targs.get("match_topk", 1)).to(device)
+    model = build_model(targs, probe.feat_dim, probe.context is not None).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -98,7 +94,10 @@ def main() -> int:
         ClipDataset(clips, args.points or targs["points"], resample=False,
                     norm_mode=targs.get("norm_mode", "median"),
                     target=targs.get("target", "absolute"),
-                    fix_idcard=bool(targs.get("fix_idcard", 0))),
+                    fix_idcard=bool(targs.get("fix_idcard", 0)),
+                    frames=(frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
+                            if targs.get("fine", 0) else None),
+                    features=bool(targs.get("dino", 1))),
         batch_size=1, shuffle=False,
     )
     b = to_device(next(iter(loader)), device)
@@ -107,9 +106,16 @@ def main() -> int:
     vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
     kx0 = known_frame0(b) if targs.get("anchor_frame0", 0) else None
 
-    pred = flow_sample(model, anchor, num_frames=traj.shape[1],
-                       steps=args.sample_steps, known_x0=kx0,
-                       context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz)
+    cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                **fine_inputs(model, b))
+    # The checkpoint's own method: a network trained to refine its guess is
+    # not one that denoises.
+    if targs.get("method", "flow") == "regress":
+        pred = refine(model, anchor, num_frames=traj.shape[1],
+                      iters=targs.get("refine_iters", 4), known_x0=kx0, **cond)
+    else:
+        pred = flow_sample(model, anchor, num_frames=traj.shape[1],
+                           steps=args.sample_steps, known_x0=kx0, **cond)
 
     pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
     score = lambda x: tapvid3d_metrics(x, gt_m, vis, b["intrinsics_256"], b["extrinsics"])

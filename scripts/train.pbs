@@ -28,6 +28,10 @@ cd $ROOT/genpoint3d
 # Defined before the tee below, which names the log after the run.
 OUT=${OUT:-run3493_apdloss}
 ARGS=${ARGS:-}
+# FRAMES=cache/kubric_frames384 (relative to ~/scratch) is the RGB frames cache
+# that a --fine 1 model reads, from scripts/cache_frames.pbs.
+FRAMES=${FRAMES:-}
+if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
 
 exec > >(tee -a $ROOT/${OUT}.live.log) 2>&1
 
@@ -45,6 +49,9 @@ git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 # Overridable so a variant does not need the file edited, which is how two jobs
 # ended up writing to the same output directory once:
 #   qsub -v OUT=run3493_disp,ARGS="--target displacement" ... scripts/train.pbs
+# The relative finder (--fine 1) beside DINOv3, and on its own (--dino 0):
+#   qsub -v OUT=fine_a,FRAMES=cache/kubric_frames384,ARGS="--fine 1 ..." ... scripts/train.pbs
+#   qsub -v OUT=fine_b,FRAMES=cache/kubric_frames384,ARGS="--fine 1 --dino 0 ..." ... scripts/train.pbs
 python scripts/train.py \
   --cache $ROOT/cache/kubric \
   --out outputs/$OUT \
