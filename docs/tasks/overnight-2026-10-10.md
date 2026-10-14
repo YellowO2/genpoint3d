@@ -139,3 +139,22 @@ the no-noise method around its clean guess. Start from CoTracker3's weights.
 Training then needs the real frames as well as the cached DINOv3 features, so
 the cache and data loading change. Test at 24 grid first against run21_rg_m24
 and read <1 / <2 / <4 px; if they rise, run at 48 grid.
+
+## Relative finder results (read 2026-10-14)
+
+CoTracker3's CNN (4 px cells, 4 zoom levels, 7x7 windows, trained with the
+model, `--fine 1`, commit 09e3f3e). No-noise method, same settings as run21 /
+run23. Moving points, val (train), then val <1/<2/<4/<8/<16 px; all points val / train.
+
+| Run | Setting | Steps | Moving | Per tolerance (val) | All points |
+|---|---|---|---|---|---|
+| run21_rg_m24 | 24 grid, no CNN | 4k | 0.455 (0.495) | 0.16 / 0.23 / 0.41 / 0.64 / 0.83 | — |
+| run25_fine_a24 | 24 grid, DINOv3 + CNN | 4k | 0.625 (0.671) | 0.30 / 0.47 / 0.65 / 0.80 / 0.91 | 0.776 / 0.834 |
+| run25_fine_b24 | 24 grid, CNN only (`--dino 0`) | 4k | 0.428 (0.489) | 0.20 / 0.28 / 0.40 / 0.55 / 0.72 | 0.566 / 0.695 |
+| run23_rg_m48 | 48 grid, no CNN | 6k | 0.550 (0.599) | — | 0.743 / 0.783 |
+| **run26_fine_a48** | 48 grid, DINOv3 + CNN | 6k | **0.702 (0.763)** | 0.40 / 0.58 / 0.74 / 0.85 / 0.94 | **0.833 / 0.877** |
+
+The CNN lifts every tolerance, <1 px included. CNN only is much worse than
+DINOv3 + CNN, mostly on the rough part (<16 px 0.72 against 0.91): with no
+whole-frame search it loses points that move far. Keep both. Train is now
+ahead of val (run26 moving 0.763 against 0.702).
