@@ -94,7 +94,7 @@ def run_speed(args, clips, feat_dim, has_feats, device) -> int:
     nvidia-smi's GPU-Util is no substitute: it reports the fraction of time at
     least one kernel ran, so a tiny kernel running constantly reads as 100%.
 
-    Timed here rather than read off train.py, whose printed s/it is a cumulative
+    Timed here rather than read off a training run, whose printed s/it is a cumulative
     average including startup and validation pauses.
     """
     print(f"{'workers':>7} {'batch':>6} {'s/it':>8} {'clips/s':>9} {'peak GB':>9}"

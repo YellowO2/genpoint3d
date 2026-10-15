@@ -2,7 +2,7 @@
 Rerun logging helpers, adapted from TAPIP3D's utils/rerun_visualizer.py
 (log_video, log_trajectory, setup_visualizer, save_recording) so we don't
 depend on cloning their whole repo. Only difference: accepts channel-last
-(T, H, W, 3) rgb/frames, matching dataset.py's KubricSample, instead of
+(T, H, W, 3) rgb/frames, matching KubricSample, instead of
 their channel-first (T, 3, H, W).
 """
 

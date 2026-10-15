@@ -223,7 +223,7 @@ class Block(nn.Module):
     """One attention + one feed-forward, both residual and both AdaLN-conditioned.
 
     The same class serves temporal and spatial attention -- only the tensor
-    reshape and the RoPE positions differ, and `model.py` handles those.
+    reshape and the RoPE positions differ, and `PointDiT.py` handles those.
     """
 
     def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int) -> None:

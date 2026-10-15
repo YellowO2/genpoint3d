@@ -1,4 +1,4 @@
-"""Predict a batch's tracks, and the training objective on it, without learning."""
+"""Predict a batch's tracks and its training loss, without learning."""
 
 import torch
 

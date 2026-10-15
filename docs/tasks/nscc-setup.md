@@ -91,7 +91,7 @@ This one wants a GPU (it runs DINOv3 over every frame), so submit it rather
 than running it on the login node:
 
 ```bash
-python scripts/preprocess.py \
+python -m genpoint3d.prepare.main \
   --root ~/scratch/kubric \
   --out  ~/scratch/cache/kubric500.pt \
   --features --feat-dim 256 --image-size 384 --points 256
@@ -141,7 +141,7 @@ source ~/scratch/venvs/fyp/bin/activate
 
 nvidia-smi                  # now this works -- we are on a GPU node
 
-python scripts/train.py \
+python -m genpoint3d.train.main \
   --cache ~/scratch/cache/kubric500.pt \
   --steps 20000 --batch 16 --points 128 \
   --dim 256 --depth 6 --heads 4 \

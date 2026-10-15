@@ -12,7 +12,7 @@ The checkpoint is 102 MB; what is saved is the CNN alone, 10 MB.
 Run once, on a machine with internet (the NSCC login node):
 
     python scripts/fetch_fnet.py --out ~/scratch/weights/cotracker3_fnet.pt
-    python scripts/train.py ... --fine 1 --fine-init ~/scratch/weights/cotracker3_fnet.pt
+    python -m genpoint3d.train.main ... --fine 1 --fine-init ~/scratch/weights/cotracker3_fnet.pt
 """
 
 import argparse

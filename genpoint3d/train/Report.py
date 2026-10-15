@@ -1,4 +1,4 @@
-"""One validation's verdict: the step, the training loss so far, the scores."""
+"""One validation's verdict: the step, the loss so far and the scores."""
 
 from dataclasses import dataclass
 

@@ -60,7 +60,7 @@ def report(name: str, ok: bool, detail: str) -> bool:
 
 
 def model(**kw) -> PointDiT:
-    """The model as scripts/train.py builds it for a run, scaled down."""
+    """The model as a training run builds it, scaled down."""
     torch.manual_seed(0)
     kw = {"costvol": False, **kw}
     return PointDiT(dim=D, depth=2, num_heads=4, cross_attn=True, feat_dim=FEAT,

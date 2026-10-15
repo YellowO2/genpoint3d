@@ -1,4 +1,4 @@
-"""Score predicted tracks in metres: APD, its baselines, and where points land."""
+"""Score predicted tracks in metres against the truth and baselines."""
 
 import torch
 

@@ -1,6 +1,6 @@
 """
 Measure `TRAJ_SCALE` -- the dataset-level constant in
-`genpoint3d/data/transform.py`.
+`genpoint3d/tools/traj_scale.py`.
 
 Flow matching mixes the denoising target with `x0 ~ N(0, I)`, so the target
 must have roughly unit variance -- otherwise the interpolant is nearly pure
@@ -33,7 +33,7 @@ from genpoint3d.tools.traj_scale import TRAJ_SCALE
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--cache", required=True, help="cache DIRECTORY from scripts/preprocess.py")
+    p.add_argument("--cache", required=True, help="cache DIRECTORY from genpoint3d.prepare")
     p.add_argument("--norm-mode", default="median",
                    choices=["median", "mean", "centroid_max"])
     # A displacement target is much smaller than an absolute one -- the scene's
@@ -91,7 +91,7 @@ def main() -> int:
     print(f"  per-clip std: median {per_clip.median():.4f}"
           f"  min {per_clip.min():.4f}  max {per_clip.max():.4f}")
     print(f"\n  TRAJ_SCALE = {scale:.4f}      (current: {TRAJ_SCALE})")
-    print("\nPaste that into TRAJ_SCALE in genpoint3d/data/transform.py.")
+    print("\nPaste that into TRAJ_SCALE in genpoint3d/tools/traj_scale.py.")
     if len(files) < 50:
         print("NOTE: too few clips for a real constant -- this is a sanity "
               "check, not a calibration.")

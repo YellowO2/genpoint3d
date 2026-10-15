@@ -41,7 +41,7 @@ def sample_cutoff(T: int, min_context: int = 1, max_context: int | None = None) 
 
 def apply_conditioning_mask(sample, T_C: int) -> MaskedSample:
     """
-    sample: a KubricSample from dataset.py
+    sample: a KubricSample from KubricSequenceDataset
     Zeroes out (rather than deletes) frames >= T_C, and returns a boolean
     mask so the model/feature-extractor knows which frames are "real" vs
     "blank placeholder" -- the actual null-embedding substitution happens

@@ -1,4 +1,4 @@
-"""Train the tracker on cached clips, scoring and saving it as it goes.
+"""Fit the tracker to cached clips, scoring and saving it as it goes.
 
 Many clips, held-out validation, checkpoints. The question is whether the model
 learns anything that transfers to clips it has never seen.
@@ -33,8 +33,8 @@ from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.learn import learn
 from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.model.set_up_model import set_up_model
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.main import score
+from genpoint3d.train.validation_settings import validation_settings
 
 
 def train(settings: Settings):
@@ -47,7 +47,7 @@ def train(settings: Settings):
     model = build_model(settings, clips.feat_dim, clips.has_feats)
     model = set_up_model(model, settings, hardware)
     optimiser = Optimiser(model, settings, hardware)
-    judging = ScoreSettings.for_training(settings, hardware)
+    judging = validation_settings(settings, hardware)
     progress = Progress(settings)
     for step in range(1, settings.steps + 1):
         for batch in loaders.micro_batches(settings.accum):
@@ -57,10 +57,12 @@ def train(settings: Settings):
         progress.step(step, optimiser.lr())
         if step % settings.val_every == 0 or step == settings.steps:
             optimiser.swap_in_average(model)
-            scores = score(model, loaders.val, judging)
+            loader = loaders.val
+            scores = score(model, loader, judging)
             fit_scores = None
             if loaders.fit is not None:
-                fit_scores = score(model, loaders.fit, judging)
+                loader = loaders.fit
+                fit_scores = score(model, loader, judging)
             report = progress.report(step, scores, fit_scores)
             saver.save(report, model, clips)
             optimiser.swap_out_average(model)

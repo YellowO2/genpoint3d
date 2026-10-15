@@ -24,7 +24,7 @@ from torch import nn
 from genpoint3d.train.model.FineFinder import FineFinder
 from genpoint3d.train.model.MatchHead import MatchHead
 from genpoint3d.train.tools.camera import project
-from genpoint3d.train.tools.layers import (
+from genpoint3d.train.model.tools.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
     zero_init,
 )

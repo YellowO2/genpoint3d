@@ -1,4 +1,4 @@
-"""Score a model on clips it does not learn from: val loss, APD and the match."""
+"""Measure a model on clips it does not learn from."""
 
 import torch
 

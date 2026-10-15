@@ -1,4 +1,4 @@
-"""Turn one cached clip into one training sample, normalised and subsampled."""
+"""Turn one cached clip into a normalised, subsampled training sample."""
 
 import math
 from pathlib import Path

@@ -5,7 +5,7 @@ cache but gives no way to ask "how does it do on clips it was TRAINED on". That
 question is the bias/variance check: a model that cannot score well on data it
 has already seen is underfitting, and no amount of extra data will help it.
 
-The split is reproduced exactly as `train.py:split` does it -- same generator,
+The split is reproduced exactly as `genpoint3d/train/data/split_clips.py` does it -- same generator,
 same seed, same val_frac -- so the clips here are the ones that run really did
 train or validate on.
 

@@ -1,4 +1,4 @@
-"""The raw clips not yet in the cache, read one by one, skipping broken ones."""
+"""The raw clips not yet in the cache, read one by one."""
 
 import logging
 from pathlib import Path

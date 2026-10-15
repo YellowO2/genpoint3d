@@ -1,9 +1,10 @@
-"""
+"""Project 3D points to pixels, and depth maps back to 3D points.
+
 3D <-> 2D projection helpers, adapted from TAPIP3D's utils/common_utils.py
 (batch_unproject / batch_project), trimmed of their training-only decorators
-and third_party dependencies -- kept only what visualize.py needs.
+and third_party dependencies.
 
-Convention (matches dataset.py): intrinsics in pixel units, extrinsics is
+Convention (matches `KubricSample`): intrinsics in pixel units, extrinsics is
 world-to-camera (OpenCV axes: X right, Y down, Z forward).
 """
 

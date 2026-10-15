@@ -152,11 +152,11 @@ cutoff. The catch is storage as features are far larger than the video.
 
 The cache boundary is drawn here on purpose: cache what is frozen, train
 what is learnable. Anything downstream of this line is trainable, so it
-must not live in encoder.py -- preprocess.py runs that file once and
+must not live in VisualEncoder.py -- genpoint3d/prepare runs that file once and
 throws the layers away.
 
 The paper's spec says: take MULTIPLE backbone layers, concatenate them,
-and upsample 2x. Half of that exists -- `preprocess.py --layers 6 12`
+and upsample 2x. Half of that exists -- `genpoint3d.prepare.main --layers 6 12`
 concatenates layers -- but it is UNUSED, because it needs its own cache and
 because reading genpt's config showed it is not what the references do.
 
@@ -193,7 +193,7 @@ Both sit before the sum, and that is the point: W(f + p) = Wf + Wp, so
 nothing downstream can rebalance "what" against "where" once they are
 added. The balance has to be learnable on this side of the +.
 
-These layers used to sit at the end of encoder.py, upstream of the cache.
+These layers used to sit at the end of VisualEncoder.py, upstream of the cache.
 Training could never reach them, so the model's entire interface to the
 visual world was frozen at random initialisation -- and each preprocessing
 run rolled its own, so a cache built over several jobs held clips in

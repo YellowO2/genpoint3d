@@ -1,7 +1,7 @@
-# PENDING TASK — answer these, then compare against genpoint3d/models/flow.py
+# PENDING TASK — answer these, then compare against genpoint3d/train/tools/flow.py
 
 Deferred 2026-09-11 to get results for the supervisor first. The working
-implementation now lives in `genpoint3d/models/flow.py` — try answering
+implementation now lives in `genpoint3d/train/tools/flow.py` — try answering
 these BEFORE reading it.
 
 ```
@@ -10,7 +10,7 @@ these BEFORE reading it.
 WHAT THIS FILE IS FOR
 ================================================================================
 
-`model.py` gives us a network. Here is its exact contract:
+`PointDiT.py` gives us a network. Here is its exact contract:
 
     velocity = model(x, k, anchor)
 

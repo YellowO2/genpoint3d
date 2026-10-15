@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from genpoint3d.train.tools.layers import bounded_exp, log_param
+from genpoint3d.train.model.tools.layers import bounded_exp, log_param
 
 
 class MatchHead(nn.Module):

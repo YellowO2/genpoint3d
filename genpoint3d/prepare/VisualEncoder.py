@@ -11,7 +11,7 @@ is then read two different ways (see docs/map.html):
     tokens()     whole grid   -> searched by cross-attention in [4c]
 
 **Nothing learnable lives here, deliberately.** This module's output is what
-`preprocess.py` writes to the cache, and anything cached is frozen for the life
+`genpoint3d/prepare` writes to the cache, and anything cached is frozen for the life
 of the cache. A projection and a 3D-position embedding used to sit at the end of
 `forward`, so the model's entire interface to the visual world was a pair of
 randomly initialised layers that training could never reach: run once, output
@@ -194,7 +194,7 @@ class VisualEncoder(nn.Module):
         *where*, and the two are combined inside the model where the combining
         weights can be learnt. See `patch_centre_xyz` for which point is taken.
 
-        Units are whatever `pointmap` is in. `preprocess.py` passes METRES, so
+        Units are whatever `pointmap` is in. `genpoint3d/prepare` passes METRES, so
         the cache stores a fact and the load path normalises it -- the same rule
         the trajectory follows.
         """

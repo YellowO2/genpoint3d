@@ -8,13 +8,13 @@ diagram in `map.html` covers what exists.
 Decided to skip for now, with the reason.
 
 - Visibility head — `Linear(D -> 1)` + BCE, occluded or off-screen per frame.
-  `model.py` has only `Linear(dim, 3)` for position. AJ and OA both score
+  `PointDiT.py` has only `Linear(dim, 3)` for position. AJ and OA both score
   occlusion, so neither is reportable until this exists.
 - Autoregressive sliding window — generate W frames, slide by stride S, feed
   the previous window back as a causal prefix. How the paper handles video
   longer than one window. We do all 24 frames at once, which only works because
   Kubric clips are exactly 24 frames.
-- Diffusion forcing — independent noise level per frame. `flow.py` accepts
+- Diffusion forcing — independent noise level per frame. `train/tools/flow.py` accepts
   `per_frame_k` already, it is just off. Needed for stable autoregressive
   rollout.
 - Point-count factorization — reshape N points into random factor pairs each

@@ -11,7 +11,7 @@ Each clip is copied to a NEW directory with every field untouched except
 `patch_xyz`. The source is only ever read: a training job may be using it.
 
 What is needed from the raw data is the depth maps and nothing else. The
-pointmap is rebuilt exactly as `preprocess.py` built it -- native-resolution
+pointmap is rebuilt exactly as `genpoint3d/prepare` built it -- native-resolution
 depth, unprojected with the intrinsics and extrinsics stored in the clip
 itself, in metres -- and the grid size is read off the cached `patch_xyz`, so
 24x24 and 48x48 caches both work with no flag.
@@ -24,7 +24,7 @@ is refused rather than written with positions from a different scene.
 Nothing else in a clip depends on `patch_xyz`: the scale statistics are
 measured from the full pointmap, and the ID card and trajectory never touch it.
 
-Clip names are kept, and `train.py` splits by position in the sorted name list,
+Clip names are kept, and training splits by position in the sorted name list,
 so a complete destination has the same train/val split as its source. An
 INCOMPLETE one does not -- the script says so if the counts differ.
 
@@ -162,7 +162,7 @@ def main() -> int:
     n_dst = len(list(dst.glob("*.pt")))
     print(f"\n{n_dst} of {len(clips)} clips in {dst}")
     if n_dst != len(clips):
-        print("INCOMPLETE: train.py splits by position in the sorted clip list, so this"
+        print("INCOMPLETE: training splits by position in the sorted clip list, so this"
               " directory does NOT have the source's train/val split yet. Re-run to resume.")
         return 1
     return 0

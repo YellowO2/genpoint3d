@@ -192,7 +192,7 @@ different query points:
       query_uv equal   : False
 
 Intrinsics and trajectories are untouched by `--image-size` -- the encoder
-resizes images internally and `preprocess.py` clones the transform's
+resizes images internally and `genpoint3d.prepare` clones the transform's
 intrinsics -- so this is point sampling, not geometry. Consequences:
 
 - APD across two different caches is not directly comparable. Compare each run

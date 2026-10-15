@@ -18,10 +18,3 @@ class ScoreSettings:
     oracle_axis: str = ""         # "x", "y" or "z": that channel set to the truth
     scaling: str = "median"       # the protocol's global rescale, or "none"
     min_motion_px: float = 0.0    # score only points that move more than this
-
-    @classmethod
-    def for_training(cls, settings, hardware) -> "ScoreSettings":
-        """A training run's validation: the run's method, the defaults otherwise."""
-        return cls(device=hardware.device, amp=hardware.amp, method=settings.method,
-                   refine_iters=settings.refine_iters,
-                   anchor_frame0=settings.anchor_frame0, loss_type=settings.loss_type)

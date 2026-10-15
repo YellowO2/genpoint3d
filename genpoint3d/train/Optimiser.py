@@ -1,4 +1,4 @@
-"""Step the weights: AdamW on a warmup-then-cosine schedule, and their average."""
+"""Step the weights with AdamW, and keep their running average."""
 
 import logging
 

@@ -162,7 +162,7 @@ Flow matching mixes the target with `x0 ~ N(0, I)`. A target at std 0.025 is
 40x quieter than the noise, so the model learns to output `-x0` — and the loss
 still falls, so it looks like it is working.
 
-This is why `TRAJ_SCALE` exists in `data/transform.py`, and why
+This is why `TRAJ_SCALE` exists in `genpoint3d/tools/traj_scale.py`, and why
 `scripts/check_transform.py` asserts `0.3 < target_std < 3.0`.
 
 ---
@@ -225,7 +225,7 @@ round trips happened one after another with the GPU idle throughout.
 The earlier 4.0 s/clip was not a fair baseline -- those clips had just been
 downloaded, so they were still in page cache.
 
-**Fix:** a `ThreadPoolExecutor` over the frame loop (`data/kubric.py`).
+**Fix:** a `ThreadPoolExecutor` over the frame loop (`genpoint3d/prepare/KubricSequenceDataset.py`).
 Threads, not processes: the time is spent waiting on I/O, and both the file
 read and `cv2.imdecode` release the GIL. Tune with `KUBRIC_READ_WORKERS`.
 
@@ -267,7 +267,7 @@ Useful conversions:
 Kubrics Data is from tappid
 ## Query points are sampled randomly per cache -- static baselines will differ
 
-`preprocess.py` chooses WHICH points to track at random, so two caches built
+`genpoint3d.prepare` chooses WHICH points to track at random, so two caches built
 from the same clips hold different query points. Verified on clip 000000:
 `intrinsics` are equal between `cache/kubric` and `cache/kubric_768`, but
 `query_uv` is not.

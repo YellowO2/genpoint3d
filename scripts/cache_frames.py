@@ -2,7 +2,7 @@
 Cache each clip's RGB frames, small, beside an existing feature cache.
 
 The feature cache holds what DINOv3 made of the frames and not the frames. The
-relative finder (`genpoint3d/models/fine.py`) trains a CNN on the pixels, so
+relative finder (`genpoint3d/train/model/FineFinder.py`) trains a CNN on the pixels, so
 training needs them again -- and decoding 24 PNGs per clip per step off Lustre
 is what the feature cache was built to avoid.
 
@@ -58,7 +58,7 @@ def main() -> int:
     p.add_argument("--raw", required=True, help="raw Kubric root the cache was built from")
     p.add_argument("--dst", required=True, help="frames directory to write")
     p.add_argument("--res", type=int, default=384,
-                   help="side of the square frame, which is train.py's --fine-res")
+                   help="side of the square frame, which is training's --fine-res")
     p.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     p.add_argument("--limit", type=int, default=None, help="only the first N clips still to do")
     args = p.parse_args()
@@ -105,7 +105,7 @@ def main() -> int:
     n_dst = len(have & set(clips))
     print(f"\n{n_dst} of {len(clips)} clips in {dst}")
     if n_dst != len(clips):
-        print("INCOMPLETE: train.py --fine 1 refuses a frames cache that is missing"
+        print("INCOMPLETE: training with --fine 1 refuses a frames cache that is missing"
               " a clip. Re-run to resume.")
         return 1
     return 0

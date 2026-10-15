@@ -12,11 +12,11 @@ It needs no cache rebuild, which is why it outranks resolution and width.
 
 `ClipDataset` divides the whole target by one scalar, `traj_scale`:
 
-    traj = traj / self.traj_scale        # scripts/train.py
+    traj = traj / self.traj_scale        # genpoint3d/train/data/ClipDataset.py
 
 and `to_metres` inverts that with one scalar per clip:
 
-    scene = pts * ts + b["norm_offset"]  # scripts/train.py:312
+    scene = pts * ts + b["norm_offset"]  # genpoint3d/train/tools/batch.py
 
 A log ratio and a lateral displacement are different quantities with different
 spreads, so **one scalar cannot bring both to unit variance**. Flow matching
@@ -53,8 +53,8 @@ likely to be wrong, and it is silent: a NaN would show up only as a dead loss.**
 
 1. Extend `scripts/calibrate_traj_scale.py` with `--target logdepth`, printing
    the two constants separately. It reads the cache and is minutes on gdev.
-2. Put them in `transform.py` as `TRAJ_SCALE_LOGDEPTH = (s_xy, s_z)`. Leave it
-   `None` until measured, and have `train.py` refuse to start on `None` -- a
+2. Put them in `genpoint3d/tools/traj_scale.py` as `TRAJ_SCALE_LOGDEPTH = (s_xy, s_z)`. Leave it
+   `None` until measured, and have training refuse to start on `None` -- a
    wrong scale trains to a plausible-looking loss and a useless model.
 3. Make `traj_scale` per-channel through `ClipDataset`, `NormStats` and
    `to_metres`.

@@ -1,4 +1,4 @@
-"""Learn from one micro-batch: the losses' gradients, left in the model."""
+"""Run one micro-batch forward and backward, leaving its gradients."""
 
 import torch
 

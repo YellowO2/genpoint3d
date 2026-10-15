@@ -298,6 +298,6 @@ From `TAPIP3D/evaluation/tapvid3d_metrics.py`:
   monocular depth is scale-ambiguous. With Kubric GT depth we would use
   `scaling="none"`.
 
-**DONE** -- `genpoint3d/eval/metrics.py` implements this, and
+**DONE** -- `genpoint3d/train/tools/metrics.py` implements this, and
 `use_fixed_metric_threshold` defaults to False, so our APD *is* APD3D. Our 0.386
 is their 38.6, directly comparable to the Kubric3D table above.
