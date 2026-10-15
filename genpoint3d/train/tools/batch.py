@@ -30,6 +30,40 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     return b
 
 
+def random_cutoff(b: dict, min_context: int) -> torch.Tensor:
+    """(B,) a cutoff per clip, uniform in [min_context, T], as Gen-points
+    trains: T is pure tracking, anything less forecasts the rest.
+
+    Drawn on the CPU from torch's global generator, so a seeded run draws the
+    same cutoffs whatever the device."""
+    B, T = b["traj"].shape[:2]
+    if not 1 <= min_context <= T:
+        raise ValueError(f"--min-context {min_context} must be in [1, {T}]: "
+                         "frame 0 is the query and always keeps its image")
+    return torch.randint(min_context, T + 1, (B,)).to(b["traj"].device)
+
+
+def visual_mask(b: dict, cutoff: torch.Tensor | None) -> torch.Tensor | None:
+    """(B, T) True where a frame keeps its image: the frames before each
+    clip's cutoff, every frame without one. None for a batch with nothing
+    visual in it.
+
+    Everything the model reads from a frame -- the DINOv3 features, the patch
+    positions, the match, the cost volume, the CNN's window -- is blanked
+    where this is False (`PointDiT.forward`; `scripts/check_forecast.py`
+    checks that nothing gets through).
+    """
+    if b["context"] is None and b["frames"] is None:
+        return None
+    B, T = b["traj"].shape[:2]
+    device = b["traj"].device
+    if cutoff is None:
+        return torch.ones(B, T, dtype=torch.bool, device=device)
+    if not (cutoff >= 1).all():
+        raise ValueError("a cutoff below 1 would hide frame 0, the query frame")
+    return torch.arange(T, device=device)[None] < cutoff[:, None]
+
+
 def known_frame0(b: dict) -> torch.Tensor:
     """(B, N, 3) frame 0 in model units.
 
@@ -108,7 +142,8 @@ def match_targets(model, b: dict, visual_mask: torch.Tensor):
     scores  (B, T, N, P) from `PointDiT.match_scores`, with their graph
     target  (B, T, N)    the patch the ground truth is drawn in
     valid   (B, T, N)    the point is visible and inside the frame, the frame
-                         has its image, and it is not frame 0
+                         has its image (is before the cutoff), and it is not
+                         frame 0
 
     Frame 0 is left out. The template is read from frame 0 at the point's own
     pixel, so the match there is right by construction: it would add nothing to

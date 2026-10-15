@@ -4,7 +4,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device
+from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, visual_mask
 from genpoint3d.train.tools.flow import flow_matching_loss, sample
 from genpoint3d.train.tools.regress import refine, regress_loss
 
@@ -27,7 +27,14 @@ class Predictor:
         b = to_device(batch, j.device, j.amp)
         traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
                                              b["context"], b["id_card"], b["patch_xyz"])
-        vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=j.device) if ctx is not None else None
+        # One cutoff for every clip, so the future scores are all the same
+        # forecast; without one, every frame keeps its image.
+        cutoff = None
+        if j.cutoff:
+            if j.cutoff >= traj.shape[1]:
+                raise ValueError(f"cutoff {j.cutoff} leaves none of {traj.shape[1]} frames to forecast")
+            cutoff = torch.full((traj.shape[0],), j.cutoff, device=j.device)
+        vm = visual_mask(b, cutoff)
 
         kx0 = known_frame0(b) if j.anchor_frame0 else None
         # The same autocast as the training step: a model trained in bf16 and

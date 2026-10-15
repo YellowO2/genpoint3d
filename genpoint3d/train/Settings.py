@@ -181,6 +181,23 @@ class Settings(argparse.Namespace):
                             "card. With --fine 1 that is a tracker on the CNN "
                             "alone, as the reference trackers are, and the query "
                             "is described by its window of CNN features")
+        p.add_argument("--random-cutoff", type=int, default=0, choices=[0, 1],
+                       help="forecasting, as Gen-points trains it: each clip draws "
+                            "a cutoff T_C uniform in [--min-context, T] and keeps "
+                            "the images of frames before it only; the model "
+                            "predicts every frame. T_C = T is pure tracking. 0 "
+                            "trains pure tracking, every run before it.")
+        p.add_argument("--min-context", type=int, default=2,
+                       help="--random-cutoff only: the fewest frames a clip "
+                            "keeps the images of. At least 1, frame 0 being the "
+                            "query frame.")
+        p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
+                       help="validate as a forecast: every clip keeps the images "
+                            "of frames before C only, and the scores are also "
+                            "reported apart for those frames (_obs) and the rest "
+                            "(_fut), with the stop and constant-velocity "
+                            "baselines beside the future ones. At least 2, which "
+                            "constant velocity needs. 0 validates pure tracking.")
         p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
         # Evaluate and checkpoint the averaged weights, not the jittering ones.
         # 0 disables. The paper lists EMA among its training ingredients.
@@ -200,4 +217,9 @@ class Settings(argparse.Namespace):
                             "APD should reach ~100%%; if it plateaus, the pipeline "
                             "has a bug rather than a data problem")
         p.add_argument("--seed", type=int, default=0)
-        return p.parse_args(argv, namespace=cls())
+        settings = p.parse_args(argv, namespace=cls())
+        if settings.eval_cutoff == 1 or settings.eval_cutoff < 0:
+            p.error("--eval-cutoff is 0 (off) or at least 2")
+        if settings.min_context < 1:
+            p.error("--min-context is at least 1: frame 0 always keeps its image")
+        return settings

@@ -5,7 +5,8 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, fine_inputs, known_frame0, match_targets, to_device,
+    apd_weight, fine_inputs, known_frame0, match_targets, random_cutoff, to_device,
+    visual_mask,
 )
 from genpoint3d.train.tools.flow import flow_matching_loss
 from genpoint3d.train.tools.matching import match_ce
@@ -19,8 +20,11 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     b = to_device(batch, hardware.device, amp)
     traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
                                          b["context"], b["id_card"], b["patch_xyz"])
-    # All-True: pure tracking. Every frame keeps its image.
-    vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=hardware.device) if ctx is not None else None
+    # Without --random-cutoff, all-True: pure tracking, every frame keeps its
+    # image. With it, each clip sees its frames up to its own cutoff and
+    # forecasts the rest; the loss still covers every frame.
+    cutoff = random_cutoff(b, settings.min_context) if settings.random_cutoff else None
+    vm = visual_mask(b, cutoff)
     w = apd_weight(b, traj) if settings.depth_scaled_loss else None
     kx0 = known_frame0(b) if settings.anchor_frame0 else None
     # Before any backward pass of the step, and shared by all of them.
@@ -33,6 +37,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
         # and one path serves both methods. The gradient adds to the
         # method's in the same buffers. Logged apart from `loss`, so
         # train_loss stays comparable with runs that do not have it.
+        # Only frames before the cutoff count: `valid` follows `vm`.
         scores, target, valid = match_targets(model, b, vm)
         ml = (match_ce(scores, model.match_head.tau(), target, valid).sum()
               / valid.sum().clamp(min=1))

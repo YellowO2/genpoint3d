@@ -8,11 +8,13 @@ from the TAP-Vid-3D benchmark, scored in metres. `apd_static` is the
 benchmark's own Static Baseline -- the query point assumed never to move --
 which is the bar a tracker has to clear.
 
-With a feature cache this trains pure TRACKING: every frame keeps its image, so
-`visual_mask` is all-True and the null embedding is never used. Masking is
-deliberately left off for the first learning run -- forecasting is far harder
-than tracking, and training both at once splits the signal between them. If
-tracking does not work, forecasting never would.
+With a feature cache this trains pure TRACKING by default: every frame keeps
+its image, so `visual_mask` is all-True and the null embedding is never used.
+`--random-cutoff 1` trains FORECASTING as Gen-points does: each clip keeps the
+images of its frames before a random cutoff, the rest get the null embedding,
+and the model still predicts every frame. `--eval-cutoff C` validates the same
+way with one cutoff for every clip, and scores observed and forecast frames
+apart (`_obs`, `_fut`).
 
 Without a feature cache this falls back to the step-2 model, which sees no
 images at all -- a pure motion prior rather than tracking.

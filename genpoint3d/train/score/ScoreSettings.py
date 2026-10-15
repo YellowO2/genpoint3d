@@ -18,3 +18,4 @@ class ScoreSettings:
     oracle_axis: str = ""         # "x", "y" or "z": that channel set to the truth
     scaling: str = "median"       # the protocol's global rescale, or "none"
     min_motion_px: float = 0.0    # score only points that move more than this
+    cutoff: int = 0               # frames from here on get no image; 0 = none

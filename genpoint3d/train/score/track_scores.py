@@ -82,5 +82,41 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
             for t in MOVING_THRESHOLDS:
                 m[f"moving_within_{t}"] = mv_m[f"pts_within_{t}"]
             m["apd_moving_static"] = s3(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
+            if j.cutoff:
+                m.update(_split_scores(pred_m, gt_m, vis, mv, b, j))
     out.update(m)
+    return out
+
+
+def _split_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
+    """With a cutoff C: the same two scores as above, all points and moving
+    points, on the observed frames (< C, `_obs`) and the forecast ones
+    (>= C, `_fut`) apart, and two baselines on the forecast frames.
+
+    The baselines are generous: they start from the TRUE positions at frames
+    C-2 and C-1, where the model has only its own estimate of them. A model
+    that beats them is forecasting; one that only matches them may still be
+    tracking its observed frames well and extrapolating no better.
+
+        stop      every forecast frame is the true position at frame C-1
+        cv        constant velocity from the true positions at C-2 and C-1
+    """
+    C, T = j.cutoff, gt_m.shape[1]
+    last, before = gt_m[:, C - 1:C], gt_m[:, C - 2:C - 1]
+    steps = (torch.arange(T, device=gt_m.device, dtype=gt_m.dtype) - (C - 1))
+    stop = last.expand_as(gt_m)
+    velocity = last + steps[None, :, None, None] * (last - before)
+    future = torch.arange(T, device=gt_m.device) >= C
+    out = {}
+    for name, points, scaling in (("apd", vis, j.scaling), ("apd_moving", moving, "none")):
+        for part, frames in (("_obs", ~future), ("_fut", future)):
+            mask = points & frames[None, :, None]
+            score = lambda p: tapvid3d_metrics(p, gt_m, mask, b["intrinsics_256"],
+                                               b["extrinsics"], scaling=scaling,
+                                               per_clip=True)["average_pts_within_thresh"]
+            out[name + part] = score(pred_m)
+            out[name + "_static" + part] = score(gt_m[:, :1].expand_as(gt_m))
+            if part == "_fut":
+                out[name + "_stop_fut"] = score(stop)
+                out[name + "_cv_fut"] = score(velocity)
     return out
