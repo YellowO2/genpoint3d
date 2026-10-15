@@ -24,14 +24,14 @@ def split_clips(cache: str, val_frac: float, seed: int) -> Clips:
         # one .pt per clip -- written incrementally so preprocessing resumes
         clips: list[Path | dict] = sorted(path.glob("*.pt"))
         if not clips:
-            raise SystemExit(f"no cached clips in {path} -- run genpoint3d.prepare first")
+            raise SystemExit(f"no cached clips in {path} -- run python -m genpoint3d.prepare.main first")
         probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False, mmap=True))
     else:
         clips = torch.load(path, weights_only=False)["clips"]  # legacy single file
         probe = CachedClip.from_dict(clips[0])
     if probe.stats is None:
         raise SystemExit(f"cache in {path} has no scale statistics -- "
-                         "re-run genpoint3d.prepare")
+                         "re-run python -m genpoint3d.prepare.main")
     # A cache written before the projection moved into the model holds features
     # that were already projected and already had position summed in, by layers
     # that no longer exist. Nothing in the shapes gives that away: training would
@@ -42,7 +42,7 @@ def split_clips(cache: str, val_frac: float, seed: int) -> Clips:
         raise SystemExit(
             f"cache in {path} has features but no patch_xyz -- it predates the "
             "trainable visual head and cannot be migrated. Re-run "
-            "genpoint3d.prepare --features"
+            "python -m genpoint3d.prepare.main --features"
         )
 
     g = torch.Generator().manual_seed(seed)

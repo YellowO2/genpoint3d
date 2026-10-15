@@ -5,7 +5,7 @@
 #   qsub -q normal -P personal-yhuang01 scripts/preprocess.pbs
 #   qsub -v OUT=cache/kubric_768,ARGS="--image-size 768" ... scripts/preprocess.pbs
 #
-# Adding clips to the EXISTING cache needs no variables: preprocess.py skips what
+# Adding clips to the EXISTING cache needs no variables: genpoint3d.prepare skips what
 # is already there. Keep the walltime under 2h for that and it routes to gdev,
 # which leaves the single g1 slot free for training.
 #
@@ -35,12 +35,12 @@ mkdir -p $ROOT/cache
 python -c "import torch; print('cuda ok:', torch.cuda.is_available())"
 
 # Defaults reproduce the cache every run so far has used. ARGS comes last so a
-# later --image-size or --layers wins, and preprocess.py refuses to resume a
+# later --image-size or --layers wins, and genpoint3d.prepare refuses to resume a
 # cache whose feature width does not match.
 OUT=${OUT:-cache/kubric}
 ARGS=${ARGS:-}
 
-python scripts/preprocess.py \
+python -m genpoint3d.prepare.main \
   --root $ROOT/kubric \
   --out  $ROOT/$OUT \
   --features --image-size 384 --points 256 $ARGS

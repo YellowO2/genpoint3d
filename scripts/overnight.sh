@@ -4,7 +4,7 @@
 #   nohup scripts/overnight.sh > ~/scratch/dl.log 2>&1 &
 #
 # Deliberately no `set -e`: if the download dies partway we still want to
-# preprocess whatever clips completed. preprocess.py skips incomplete clips
+# preprocess whatever clips completed. genpoint3d.prepare skips incomplete clips
 # and resumes, so a partial download costs nothing.
 
 CLIPS=${1:-3500}

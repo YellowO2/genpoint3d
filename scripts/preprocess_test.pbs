@@ -30,7 +30,7 @@ mkdir -p $ROOT/cache
 
 python -c "import torch; print('cuda ok:', torch.cuda.is_available())"
 
-python scripts/preprocess.py \
+python -m genpoint3d.prepare.main \
   --root $ROOT/kubric_test \
   --out  $ROOT/cache/kubric_test \
   --features --image-size 384 --points 256
