@@ -158,3 +158,10 @@ The CNN lifts every tolerance, <1 px included. CNN only is much worse than
 DINOv3 + CNN, mostly on the rough part (<16 px 0.72 against 0.91): with no
 whole-frame search it loses points that move far. Keep both. Train is now
 ahead of val (run26 moving 0.763 against 0.702).
+
+Scored like-for-like on 100 clips (fit_check, 2026-10-15), run26_fine_a48:
+standard scoring val 0.832 / train 0.894 (TAPIP3D 0.965); moving, no rescale,
+val 0.706 / train 0.776 (TAPIP3D 0.926). Eight correction rounds at test time
+instead of four: val 0.696, slightly worse. The model's step clock is i/(iters-1),
+so eight rounds also changes what each step is told, and this is not a clean
+"more rounds" test.
