@@ -58,6 +58,9 @@ POINTS=${POINTS:-}
 # of CACHE's clips, which a --fine 1 checkpoint needs.
 FRAMES=${FRAMES:-}
 [ -n "$FRAMES" ] && FR="--frames-cache $ROOT/$FRAMES" || FR=""
+# ITERS=8 overrides a regress checkpoint's refinement iterations at test time.
+ITERS=${ITERS:-}
+[ -n "$ITERS" ] && IT="--refine-iters $ITERS" || IT=""
 # Per job, not shared: split_dir.py clears the directory before relinking, so
 # two fit_check jobs pointed at one WORK would delete each other's links. The
 # three axis jobs are meant to run at the same time.
@@ -74,8 +77,8 @@ for SPLIT in train val; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}.json"
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}.json"
 done
 
 echo "=== FIT CHECK DONE ==="
