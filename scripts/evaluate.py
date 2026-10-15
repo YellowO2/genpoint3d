@@ -182,10 +182,21 @@ def main() -> int:
                         "Correcting any single axis removes part of the error "
                         "budget, so this is only informative run on all three: "
                         "depth is the problem only if z buys more than x and y.")
+    p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
+                   help="forecast: frames C on get no image, and the observed"
+                        " (_obs) and forecast (_fut) frames are scored apart,"
+                        " beside the stop/cv baselines from the true past and"
+                        " the own-stop one from the model's frame C-1. 0 = off")
+    p.add_argument("--samples", type=int, default=1, metavar="K",
+                   help="flow with --eval-cutoff: also score the oracle best of"
+                        " K forecasts (_fut_bestK). Regress is deterministic"
+                        " and ignores this")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
     args = p.parse_args()
+    if args.eval_cutoff == 1 or args.eval_cutoff < 0 or args.samples < 1:
+        p.error("--eval-cutoff is 0 (off) or at least 2, and --samples at least 1")
 
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     targs = ckpt["args"]
@@ -244,7 +255,8 @@ def main() -> int:
                             anchor_frame0=anchor_frame0, loss_type=loss_type,
                             space=args.space, oracle_axis=args.oracle_axis,
                             scaling=args.scaling, min_motion_px=args.min_motion_px,
-                            method=method, refine_iters=refine_iters)
+                            method=method, refine_iters=refine_iters,
+                            cutoff=args.eval_cutoff, samples=args.samples)
     m = score(model, loader, judging)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
@@ -254,12 +266,20 @@ def main() -> int:
             print(f"  {k:<26} {m[k]:.4f}")
     if "moving_clips" in m:
         print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(clips)}")
+    forecast = [k for k in m if k.endswith("_obs") or "_fut" in k]
+    if forecast:
+        print(f"\n  forecast, frames {args.eval_cutoff}+ without images:")
+        for k in forecast:
+            print(f"  {k:<26} {m[k]:.4f}")
     print()
     for t in (1, 2, 4, 8, 16):
         print(f"  pts_within_{t:<15} {m[f'pts_within_{t}']:.4f}")
 
     if per_frame is not None:
         print("\n  APD by frame -- does error start at frame 0 or accumulate?")
+        if args.eval_cutoff:
+            print("    NOTE: per-frame APD always gives every frame its image;"
+                  " --eval-cutoff does NOT apply to it.")
         if args.space != "3d" or args.min_motion_px or args.oracle_axis:
             print("    NOTE: per-frame APD is always 3D, over all visible points,"
                   " with no oracle axis.\n    --space, --min-motion-px and"
@@ -300,7 +320,8 @@ def main() -> int:
         Path(args.out).write_text(json.dumps(
             {"ckpt": args.ckpt, "cache": args.cache, "step": ckpt["step"],
              "sample_steps": args.sample_steps, "method": method,
-             "refine_iters": refine_iters, "clips": len(clips), **m},
+             "refine_iters": refine_iters, "clips": len(clips),
+             "eval_cutoff": args.eval_cutoff, "samples": args.samples, **m},
             indent=2))
         print(f"\nwrote {args.out}")
     return 0

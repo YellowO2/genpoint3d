@@ -21,6 +21,9 @@ class Predictor:
         self.model, self.judging = model, judging
         model.eval()
         self.gen = torch.Generator(device=judging.device).manual_seed(EVAL_SEED)
+        # The extra best-of-k samples draw from their own noise, so asking for
+        # more of them never changes the first sample, or its score.
+        self.more_gen = torch.Generator(device=judging.device).manual_seed(EVAL_SEED + 1)
 
     def __call__(self, batch: dict) -> Prediction:
         model, j = self.model, self.judging
@@ -41,6 +44,8 @@ class Predictor:
         # scored in fp32 is being scored on numerics it never saw.
         cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                     **fine_inputs(model, b, j.amp))
+        # Regress is deterministic: k samples would be k copies of one answer.
+        others = ()
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             if j.method == "regress":
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
@@ -52,7 +57,12 @@ class Predictor:
                                           loss_type=j.loss_type, **cond)
                 pred = sample(model, anchor, num_frames=traj.shape[1], steps=j.steps,
                               generator=self.gen, known_x0=kx0, **cond)
-        return Prediction(batch=b, visual_mask=vm, tracks=pred, loss=l.item())
+                others = tuple(
+                    sample(model, anchor, num_frames=traj.shape[1], steps=j.steps,
+                           generator=self.more_gen, known_x0=kx0, **cond)
+                    for _ in range(j.samples - 1 if cutoff is not None else 0))
+        return Prediction(batch=b, visual_mask=vm, tracks=pred, loss=l.item(),
+                          others=others)
 
     def done(self) -> None:
         self.model.train()

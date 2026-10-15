@@ -83,12 +83,13 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
                 m[f"moving_within_{t}"] = mv_m[f"pts_within_{t}"]
             m["apd_moving_static"] = s3(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
             if j.cutoff:
-                m.update(_split_scores(pred_m, gt_m, vis, mv, b, j))
+                others = [to_metres(o, b) for o in prediction.others]
+                m.update(_split_scores(pred_m, others, gt_m, vis, mv, b, j))
     out.update(m)
     return out
 
 
-def _split_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
+def _split_scores(pred_m, others, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
     """With a cutoff C: the same two scores as above, all points and moving
     points, on the observed frames (< C, `_obs`) and the forecast ones
     (>= C, `_fut`) apart, and two baselines on the forecast frames.
@@ -100,6 +101,16 @@ def _split_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
 
         stop      every forecast frame is the true position at frame C-1
         cv        constant velocity from the true positions at C-2 and C-1
+
+    And one that is not generous, as it starts from the model's own estimate:
+
+        ownstop   every forecast frame is the MODEL's position at frame C-1.
+                  A forecast that does no better than this adds nothing to
+                  freezing the model's own track.
+
+    With `others` (more flow samples, k in all), `_fut_best{k}` is the oracle
+    best of k, the usual score of a generative forecaster: each point keeps
+    the sample nearest the truth over its visible forecast frames.
     """
     C, T = j.cutoff, gt_m.shape[1]
     last, before = gt_m[:, C - 1:C], gt_m[:, C - 2:C - 1]
@@ -107,6 +118,8 @@ def _split_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
     stop = last.expand_as(gt_m)
     velocity = last + steps[None, :, None, None] * (last - before)
     future = torch.arange(T, device=gt_m.device) >= C
+    ownstop = pred_m[:, C - 1:C].expand_as(pred_m)
+    best = _best_of(pred_m, others, gt_m, vis & future[None, :, None]) if others else None
     out = {}
     for name, points, scaling in (("apd", vis, j.scaling), ("apd_moving", moving, "none")):
         for part, frames in (("_obs", ~future), ("_fut", future)):
@@ -119,4 +132,18 @@ def _split_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
             if part == "_fut":
                 out[name + "_stop_fut"] = score(stop)
                 out[name + "_cv_fut"] = score(velocity)
+                out[name + "_ownstop_fut"] = score(ownstop)
+                if best is not None:
+                    out[name + f"_fut_best{len(others) + 1}"] = score(best)
     return out
+
+
+def _best_of(pred_m, others, gt_m, mask):
+    """Per point, the sample with the least mean error (metres) on `mask`'s
+    frames. A point with no such frame keeps the first sample."""
+    cands = torch.stack([pred_m, *others])                       # (K, B, T, N, 3)
+    err = (cands - gt_m).norm(dim=-1)                            # (K, B, T, N)
+    err = (err * mask).sum(2) / mask.sum(1).clamp(min=1)         # (K, B, N)
+    pick = err.argmin(0)                                         # (B, N)
+    idx = pick[None, :, None, :, None].expand(1, *pred_m.shape)
+    return cands.gather(0, idx)[0]

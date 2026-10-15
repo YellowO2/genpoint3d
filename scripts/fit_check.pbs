@@ -61,6 +61,14 @@ FRAMES=${FRAMES:-}
 # ITERS=8 overrides a regress checkpoint's refinement iterations at test time.
 ITERS=${ITERS:-}
 [ -n "$ITERS" ] && IT="--refine-iters $ITERS" || IT=""
+# CUTOFF=12 forecasts: frames 12 on get no image, scored apart (_obs, _fut).
+# SAMPLES=5 with it also scores the oracle best of 5 flow forecasts.
+CUTOFF=${CUTOFF:-}
+[ -n "$CUTOFF" ] && FC="--eval-cutoff $CUTOFF" || FC=""
+SAMPLES=${SAMPLES:-}
+[ -n "$SAMPLES" ] && SM="--samples $SAMPLES" || SM=""
+# SPLITS=val scores only the validation clips.
+SPLITS=${SPLITS:-train val}
 # Per job, not shared: split_dir.py clears the directory before relinking, so
 # two fit_check jobs pointed at one WORK would delete each other's links. The
 # three axis jobs are meant to run at the same time.
@@ -68,17 +76,17 @@ WORK=$ROOT/fit_check/${PBS_JOBNAME:-job}
 
 # val_frac and seed must match the run's run.json, or these are not the clips
 # it actually trained on.
-for SPLIT in train val; do
+for SPLIT in $SPLITS; do
   python scripts/split_dir.py --cache "$CACHE" --split $SPLIT --n "$N" \
     --val-frac 0.1 --seed 0 --out "$WORK/$SPLIT"
 done
 
-for SPLIT in train val; do
+for SPLIT in $SPLITS; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}.json"
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT $FC $SM \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}.json"
 done
 
 echo "=== FIT CHECK DONE ==="

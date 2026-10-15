@@ -37,10 +37,16 @@ ARGS=${ARGS:-}
 #   qsub -v SRC=cache/kubric_test,DST=cache/kubric_test_frames384,RAW=<test download> scripts/cache_frames.pbs
 FRAMES=${FRAMES:-}
 if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
+# CUTOFF=12 forecasts: frames 12 on get no image, scored apart (_obs, _fut).
+# SAMPLES=5 with it also scores the oracle best of 5 flow forecasts.
+CUTOFF=${CUTOFF:-}
+SAMPLES=${SAMPLES:-}
+if [ -n "$CUTOFF" ]; then ARGS="--eval-cutoff $CUTOFF $ARGS"; fi
+if [ -n "$SAMPLES" ]; then ARGS="--samples $SAMPLES $ARGS"; fi
 
 python scripts/evaluate.py \
   --ckpt "$CKPT" --per-frame $ARGS \
   --cache $ROOT/cache/kubric_test \
-  --out "$(dirname "$CKPT")/test_metrics.json"
+  --out "$(dirname "$CKPT")/test_metrics${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}.json"
 
 echo "=== EVALUATE DONE ==="

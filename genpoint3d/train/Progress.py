@@ -86,15 +86,15 @@ class Progress:
 
 def _forecast_line(m: dict) -> str:
     """With --eval-cutoff: APD on the observed frames, then on the forecast
-    ones beside the stop and constant-velocity baselines, all points and then
+    ones beside the stop, constant-velocity and own-stop baselines, all points and then
     moving points. Empty without a cutoff."""
     if "apd_fut" not in m:
         return ""
     return (f"  OBS {m['apd_obs']:.3f} mv {m['apd_moving_obs']:.3f}"
             f"  FUT {m['apd_fut']:.3f} (stop {m['apd_stop_fut']:.3f}"
-            f" cv {m['apd_cv_fut']:.3f})"
+            f" cv {m['apd_cv_fut']:.3f} own {m['apd_ownstop_fut']:.3f})"
             f" mv {m['apd_moving_fut']:.3f} (stop {m['apd_moving_stop_fut']:.3f}"
-            f" cv {m['apd_moving_cv_fut']:.3f})")
+            f" cv {m['apd_moving_cv_fut']:.3f} own {m['apd_moving_ownstop_fut']:.3f})")
 
 
 def _match_line(m: dict, prefix: str = "") -> str:

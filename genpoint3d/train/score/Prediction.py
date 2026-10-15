@@ -11,3 +11,4 @@ class Prediction:
     visual_mask: torch.Tensor | None     # (B, T) which frames had their image
     tracks: torch.Tensor                 # (B, T, N, 3) in model units
     loss: float                          # the method's objective on the batch
+    others: tuple = ()                   # more samples like `tracks`, for best-of-k
