@@ -34,6 +34,23 @@ import torch
 THRESHOLDS = (1, 2, 4, 8, 16)
 PIXEL_TO_FIXED_METRIC_THRESH = {1: 0.01, 2: 0.04, 4: 0.16, 8: 0.64, 16: 2.56}
 
+# The pixel thresholds APD averages over; the moving-points score is logged at
+# each of them as well.
+MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
+
+
+def resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:
+    """(T, 3, 3) pixel intrinsics, rescaled as if the frame's short side were
+    `short_side` px. Focal lengths and principal point scale together.
+
+    The benchmark defines its pixel thresholds on a frame whose short side is
+    256 px, and scores with intrinsics resized to match (TAPIP3D
+    `evaluation/metrics.py`, following DeepMind's `evaluate_model.py`).
+    """
+    K = K.clone()
+    K[..., :2, :] *= short_side / min(hw)
+    return K
+
 
 def _to_camera_t(pts: torch.Tensor, extrinsics: torch.Tensor) -> torch.Tensor:
     """(B,T,N,3) points in the frame-0 camera -> each point in ITS OWN frame's camera.

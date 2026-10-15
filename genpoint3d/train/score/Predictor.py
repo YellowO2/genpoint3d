@@ -1,0 +1,51 @@
+"""Predict a batch's tracks, and the training objective on it, without learning."""
+
+import torch
+
+from genpoint3d.train.score.Prediction import Prediction
+from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device
+from genpoint3d.train.tools.flow import flow_matching_loss, sample
+from genpoint3d.train.tools.regress import refine, regress_loss
+
+# Scoring starts every sample from the same noise, so a checkpoint has one
+# score rather than a slightly different one each time it is asked.
+EVAL_SEED = 0
+
+
+class Predictor:
+    """Holds the model in eval mode, and the noise every sample starts from,
+    until `done` hands the model back for training."""
+
+    def __init__(self, model, judging: ScoreSettings) -> None:
+        self.model, self.judging = model, judging
+        model.eval()
+        self.gen = torch.Generator(device=judging.device).manual_seed(EVAL_SEED)
+
+    def __call__(self, batch: dict) -> Prediction:
+        model, j = self.model, self.judging
+        b = to_device(batch, j.device, j.amp)
+        traj, anchor, vis, ctx, idc, pxyz = (b["traj"], b["anchor"], b["visibility"],
+                                             b["context"], b["id_card"], b["patch_xyz"])
+        vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=j.device) if ctx is not None else None
+
+        kx0 = known_frame0(b) if j.anchor_frame0 else None
+        # The same autocast as the training step: a model trained in bf16 and
+        # scored in fp32 is being scored on numerics it never saw.
+        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                    **fine_inputs(model, b, j.amp))
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
+            if j.method == "regress":
+                l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
+                                    loss_type=j.loss_type, iters=j.refine_iters, **cond)
+                pred = refine(model, anchor, num_frames=traj.shape[1],
+                              iters=j.refine_iters, known_x0=kx0, **cond)
+            else:
+                l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
+                                          loss_type=j.loss_type, **cond)
+                pred = sample(model, anchor, num_frames=traj.shape[1], steps=j.steps,
+                              generator=self.gen, known_x0=kx0, **cond)
+        return Prediction(batch=b, visual_mask=vm, tracks=pred, loss=l.item())
+
+    def done(self) -> None:
+        self.model.train()

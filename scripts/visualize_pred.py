@@ -10,7 +10,7 @@ them by eye:
     green   ground truth
     red     prediction
 
-Pair it with `train.py --overfit N`. A model that has seen two clips thousands
+Pair it with `genpoint3d.train.main --overfit N`. A model that has seen two clips thousands
 of times should reproduce them exactly; anything else visible here is a bug in
 the pipeline rather than a shortage of data.
 
@@ -36,10 +36,11 @@ from genpoint3d.train.tools.metrics import tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 import rerun_log as rl
-from train import (
-    ClipDataset, build_model, fine_inputs, frames_dir, known_frame0, split, to_device,
-    to_metres,
-)
+from genpoint3d.train.Settings import Settings
+from genpoint3d.train.data.ClipDataset import ClipDataset
+from genpoint3d.train.data.split_clips import split_clips
+from genpoint3d.train.model.build_model import build_model
+from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
 
 GT, PRED = (0.2, 0.9, 0.3), (0.95, 0.25, 0.2)
 
@@ -71,8 +72,8 @@ def main() -> int:
     # PERMUTATION, which is not the first N files on disk. Picking by filename
     # would draw clips the model never saw and call the result memorisation.
     if targs.get("overfit"):
-        tr, va, _, _ = split(args.cache, targs["val_frac"], targs["seed"])
-        clips = (tr + va)[: targs["overfit"]]
+        split = split_clips(args.cache, targs["val_frac"], targs["seed"])
+        clips = (split.train + split.val)[: targs["overfit"]]
         print(f"overfit checkpoint: showing one of the {len(clips)} clips it"
               " was trained on", flush=True)
     else:
@@ -85,7 +86,7 @@ def main() -> int:
     print(f"clip {seq_id} | step {ckpt['step']} | {device}"
           f" | target {targs.get('target', 'absolute')}", flush=True)
 
-    model = build_model(targs, probe.feat_dim, probe.context is not None).to(device)
+    model = build_model(Settings(**targs), probe.feat_dim, probe.context is not None).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -96,7 +97,7 @@ def main() -> int:
                     norm_mode=targs.get("norm_mode", "median"),
                     target=targs.get("target", "absolute"),
                     fix_idcard=bool(targs.get("fix_idcard", 0)),
-                    frames=(frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
+                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
                             if targs.get("fine", 0) else None),
                     features=bool(targs.get("dino", 1))),
         batch_size=1, shuffle=False,

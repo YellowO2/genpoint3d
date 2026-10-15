@@ -37,7 +37,8 @@ import torch.nn.functional as F
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import sample_at
 from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
-from train import _resize_intrinsics, split
+from genpoint3d.train.data.split_clips import split_clips
+from genpoint3d.train.tools.metrics import resize_intrinsics
 
 
 @torch.no_grad()
@@ -89,7 +90,7 @@ def main() -> int:
     args = p.parse_args()
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, val_clips, _, _ = split(args.cache, args.val_frac, args.seed)
+    val_clips = split_clips(args.cache, args.val_frac, args.seed).val
     clips = val_clips[: args.n]
     keys = [f"pts_within_{t}" for t in THRESHOLDS] + ["average_pts_within_thresh"]
     sums = {}      # (subset, method) -> [sum per key], count
@@ -99,7 +100,7 @@ def main() -> int:
         clip = CachedClip.from_dict(torch.load(path, weights_only=False))
         gt = clip.traj.to(dev).float()[None]
         vis = clip.visibility.to(dev)[None]
-        K = _resize_intrinsics(clip.intrinsics, clip.hw).to(dev).float()[None]
+        K = resize_intrinsics(clip.intrinsics, clip.hw).to(dev).float()[None]
         E = clip.extrinsics.to(dev).float()[None]
         moving = motion_px(gt, vis, K, E) > args.min_motion_px        # (1, N)
         moving_frac += moving.float().mean().item()

@@ -19,9 +19,11 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from genpoint3d.train.data.ClipDataset import ClipDataset
+from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.model.PointDiT import PointDiT
+from genpoint3d.train.tools.batch import to_device
 from genpoint3d.train.tools.flow import flow_matching_loss
-from train import ClipDataset, split, to_device
 
 GB = 2 ** 30
 
@@ -242,7 +244,8 @@ def main() -> int:
         raise SystemExit(f"--what {args.what} needs a GPU -- submit this as a job")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    clips, _, feat_dim, has_feats = split(args.cache, 0.02, 0)
+    split = split_clips(args.cache, 0.02, 0)
+    clips, feat_dim, has_feats = split.train, split.feat_dim, split.has_feats
     dev = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
     print(f"{dev} | {len(clips)} clips | points {args.points} | "
           f"dim {args.dim} depth {args.depth}\n", flush=True)

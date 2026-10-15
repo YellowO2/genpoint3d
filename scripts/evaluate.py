@@ -1,7 +1,7 @@
 """
 Score a trained checkpoint on a cache. No training, no checkpoint selection.
 
-This is what a held-out TEST set is for. The val split inside `train.py` picks
+This is what a held-out TEST set is for. The val split inside training picks
 `best.pt`, so its APD is mildly optimistic -- it is the score of whichever
 checkpoint happened to suit those exact clips. A set that is never used to
 choose anything does not have that problem, and its number is the one to report.
@@ -22,12 +22,16 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.CachedClip import CachedClip
-from genpoint3d.train.tools.metrics import clip_mean, tapvid3d_metrics
-from train import (
-    EVAL_SEED, MATCH_KEYS, ClipDataset, build_model, evaluate, fine_inputs, frames_dir,
-    known_frame0, to_device, to_metres,
-)
+from genpoint3d.train.Settings import Settings
+from genpoint3d.train.data.ClipDataset import ClipDataset
+from genpoint3d.train.model.build_model import build_model
+from genpoint3d.train.score.Predictor import EVAL_SEED
+from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.main import score
+from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
 from genpoint3d.train.tools.flow import sample as flow_sample
+from genpoint3d.train.tools.matching import MATCH_KEYS
+from genpoint3d.train.tools.metrics import clip_mean, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 
@@ -44,7 +48,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     frame 0 is clearly the best and the score decays with time, the error is
     accumulating drift instead and clamping would not address it.
 
-    Seeded like `evaluate()`, so on the same loader these are the frames of the
+    Seeded like `score()`, so on the same loader these are the frames of the
     very samples it scores. A mean over clips; a clip with no visible point in
     a frame is left out of that frame.
     """
@@ -100,7 +104,7 @@ ABLATIONS = ("none", "swap-features", "noise-features", "shuffle-pos", "swap-id"
 class Ablated:
     """Wraps a loader and corrupts each batch on the way out.
 
-    `evaluate()` calls `to_device` itself, so this hands back CPU batches of the
+    `score()` moves each batch itself, so this hands back CPU batches of the
     same shapes and dtypes and nothing downstream needs to know.
     """
 
@@ -205,7 +209,7 @@ def main() -> int:
           + (f"{refine_iters} refinement iterations" if method == "regress"
              else f"{args.sample_steps} sampling steps"), flush=True)
 
-    model = build_model(targs, feat_dim, has_feats).to(device)
+    model = build_model(Settings(**targs), feat_dim, has_feats).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
 
@@ -219,7 +223,7 @@ def main() -> int:
                     target=targs.get("target", "absolute"),
                     # Absent means trained on the ID cards as they were cached.
                     fix_idcard=bool(targs.get("fix_idcard", 0)),
-                    frames=(frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
+                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
                             if targs.get("fine", 0) else None),
                     features=bool(targs.get("dino", 1))),
         batch_size=args.batch, shuffle=False, num_workers=4,
@@ -227,7 +231,7 @@ def main() -> int:
 
     t0 = time.time()
     anchor_frame0 = bool(targs.get("anchor_frame0", 0))
-    loss_type = targs.get("loss_type", "l21")  # train.py's default
+    loss_type = targs.get("loss_type", "l21")  # training's default
     print(f"scoring as trained: target {targs.get('target', 'absolute')}"
           f" | norm {targs.get('norm_mode', 'median')}"
           f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
@@ -236,11 +240,12 @@ def main() -> int:
                               anchor_frame0, args.scaling, method,
                               refine_iters) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
-    how = dict(steps=args.sample_steps, amp=amp, anchor_frame0=anchor_frame0,
-               loss_type=loss_type, space=args.space, oracle_axis=args.oracle_axis,
-               scaling=args.scaling, min_motion_px=args.min_motion_px,
-               method=method, refine_iters=refine_iters)
-    m = evaluate(model, loader, device, **how)
+    judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
+                            anchor_frame0=anchor_frame0, loss_type=loss_type,
+                            space=args.space, oracle_axis=args.oracle_axis,
+                            scaling=args.scaling, min_motion_px=args.min_motion_px,
+                            method=method, refine_iters=refine_iters)
+    m = score(model, loader, judging)
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac",
@@ -279,7 +284,7 @@ def main() -> int:
         print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
         for kind in kinds:
-            a = evaluate(model, Ablated(loader, kind), device, **how)
+            a = score(model, Ablated(loader, kind), judging)
             apd = a["average_pts_within_thresh"]
             print(f"    {kind:<16} {apd:>7.4f}"
                   f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)

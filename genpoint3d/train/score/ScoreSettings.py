@@ -1,0 +1,27 @@
+"""How a model is scored: how it predicts, and which points count."""
+
+from dataclasses import dataclass
+
+import torch
+
+
+@dataclass
+class ScoreSettings:
+    device: torch.device
+    amp: bool = False
+    method: str = "flow"          # "flow" samples, "regress" refines
+    steps: int = 50               # flow: Euler steps from noise to tracks
+    refine_iters: int = 4         # regress: corrections to the first guess
+    anchor_frame0: bool = False   # hold frame 0 at its known position
+    loss_type: str = "l2"         # the objective val_loss is measured by
+    space: str = "3d"             # "2d" scores the projections in pixels
+    oracle_axis: str = ""         # "x", "y" or "z": that channel set to the truth
+    scaling: str = "median"       # the protocol's global rescale, or "none"
+    min_motion_px: float = 0.0    # score only points that move more than this
+
+    @classmethod
+    def for_training(cls, settings, hardware) -> "ScoreSettings":
+        """A training run's validation: the run's method, the defaults otherwise."""
+        return cls(device=hardware.device, amp=hardware.amp, method=settings.method,
+                   refine_iters=settings.refine_iters,
+                   anchor_frame0=settings.anchor_frame0, loss_type=settings.loss_type)

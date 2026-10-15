@@ -1,6 +1,6 @@
 #!/bin/bash
 # Cache the RGB frames of every clip in a feature cache, at the size the
-# relative finder's CNN reads them (train.py --fine 1 --frames-cache ...).
+# relative finder's CNN reads them (genpoint3d.train.main --fine 1 --frames-cache ...).
 # No GPU: PNGs are decoded, shrunk and written. The feature cache is only
 # listed, so a training job can keep reading it.
 #

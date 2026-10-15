@@ -23,7 +23,7 @@
 # so it turns over far faster: a gdev job started while the g1 one was still
 # waiting. Don't read those ratios as wait times.
 #
-# A cut-off is cheap: train.py writes best.pt and log.json at every
+# A cut-off is cheap: training writes best.pt and log.json at every
 # validation, so a killed job still leaves a readable APD curve.
 #PBS -l walltime=00:10:00
 #PBS -q normal
@@ -53,7 +53,7 @@ git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 
 # --points 256 uses every cached point, so train and val see an IDENTICAL set
 # and the score is pure memorisation with no resampling noise in it.
-python scripts/train.py \
+python -m genpoint3d.train.main \
   --cache $ROOT/cache/kubric \
   --out outputs/$OUT \
   --overfit 2 \

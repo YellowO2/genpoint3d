@@ -24,6 +24,11 @@ import torch.nn.functional as F
 
 from genpoint3d.train.tools.metrics import _to_camera_t
 
+# What scoring reports about the match, when the model has one.
+MATCH_KEYS = ("match_acc", "match_acc_near", "match_acc_moving",
+              "match_acc_near_moving", "match_loss",
+              "match_acc_top5_near", "match_acc_top5_near_moving")
+
 
 def raw_cosine(feats: torch.Tensor, id_card: torch.Tensor) -> torch.Tensor:
     """(B, T, P, C) patches and (B, N, C) templates -> (B, T, N, P) cosine.

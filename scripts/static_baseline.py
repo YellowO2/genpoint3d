@@ -24,7 +24,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.tools.metrics import clip_mean, tapvid3d_metrics
-from train import ClipDataset, split, to_device, to_metres
+from genpoint3d.train.data.ClipDataset import ClipDataset
+from genpoint3d.train.data.split_clips import split_clips
+from genpoint3d.train.tools.batch import to_device, to_metres
 
 
 @torch.no_grad()
@@ -41,7 +43,7 @@ def main() -> int:
     p.add_argument("--out", default="runs/static_baseline.json")
     args = p.parse_args()
 
-    _, val_clips, _, _ = split(args.cache, args.val_frac, args.seed)
+    val_clips = split_clips(args.cache, args.val_frac, args.seed).val
     if args.sample and args.sample < len(val_clips):
         val_clips = val_clips[: args.sample]
     print(f"{len(val_clips)} val clips", flush=True)
