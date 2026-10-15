@@ -32,14 +32,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from genpoint3d.data.kubric import load_frames
+from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
 
 
 def cache_one(job: tuple[str, str, str, int]) -> dict:
     seq, raw, dst, res = job
     dst = Path(dst)
     try:
-        frames = load_frames(raw, seq)                                # (T, H, W, 3)
+        frames = KubricSequenceDataset.load_frames(raw, seq)                                # (T, H, W, 3)
         how = cv2.INTER_AREA if res < min(frames.shape[1:3]) else cv2.INTER_LINEAR
         small = np.stack([cv2.resize(f, (res, res), interpolation=how) for f in frames])
         # temp name first, so a kill mid-write cannot leave a half-file that

@@ -35,16 +35,18 @@ Run:  .venv/bin/python scripts/check_model.py
 import torch
 import torch.nn.functional as F
 
-from genpoint3d.data.transform import TRAJ_SCALE_DISP
-from genpoint3d.eval.metrics import _project, _to_camera_t
-from genpoint3d.geometry import batch_unproject
-from genpoint3d.models.encoder import VisualEncoder, patch_centre_xyz
-from genpoint3d.models.fine import FineFinder, image_projection, project
-from genpoint3d.models.match import (
+from genpoint3d.prepare.VisualEncoder import VisualEncoder
+from genpoint3d.prepare.tools.geometry import batch_unproject
+from genpoint3d.tools.feature_lookup import sample_at
+from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
+from genpoint3d.train.model.FineFinder import FineFinder
+from genpoint3d.train.model.PointDiT import PointDiT
+from genpoint3d.train.tools.camera import image_projection, project
+from genpoint3d.train.tools.metrics import _project, _to_camera_t
+from genpoint3d.train.tools.matching import (
     match_accuracy_topk, match_ce, nms_peaks, raw_cosine, true_patch,
 )
-from genpoint3d.models.model import PointDiT
-from genpoint3d.models.regress import regress_loss
+from genpoint3d.train.tools.regress import regress_loss
 
 B, T, N, G, D, FEAT = 2, 8, 5, 12, 64, 48
 P = G * G
@@ -520,7 +522,7 @@ def check_true_patch() -> bool:
             E[t, :3, 3] = torch.tensor([0.2, -0.1, 0.3]) * t
         # Patch positions exactly as the cache builds them: frame-0 camera.
         E0 = E @ torch.linalg.inv(E[:1])
-        pxyz = patch_centre_xyz(batch_unproject(depth, K, E0), g)     # (T, P, 3)
+        pxyz = VisualEncoder.patch_centre_xyz(batch_unproject(depth, K, E0), g)     # (T, P, 3)
         hw = torch.tensor([[H, W]])
         got, inside = true_patch(pxyz[None], K[None], E0[None], hw, g)
         wrong = (got[0] != torch.arange(g * g)).sum().item() + (~inside).sum().item()
@@ -764,7 +766,7 @@ def check_encoder() -> bool:
     feat = enc(frames)
     tok = VisualEncoder.tokens(feat)
     uv = torch.rand(T, N, 2) * 127
-    samp = enc.sample_at(feat, uv, (128, 128))
+    samp = sample_at(feat, uv, (128, 128))
     ok = feat.shape == (T, E, g, g) and tok.shape == (T, g * g, E) and samp.shape == (T, N, E)
     ok = report("encoder shapes", ok,
                 f"grid {tuple(feat.shape)}  tokens {tuple(tok.shape)}  sample {tuple(samp.shape)}")

@@ -1,8 +1,9 @@
-"""
+"""Predict how each point moves, from its current path and the video.
+
 THE ARCHITECTURE. Open this file to see the design.
 
 This is stages 2-5 of `docs/map.html`, in order. The transformer machinery it
-uses (RMSNorm, RoPE, Attention, ...) lives in `layers.py`.
+uses (RMSNorm, RoPE, Attention, ...) lives in `tools/layers.py`.
 
     [2] tokenise     3D positions          -> tokens
     [3] conditioning anchor + noise level  -> one vector c per (frame, point)
@@ -20,12 +21,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from genpoint3d.models.fine import FineFinder, project
-from genpoint3d.models.layers import (
+from genpoint3d.train.model.FineFinder import FineFinder
+from genpoint3d.train.model.MatchHead import MatchHead
+from genpoint3d.train.tools.camera import project
+from genpoint3d.train.tools.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
     zero_init,
 )
-from genpoint3d.models.match import MatchHead, nms_peaks, nms_pool, raw_cosine
+from genpoint3d.train.tools.matching import nms_peaks, nms_pool, raw_cosine
 
 
 class PointDiT(nn.Module):
@@ -120,7 +123,7 @@ class PointDiT(nn.Module):
         # [path encoder] representing the current diffused path for the video
         self.token_proj = nn.Linear(3, dim, bias=False)
         
-        # [feature adapter] trainable, unlike encoder.py which is cached frozen.
+        # [feature adapter] trainable, unlike VisualEncoder.py which is cached frozen.
         # Always on when there are features: the patch position is added to
         # frame_proj's output, and W(f + p) = Wf + Wp, so the what/where balance
         # is only learnable if a layer sits before the sum.
@@ -233,7 +236,7 @@ class PointDiT(nn.Module):
         self.out = zero_init(nn.Linear(dim, 3, bias=False))
 
         # [match head] a trainable residual on the features the correlation
-        # compares, and on nothing else; see `match.py`. Built last, so every
+        # compares, and on nothing else; see `MatchHead.py`. Built last, so every
         # other weight is initialised exactly as it is without it, and it
         # starts as the raw cosine: the same model at step 0.
         if match_learn and not self.cosine:
@@ -262,7 +265,7 @@ class PointDiT(nn.Module):
 
         # [relative finder] a CNN on the RGB frames at 4 px per cell, and a
         # 7x7 window of it around the current guess compared with a 7x7 window
-        # around the query; see `fine.py`. The one part of the model that sees
+        # around the query; see `FineFinder.py`. The one part of the model that sees
         # anything finer than a 16 px patch, and the one part that needs
         # nothing from DINOv3: it stands with `cross_attn` off, which is the
         # CNN-only tracker the references are.
@@ -554,7 +557,7 @@ class PointDiT(nn.Module):
                 # on. The argmax passes no gradient -- tau gets its own
                 # through the soft-argmax, match_proj through the token. What
                 # makes the argmax land on the right patch is `match_head` and
-                # the matching loss, when there is one (`match.py`).
+                # the matching loss, when there is one (`tools/matching.py`).
                 g = math.isqrt(corr.shape[-1])
                 if g * g != corr.shape[-1] or g < 4:
                     raise ValueError("the match needs a square patch grid at least "

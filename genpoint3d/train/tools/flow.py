@@ -1,4 +1,5 @@
-"""
+"""Train and run the model as a flow from noise to the true tracks.
+
 Conditional flow matching -- the training objective and the sampler.
 
 The idea in three lines. Draw noise `x0 ~ N(0, I)` and take the ground-truth
@@ -77,7 +78,7 @@ def flow_matching_loss(
     mask:   (B, T, N) bool, True = include in the loss (e.g. visibility)
     weight: (B, T, N) per-point weight. Used to measure error in units of the
             metric's threshold rather than metres -- see `apd_weight` in
-            scripts/train.py. None weights every point equally.
+            `tools/batch.py`. None weights every point equally.
     known_x0: (B, N, 3) frame 0's true position, which is NOT unknown -- it is
             the anchor. Given it, frame 0 is held fixed instead of denoised, and
             its target velocity is zero, since a pinned coordinate does not

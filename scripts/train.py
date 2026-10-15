@@ -34,17 +34,17 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from genpoint3d.data.cache import CachedClip
-from genpoint3d.data.transform import TRAJ_SCALE, TRAJ_SCALE_DISP
-from genpoint3d.eval.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d_metrics
-from genpoint3d.models.encoder import VisualEncoder
-from genpoint3d.models.fine import image_projection
-from genpoint3d.models.flow import flow_matching_loss, sample
-from genpoint3d.models.match import (
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.tools.feature_lookup import sample_at
+from genpoint3d.tools.traj_scale import TRAJ_SCALE, TRAJ_SCALE_DISP
+from genpoint3d.train.tools.metrics import _to_camera_t, clip_mean, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.camera import image_projection
+from genpoint3d.train.tools.flow import flow_matching_loss, sample
+from genpoint3d.train.tools.matching import (
     match_accuracy, match_accuracy_topk, match_ce, per_clip, true_patch,
 )
-from genpoint3d.models.model import PointDiT
-from genpoint3d.models.regress import refine, regress_loss
+from genpoint3d.train.model.PointDiT import PointDiT
+from genpoint3d.train.tools.regress import refine, regress_loss
 
 # TAPIP3D clamps depth the same way before dividing, so a point behind the
 # camera or at zero depth cannot produce an enormous weight.
@@ -150,7 +150,7 @@ class ClipDataset(Dataset):
             # flattens a (F, g, g) grid into.
             f0 = clip.context[0].float()
             g = math.isqrt(f0.shape[0])
-            id_card = VisualEncoder.sample_at(
+            id_card = sample_at(
                 f0.T.reshape(1, -1, g, g), clip.query_uv[None].float(), clip.hw,
             )[0].to(id_card.dtype)
         n_pts = traj.shape[1]

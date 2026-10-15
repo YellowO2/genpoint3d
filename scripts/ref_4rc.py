@@ -62,8 +62,8 @@ def main() -> int:
     from arc.dust3r.utils.image import ImgNorm
     from arc.models.arc import Arc
 
-    from genpoint3d.data.kubric import KubricSequenceDataset
-    from genpoint3d.eval.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
+    from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+    from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
 
     dev = torch.device("cuda")
     model = Arc.from_pretrained(args.ckpt).to(dev).eval()

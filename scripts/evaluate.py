@@ -21,14 +21,14 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.eval.metrics import clip_mean, tapvid3d_metrics
-from genpoint3d.data.cache import CachedClip
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.train.tools.metrics import clip_mean, tapvid3d_metrics
 from train import (
     EVAL_SEED, MATCH_KEYS, ClipDataset, build_model, evaluate, fine_inputs, frames_dir,
     known_frame0, to_device, to_metres,
 )
-from genpoint3d.models.flow import sample as flow_sample
-from genpoint3d.models.regress import refine
+from genpoint3d.train.tools.flow import sample as flow_sample
+from genpoint3d.train.tools.regress import refine
 
 
 @torch.no_grad()

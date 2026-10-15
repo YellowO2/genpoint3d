@@ -16,7 +16,7 @@ import rerun
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from genpoint3d.geometry import batch_project, batch_unproject
+from genpoint3d.prepare.tools.geometry import batch_project, batch_unproject
 
 
 def setup_visualizer(

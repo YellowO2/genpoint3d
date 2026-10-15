@@ -33,10 +33,12 @@ from pathlib import Path
 
 import torch
 
-from genpoint3d.data.cache import CachedClip, scale_stats
-from genpoint3d.data.kubric import KubricSequenceDataset
-from genpoint3d.data.transform import transform
-from genpoint3d.geometry import batch_unproject
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.ScaleStats import ScaleStats
+from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+from genpoint3d.prepare.transform import transform
+from genpoint3d.prepare.tools.geometry import batch_unproject
+from genpoint3d.tools.feature_lookup import sample_at
 
 
 def main() -> int:
@@ -96,7 +98,7 @@ def main() -> int:
     encoder = None
     if args.features:
         import torch as _t
-        from genpoint3d.models.encoder import VisualEncoder
+        from genpoint3d.prepare.VisualEncoder import VisualEncoder
 
         dev = _t.device("cuda" if _t.cuda.is_available() else "cpu")
         # No width argument: the cache takes the backbone's own width, because a
@@ -138,7 +140,7 @@ def main() -> int:
             hw=tuple(x.frames.shape[1:3]),    # needed to map uv into the grid
             intrinsics=x.intrinsics.clone(),  # (T, 3, 3) pixel units
             extrinsics=x.extrinsics.clone(),  # (T, 4, 4) cam_0 -> cam_t
-            stats=scale_stats(pointmap),      # every candidate scale, measured once
+            stats=ScaleStats.measure(pointmap),      # every candidate scale, measured once
             points=args.points,
             feat_dim=encoder.dim if encoder is not None else None,
             image_size=args.image_size if args.features else None,
@@ -150,7 +152,7 @@ def main() -> int:
                 # The ID card is sampled ONCE, at the query's own frame (frame 0),
                 # per the paper's "unique starting context" -- not per frame.
                 uv0 = x.query_uv[None].to(dev)
-                id_card = encoder.sample_at(feat[:1], uv0, clip.hw)[0]        # (N, D)
+                id_card = sample_at(feat[:1], uv0, clip.hw)[0]        # (N, D)
                 # METRES, like `traj`. The load path normalises it with the same
                 # statistics as the anchor, so patch positions and point
                 # positions land in one shared space whatever scheme is chosen.

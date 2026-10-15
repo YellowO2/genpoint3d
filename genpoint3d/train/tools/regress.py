@@ -1,4 +1,5 @@
-"""
+"""Train and run the model by refining its own guess, with no noise.
+
 Iterative regression -- the same network, trained and run without noise.
 
 The control for flow matching (`flow.py`). There the network sees the truth
@@ -24,7 +25,7 @@ from typing import Optional
 import torch
 from torch import nn
 
-from genpoint3d.models.flow import masked_error
+from genpoint3d.train.tools.flow import masked_error
 
 
 def _pin(g: torch.Tensor, known_x0: Optional[torch.Tensor]) -> torch.Tensor:

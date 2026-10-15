@@ -1,4 +1,5 @@
-"""
+"""Score predicted tracks the way the TAP-Vid-3D benchmark does.
+
 TAP-Vid-3D metrics.
 
 Adapted from `google-deepmind/tapnet`, `tapnet/tapvid3d/evaluation/metrics.py`

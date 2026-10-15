@@ -1,4 +1,5 @@
-"""
+"""Read raw Kubric clips from disk, one clip at a time.
+
 Minimal Kubric 3D point tracking dataset.
 
 Expects the zbww/tapip3d-kubric layout:
@@ -21,28 +22,16 @@ via the pinhole model after loading.
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from genpoint3d.prepare.KubricSample import KubricSample
+
 
 # Kubric/Blender camera axes -> OpenCV camera axes (X right, Y down, Z forward).
 _AXIS_FLIP = np.diag(np.array([1.0, -1.0, -1.0, 1.0], dtype=np.float32))
-
-
-@dataclass
-class KubricSample:
-    seq_id: str
-    frames: np.ndarray        # (T, H, W, 3) uint8 RGB
-    depths: np.ndarray        # (T, H, W) float32 z-depth, meters
-    traj_3d: np.ndarray       # (N, T, 3) float32 -- world-space 3D trajectory
-    coords_2d: np.ndarray     # (N, T, 2) float32 -- 2D pixel projections
-    visibility: np.ndarray    # (N, T) bool -- True = visible (NOT occluded)
-    intrinsics: np.ndarray    # (T, 3, 3) float32, in pixel units
-    extrinsics: np.ndarray    # (T, 4, 4) float32, world-to-camera, OpenCV convention
-    query_points_3d: np.ndarray  # (N, 3) float32 -- 3D position at each point's first frame
 
 
 # A clip is 48 small files, and on a network filesystem (NSCC's Lustre) each
@@ -92,39 +81,6 @@ def _pixel_intrinsics(data: dict, H: int, W: int) -> np.ndarray:
     return intrinsics
 
 
-def load_depths(root_dir: str, seq_id: str) -> np.ndarray:
-    """(T, H, W) float32 z-depth in metres for one clip, without decoding RGB.
-
-    The same numbers `KubricSequenceDataset.__getitem__` puts in `.depths`,
-    through the same functions, for callers that need geometry only
-    (`scripts/recache_xyz.py`).
-    """
-    seq_dir = os.path.join(root_dir, seq_id)
-    data = np.load(os.path.join(seq_dir, f"{seq_id}.npy"), allow_pickle=True).item()
-    frames_dir = os.path.join(seq_dir, "frames")
-    num_frames = data["intrinsics"].shape[0]
-    with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
-        distances = np.stack(list(ex.map(
-            lambda t: _read_distance(frames_dir, t, data["depth_range"]), range(num_frames))))
-    H, W = distances.shape[1:3]
-    return _distance_to_depth(distances, _pixel_intrinsics(data, H, W))
-
-
-def load_frames(root_dir: str, seq_id: str) -> np.ndarray:
-    """(T, H, W, 3) uint8 RGB for one clip, without decoding depth.
-
-    The same pixels `KubricSequenceDataset.__getitem__` puts in `.frames`, for
-    callers that need the images only (`scripts/cache_frames.py`).
-    """
-    frames_dir = os.path.join(root_dir, seq_id, "frames")
-    data = np.load(os.path.join(root_dir, seq_id, f"{seq_id}.npy"), allow_pickle=True).item()
-    num_frames = data["intrinsics"].shape[0]
-    with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
-        return np.stack(list(ex.map(
-            lambda t: cv2.cvtColor(_imread(os.path.join(frames_dir, f"{t:03d}.png")),
-                                   cv2.COLOR_BGR2RGB), range(num_frames))))
-
-
 def _distance_to_depth(distances: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
     """distances: (T, H, W) distance-from-camera. intrinsics: (T, 3, 3) pixel-space. -> (T, H, W) z-depth."""
     h, w = distances.shape[-2:]
@@ -161,6 +117,39 @@ class KubricSequenceDataset:
             )
         self.seq_ids = seq_ids
         self.num_query_points = num_query_points
+
+    @staticmethod
+    def load_depths(root_dir: str, seq_id: str) -> np.ndarray:
+        """(T, H, W) float32 z-depth in metres for one clip, without decoding RGB.
+
+        The same numbers `KubricSequenceDataset.__getitem__` puts in `.depths`,
+        through the same functions, for callers that need geometry only
+        (`scripts/recache_xyz.py`).
+        """
+        seq_dir = os.path.join(root_dir, seq_id)
+        data = np.load(os.path.join(seq_dir, f"{seq_id}.npy"), allow_pickle=True).item()
+        frames_dir = os.path.join(seq_dir, "frames")
+        num_frames = data["intrinsics"].shape[0]
+        with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
+            distances = np.stack(list(ex.map(
+                lambda t: _read_distance(frames_dir, t, data["depth_range"]), range(num_frames))))
+        H, W = distances.shape[1:3]
+        return _distance_to_depth(distances, _pixel_intrinsics(data, H, W))
+
+    @staticmethod
+    def load_frames(root_dir: str, seq_id: str) -> np.ndarray:
+        """(T, H, W, 3) uint8 RGB for one clip, without decoding depth.
+
+        The same pixels `KubricSequenceDataset.__getitem__` puts in `.frames`, for
+        callers that need the images only (`scripts/cache_frames.py`).
+        """
+        frames_dir = os.path.join(root_dir, seq_id, "frames")
+        data = np.load(os.path.join(root_dir, seq_id, f"{seq_id}.npy"), allow_pickle=True).item()
+        num_frames = data["intrinsics"].shape[0]
+        with ThreadPoolExecutor(min(_READ_WORKERS, num_frames)) as ex:
+            return np.stack(list(ex.map(
+                lambda t: cv2.cvtColor(_imread(os.path.join(frames_dir, f"{t:03d}.png")),
+                                       cv2.COLOR_BGR2RGB), range(num_frames))))
 
     def __len__(self):
         return len(self.seq_ids)

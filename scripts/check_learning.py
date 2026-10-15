@@ -58,9 +58,9 @@ import time
 
 import torch
 
-from genpoint3d.data.transform import TRAJ_SCALE_DISP
-from genpoint3d.models.flow import flow_matching_loss, sample
-from genpoint3d.models.model import PointDiT
+from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
+from genpoint3d.train.model.PointDiT import PointDiT
+from genpoint3d.train.tools.flow import flow_matching_loss, sample
 
 B, T, N, G, FEAT = 8, 4, 16, 12, 32
 P = G * G

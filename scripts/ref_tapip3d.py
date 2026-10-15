@@ -60,8 +60,8 @@ def main() -> int:
     from datasets.data_ops import _filter_one_depth
     from utils.inference_utils import inference, load_model, resize_depth_bilinear
 
-    from genpoint3d.data.kubric import KubricSequenceDataset
-    from genpoint3d.eval.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
+    from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+    from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
 
     dev = torch.device("cuda")
     model = load_model(args.ckpt).to(dev)

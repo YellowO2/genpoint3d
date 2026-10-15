@@ -1,6 +1,7 @@
-"""
-The on-disk cache format -- one schema, written by `preprocess.py` and read by
-`train.py`.
+"""One preprocessed clip: the format prepare writes and train reads.
+
+The on-disk cache format -- one schema, written by `genpoint3d/prepare` and
+read by `genpoint3d/train`.
 
 Two rules, both learned the hard way.
 
@@ -26,74 +27,9 @@ from typing import Optional
 
 import torch
 
-from genpoint3d.data.transform import TRAJ_SCALE, NormStats
-
-
-@dataclass
-class ScaleStats:
-    """Every candidate normalisation statistic, measured once at preprocess time.
-
-    All of them are kept because they cost four floats and computing any one of
-    them needs the depth maps -- the single expensive part of preprocessing.
-    Storing only the one currently in favour is what forced a re-run last time
-    the choice changed.
-
-    `centroid` and `max_from_centroid` describe the MotionForesight scheme
-    (centre the scene, divide by its bounding radius). `mean_dist` and
-    `median_dist` are distances to the camera for the DUSt3R scheme, which
-    divides but never centres -- see `compute_norm_stats`.
-    """
-
-    centroid: torch.Tensor          # (3,) metric centre of the observed scene
-    max_from_centroid: torch.Tensor  # () furthest point from that centre
-    mean_dist: torch.Tensor          # () mean distance to the camera
-    median_dist: torch.Tensor        # () median distance to the camera
-
-    def norm(self, mode: str = "median", traj_scale: float = TRAJ_SCALE) -> NormStats:
-        """Build the `NormStats` for one scheme. `mode` matches `compute_norm_stats`."""
-        ts = torch.as_tensor(traj_scale, dtype=torch.float32)
-        zero = torch.zeros(3)
-        if mode == "median":
-            return NormStats(zero, self.median_dist, ts)
-        if mode == "mean":
-            return NormStats(zero, self.mean_dist, ts)
-        if mode == "centroid_max":   # the pre-2026-09-18 behaviour
-            return NormStats(self.centroid, self.max_from_centroid, ts)
-        raise ValueError(f"bad norm mode {mode!r}")
-
-    def to_dict(self) -> dict:
-        return {f"stats_{k}": getattr(self, k) for k in
-                ("centroid", "max_from_centroid", "mean_dist", "median_dist")}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Optional[ScaleStats]":
-        if "stats_median_dist" not in d:
-            return None
-        return cls(**{k: d[f"stats_{k}"] for k in
-                      ("centroid", "max_from_centroid", "mean_dist", "median_dist")})
-
-
-def scale_stats(pointmap: torch.Tensor) -> ScaleStats:
-    """Measure every candidate statistic from an observed pointmap.
-
-    `pointmap`: (T_obs, 3, H, W) unprojected scene points, frame-0 frame.
-    Computed once because it needs the depth maps, which are the expensive
-    part of preprocessing; picking a scheme afterwards is then free.
-    """
-    pts = pointmap.permute(0, 2, 3, 1).reshape(-1, 3)
-    pts = pts[torch.isfinite(pts).all(dim=-1)]
-    if pts.numel() == 0:
-        one = torch.ones(())
-        return ScaleStats(torch.zeros(3), one, one, one)
-
-    centroid = pts.mean(dim=0)
-    dist = pts.norm(dim=-1)                 # to the camera, which is the origin
-    return ScaleStats(
-        centroid=centroid,
-        max_from_centroid=(pts - centroid).norm(dim=-1).max(),
-        mean_dist=dist.mean(),
-        median_dist=dist.median(),
-    )
+from genpoint3d.NormStats import NormStats
+from genpoint3d.ScaleStats import ScaleStats
+from genpoint3d.tools.traj_scale import TRAJ_SCALE
 
 
 @dataclass
@@ -125,7 +61,7 @@ class CachedClip:
     # --- visual conditioning, absent for the step-2 (no-image) model ---
     # RAW backbone features, at DINOv3's own width -- no projection, no position
     # folded in. Both of those are learnable, and anything cached cannot learn;
-    # they live in `PointDiT` now. See `models/encoder.py`.
+    # they live in `PointDiT` now. See `prepare/VisualEncoder.py`.
     context: Optional[torch.Tensor] = None      # (T, P, D) fp16 raw DINOv3 patch tokens
     id_card: Optional[torch.Tensor] = None      # (N, D) fp16, sampled at frame 0
     # Where each patch is, in METRES, matching `context`'s patch order. The model

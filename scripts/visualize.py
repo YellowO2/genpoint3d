@@ -22,9 +22,10 @@ import os
 import sys
 from pathlib import Path
 
-from genpoint3d.data.kubric import KubricSequenceDataset
-from genpoint3d.data.masking import make_training_sample
-from genpoint3d.viz import rerun_log as rl
+from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+
+import rerun_log as rl
+from masking import make_training_sample
 
 import rerun
 import rerun.blueprint as rrb

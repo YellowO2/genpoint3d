@@ -43,9 +43,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from genpoint3d.data.kubric import load_depths
-from genpoint3d.geometry import batch_unproject
-from genpoint3d.models.encoder import patch_centre_xyz
+from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+from genpoint3d.prepare.VisualEncoder import VisualEncoder
+from genpoint3d.prepare.tools.geometry import batch_unproject
 
 
 def _init() -> None:
@@ -68,7 +68,7 @@ def recache_one(job: tuple[str, str, str, float]) -> dict:
         if grid * grid != P:
             raise ValueError(f"{P} patches is not a square grid")
 
-        depths = torch.from_numpy(load_depths(raw, seq)).float()          # (T, H, W) metres
+        depths = torch.from_numpy(KubricSequenceDataset.load_depths(raw, seq)).float()          # (T, H, W) metres
         if depths.shape[0] != T or tuple(depths.shape[1:]) != tuple(d["hw"]):
             raise ValueError(f"raw depth is {tuple(depths.shape)}, cache expects"
                              f" ({T}, {d['hw'][0]}, {d['hw'][1]})")
@@ -83,7 +83,7 @@ def recache_one(job: tuple[str, str, str, float]) -> dict:
                              f" (worst patch {rebuilt_err:.4f} m off, tolerance {tol} m)"
                              " -- is --raw the data this cache was built from?")
 
-        new = patch_centre_xyz(pointmap, grid).to(old.dtype).contiguous()
+        new = VisualEncoder.patch_centre_xyz(pointmap, grid).to(old.dtype).contiguous()
         moved = (new - old).float().norm(dim=-1)
         d["patch_xyz"] = new
 

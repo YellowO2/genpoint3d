@@ -23,7 +23,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.eval.metrics import clip_mean, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import clip_mean, tapvid3d_metrics
 from train import ClipDataset, split, to_device, to_metres
 
 

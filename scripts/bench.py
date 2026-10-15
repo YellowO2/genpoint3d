@@ -19,8 +19,8 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.models.flow import flow_matching_loss
-from genpoint3d.models.model import PointDiT
+from genpoint3d.train.model.PointDiT import PointDiT
+from genpoint3d.train.tools.flow import flow_matching_loss
 from train import ClipDataset, split, to_device
 
 GB = 2 ** 30

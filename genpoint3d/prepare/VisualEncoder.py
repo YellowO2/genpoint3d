@@ -1,4 +1,5 @@
-"""
+"""Encode video frames into DINOv3 patch features, frozen.
+
 [1] Visual encoder -- frozen DINOv3, and nothing else.
 
 Produces the one thing stage 1 owes the rest of the model: a grid of raw
@@ -6,6 +7,7 @@ backbone feature vectors per frame, describing what is at each patch. That grid
 is then read two different ways (see docs/map.html):
 
     sample_at()  one spot     -> the query's "ID card", feeds [3]
+                 (`genpoint3d/tools/feature_lookup.py`)
     tokens()     whole grid   -> searched by cross-attention in [4c]
 
 **Nothing learnable lives here, deliberately.** This module's output is what
@@ -45,43 +47,6 @@ DINOV3_S = "facebook/dinov3-vits16-pretrain-lvd1689m"
 # DINOv3 expects ImageNet-normalised input.
 _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
-
-
-def patch_centre_xyz(pointmap: torch.Tensor, grid: int) -> torch.Tensor:
-    """(T, 3, H, W) scene points -> (T, grid*grid, 3): the point at each patch's centre.
-
-    One pixel is READ per patch; nothing is averaged. Until 2026-10-10 this was
-    the mean over the patch footprint, which at an object edge mixes foreground
-    and background and lands in mid-air between them (typically 21 cm from any
-    surface), so "where is the patch that looks like me" pointed at nothing.
-
-    Which pixel: the one that contains the patch centre. Patch j spans
-    `[j, j+1) * W / grid` in continuous pixel coordinates, so its centre is at
-    `(j + 0.5) * W / grid` and lies inside pixel `floor` of that. This is the
-    same convention `sample_at` uses, so the position stored for a patch is the
-    surface under the spot its feature is addressed by. The footprint is rarely
-    a whole odd number of pixels (512 / 24 = 21.33, 512 / 48 = 10.67), so there
-    is not always one middle pixel; when the centre falls exactly on a pixel
-    boundary, `floor` takes the pixel below/right of it -- one of the four
-    tied central pixels, always the same one, and still a single real surface
-    point. Integer arithmetic, so the choice cannot flip with float rounding
-    between the machine that built a cache and the one that rebuilds it.
-
-    A median over the footprint was the alternative. It also never blends, but
-    it picks a different pixel per coordinate unless done on depth alone, and
-    then the point can sit anywhere in the patch rather than at its centre.
-
-    Flattened in the order `VisualEncoder.tokens()` uses, so patch i of the
-    feature sequence and row i here are the same patch by construction.
-
-    A free function so `scripts/recache_xyz.py` can rewrite an existing cache
-    without building a backbone.
-    """
-    H, W = pointmap.shape[-2:]
-    j = torch.arange(grid, device=pointmap.device)
-    rows = ((2 * j + 1) * H) // (2 * grid)
-    cols = ((2 * j + 1) * W) // (2 * grid)
-    return pointmap[:, :, rows][:, :, :, cols].flatten(2).transpose(1, 2)
 
 
 class VisualEncoder(nn.Module):
@@ -185,6 +150,43 @@ class VisualEncoder(nn.Module):
         """(T, C, g, g) -> (T, P, C). What cross-attention searches over."""
         return feat.flatten(2).transpose(1, 2)
 
+    @staticmethod
+    def patch_centre_xyz(pointmap: torch.Tensor, grid: int) -> torch.Tensor:
+        """(T, 3, H, W) scene points -> (T, grid*grid, 3): the point at each patch's centre.
+
+        One pixel is READ per patch; nothing is averaged. Until 2026-10-10 this was
+        the mean over the patch footprint, which at an object edge mixes foreground
+        and background and lands in mid-air between them (typically 21 cm from any
+        surface), so "where is the patch that looks like me" pointed at nothing.
+
+        Which pixel: the one that contains the patch centre. Patch j spans
+        `[j, j+1) * W / grid` in continuous pixel coordinates, so its centre is at
+        `(j + 0.5) * W / grid` and lies inside pixel `floor` of that. This is the
+        same convention `sample_at` uses, so the position stored for a patch is the
+        surface under the spot its feature is addressed by. The footprint is rarely
+        a whole odd number of pixels (512 / 24 = 21.33, 512 / 48 = 10.67), so there
+        is not always one middle pixel; when the centre falls exactly on a pixel
+        boundary, `floor` takes the pixel below/right of it -- one of the four
+        tied central pixels, always the same one, and still a single real surface
+        point. Integer arithmetic, so the choice cannot flip with float rounding
+        between the machine that built a cache and the one that rebuilds it.
+
+        A median over the footprint was the alternative. It also never blends, but
+        it picks a different pixel per coordinate unless done on depth alone, and
+        then the point can sit anywhere in the patch rather than at its centre.
+
+        Flattened in the order `VisualEncoder.tokens()` uses, so patch i of the
+        feature sequence and row i here are the same patch by construction.
+
+        Static so `scripts/recache_xyz.py` can rewrite an existing cache without
+        building a backbone.
+        """
+        H, W = pointmap.shape[-2:]
+        j = torch.arange(grid, device=pointmap.device)
+        rows = ((2 * j + 1) * H) // (2 * grid)
+        cols = ((2 * j + 1) * W) // (2 * grid)
+        return pointmap[:, :, rows][:, :, :, cols].flatten(2).transpose(1, 2)
+
     def patch_xyz(self, pointmap: torch.Tensor) -> torch.Tensor:
         """(T, 3, H, W) scene points -> (T, P, 3), one 3D position per patch.
 
@@ -196,32 +198,4 @@ class VisualEncoder(nn.Module):
         the cache stores a fact and the load path normalises it -- the same rule
         the trajectory follows.
         """
-        return patch_centre_xyz(pointmap, self.grid)
-
-    @staticmethod
-    def sample_at(feat: torch.Tensor, uv: torch.Tensor, hw: tuple[int, int]) -> torch.Tensor:
-        """Bilinear lookup at pixel coords -- the query's ID card.
-
-        feat: (T, dim, g, g)      uv: (T, N, 2) pixels      hw: source (H, W)
-        returns (T, N, dim)
-
-        `uv` is in original-image pixels, so it is mapped to the [-1, 1] range
-        `grid_sample` expects using the ORIGINAL size, not the resized one.
-
-        The frame is resized with `align_corners=False`, so patch j is centred
-        on native pixel `(j + 0.5) * W / g - 0.5`, and the lookup has to use the
-        same convention: pixel u sits at `(u + 0.5) / W` of the way across.
-        Until 2026-10-09 this used `u / (W - 1)` with `align_corners=True`,
-        which puts patch 0's centre on pixel 0 and read up to half a patch away
-        from the query near the image edges. `border` because a query in the
-        outer half-patch has no patch centre beyond it to interpolate towards,
-        and the default would blend it with zeros.
-
-        Static so `train.py` can redo the lookup on caches written before then.
-        """
-        H, W = hw
-        norm = (uv + 0.5) / torch.tensor([W, H], dtype=uv.dtype, device=uv.device)
-        norm = norm * 2.0 - 1.0
-        out = F.grid_sample(feat, norm[:, :, None], padding_mode="border",
-                            align_corners=False)                         # (T, dim, N, 1)
-        return out[..., 0].transpose(1, 2)
+        return self.patch_centre_xyz(pointmap, self.grid)

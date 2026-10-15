@@ -27,8 +27,8 @@ from pathlib import Path
 
 import torch
 
-from genpoint3d.data.cache import CachedClip
-from genpoint3d.data.transform import TRAJ_SCALE
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.tools.traj_scale import TRAJ_SCALE
 
 
 def main() -> int:

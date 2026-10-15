@@ -1,9 +1,10 @@
-"""
+"""The transformer building blocks the model is assembled from.
+
 The machinery. You rarely need to open this file.
 
 These are the standard transformer building blocks, adapted from
 `tesfaldet/genpt` (whose transformer descends from HDiT, Crowson et al.,
-ICML 2024). `model.py` assembles them into our architecture -- read that one
+ICML 2024). `model/PointDiT.py` assembles them into our architecture -- read that one
 to see the design; read this one only to check the maths.
 
 What each piece is for:

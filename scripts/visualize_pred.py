@@ -30,11 +30,12 @@ from torch.utils.data import DataLoader
 import rerun
 import rerun.blueprint as rrb
 
-from genpoint3d.eval.metrics import tapvid3d_metrics
-from genpoint3d.models.flow import sample as flow_sample
-from genpoint3d.models.regress import refine
-from genpoint3d.data.cache import CachedClip
-from genpoint3d.viz import rerun_log as rl
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.train.tools.flow import sample as flow_sample
+from genpoint3d.train.tools.metrics import tapvid3d_metrics
+from genpoint3d.train.tools.regress import refine
+
+import rerun_log as rl
 from train import (
     ClipDataset, build_model, fine_inputs, frames_dir, known_frame0, split, to_device,
     to_metres,
@@ -136,7 +137,7 @@ def main() -> int:
     E = b["extrinsics"][0].cpu().numpy().astype(np.float64)
 
     if args.root:
-        from genpoint3d.data.kubric import KubricSequenceDataset
+        from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
         s = KubricSequenceDataset(args.root, seq_ids=[seq_id], num_query_points=16)[0]
         rl.log_video("clip", s.frames, I, E, s.depths)
 

@@ -34,9 +34,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from genpoint3d.data.cache import CachedClip
-from genpoint3d.eval.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
-from genpoint3d.models.encoder import VisualEncoder
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.tools.feature_lookup import sample_at
+from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
 from train import _resize_intrinsics, split
 
 
@@ -50,7 +50,7 @@ def predictions(clip: CachedClip, dev) -> dict[str, torch.Tensor]:
     # The card the model is given, not the cached one: that was read up to half
     # a patch off, and `ClipDataset` re-reads it from frame 0's grid like this.
     f0 = clip.context[0].to(dev).float()                          # (P, F) row-major
-    idc = F.normalize(VisualEncoder.sample_at(
+    idc = F.normalize(sample_at(
         f0.T.reshape(1, -1, g, g), clip.query_uv[None].to(dev).float(), clip.hw,
     )[0], dim=-1)                                                 # (N, F)
     N = idc.shape[0]

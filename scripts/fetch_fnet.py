@@ -1,7 +1,7 @@
 """
 Fetch CoTracker3's offline checkpoint and keep only its CNN.
 
-The relative finder's CNN (`genpoint3d/models/fine.py::BasicEncoder`) is
+The relative finder's CNN (`genpoint3d/train/model/BasicEncoder.py`) is
 CoTracker3's `fnet` under the same names, so its weights load directly. They
 were trained for exactly this job -- features whose 7x7 windows correlate at
 the right pixel -- on Kubric, at 4 px per cell. Everything else in the
@@ -26,7 +26,7 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import torch
 from huggingface_hub import hf_hub_download
 
-from genpoint3d.models.fine import BasicEncoder
+from genpoint3d.train.model.BasicEncoder import BasicEncoder
 
 REPO, FILE = "facebook/cotracker3", "scaled_offline.pth"
 

@@ -1,5 +1,5 @@
 """
-Verification for step 1 (`genpoint3d/data/transform.py`).
+Verification for step 1 (`genpoint3d/prepare/transform.py`).
 
 Four checks, each of which fails loudly if the geometry is wrong:
 
@@ -19,9 +19,11 @@ import sys
 
 import torch
 
-from genpoint3d.data.kubric import KubricSequenceDataset
-from genpoint3d.data.transform import project_to_frames, scene_pointmap, transform
-from genpoint3d.models.fine import image_projection, project
+from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+from genpoint3d.prepare.ModelInputs import ModelInputs
+from genpoint3d.prepare.tools.geometry import batch_project, batch_unproject
+from genpoint3d.prepare.transform import transform
+from genpoint3d.train.tools.camera import image_projection, project
 
 PASS, FAIL = "  PASS", "  FAIL"
 
@@ -29,6 +31,31 @@ PASS, FAIL = "  PASS", "  FAIL"
 def report(name: str, ok: bool, detail: str) -> bool:
     print(f"{PASS if ok else FAIL}  {name:<22} {detail}")
     return ok
+
+
+def scene_pointmap(inputs: ModelInputs, normalise: bool = True) -> torch.Tensor:
+    """(T, 3, H, W) per-pixel scene geometry in the frame-0 camera frame.
+
+    Feeds the stage-1 "feature cloud" in step 3. Kept out of `ModelInputs`
+    because it is large and cheap to recompute.
+    """
+    pts = batch_unproject(inputs.depths, inputs.intrinsics, inputs.extrinsics)
+    if normalise:
+        pts = inputs.norm.apply(pts.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+    return pts
+
+
+def project_to_frames(inputs: ModelInputs, traj_metric: torch.Tensor) -> torch.Tensor:
+    """(T, N, 3) metric frame-0-frame points -> (T, N, 2) pixels in their own frame.
+
+    Used in step 3 to decide where each point token samples DINOv3 features.
+    """
+    T = traj_metric.shape[0]
+    return batch_project(
+        traj_metric,
+        inputs.intrinsics[:T, None],
+        inputs.extrinsics[:T, None],
+    )
 
 
 def check_roundtrip(inputs) -> bool:
