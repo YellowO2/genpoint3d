@@ -55,3 +55,8 @@ design; our first version only predicts it.
 | run34_pts256 | run32 + 256 points per clip (batch 4 × accum 4) | run32 |
 | A (after the build) | run32 + "visible?" output | run32 |
 | A48 (long queue, after run33) | run33 + "visible?" output + hidden loss, 6,000 steps | run33 |
+
+Note (03:15): run34_pts256 runs at 6.8 s/step, so 1,200 steps need ~2.3 h and the
+1:55 walltime will stop it around step 1,000. Its step-600 validation is still a
+fair comparison with run32's step 600 (same total steps, so the same learning
+rate there): run32 at 600 was moving 0.486, hidden 0.245 / moving hidden 0.149.
