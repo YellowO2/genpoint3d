@@ -132,3 +132,10 @@ the matcher, which hands the model an explicit "the point is here" that, on a
 hidden frame, points at the object in front. TAPIP3D has no matcher. Next check
 (evaluation only, no training): blank every image input on hidden frames, the way
 forecast frames are blanked, and see whether hidden scores jump.
+
+Re-plan (04:40): the "visible?" output showed no gain and a small cost, so I
+cancelled the long 48-grid visibility run (run36_vis_48, it had not started) and
+queued instead **run38_fc_xyz_48**: the best tracker (48 grid, CNN + 3D, as
+run33) trained and scored in forecasting mode (random cutoff, eval cutoff 12).
+That gives the report its forecasting numbers on our best tracker, whatever the
+hidden-point work turns out to need.
