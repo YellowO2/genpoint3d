@@ -31,7 +31,7 @@ from genpoint3d.train.score.main import score
 from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
 from genpoint3d.train.tools.flow import sample as flow_sample
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import clip_mean, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 
@@ -271,6 +271,11 @@ def main() -> int:
             print(f"  {k:<26} {m[k]:.4f}")
     if "moving_clips" in m:
         print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(clips)}")
+    hidden = [k for k in HIDDEN_KEYS if k in m]
+    if hidden:
+        print("\n  hidden on the observed frames, occluded or out of the frame:")
+        for k in hidden:
+            print(f"  {k:<26} {m[k]:.4f}")
     forecast = [k for k in m if k.endswith("_obs") or "_fut" in k]
     if forecast:
         print(f"\n  forecast, frames {args.eval_cutoff}+ without images:")

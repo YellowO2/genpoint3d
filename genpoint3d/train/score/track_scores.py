@@ -5,7 +5,7 @@ import torch
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.tools.batch import to_metres
-from genpoint3d.train.tools.metrics import MOVING_THRESHOLDS, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import MOVING_THRESHOLDS, in_image, motion_px, tapvid3d_metrics
 
 
 def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
@@ -140,22 +140,32 @@ def _split_scores(pred_m, others, gt_m, vis, moving, b: dict, j: ScoreSettings) 
 
 def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
     """The point still exists when nobody can see it. Scored where it is
-    hidden (occluded or out of the frame) on the observed frames, `_hidden`,
-    and with a cutoff C on every forecast frame, hidden or not, `_fut_all`.
-    All points with the protocol's rescale, and the moving ones without, as
-    above. `moving` (B, N) is the points that move, judged on visible frames.
+    hidden on the observed frames, `_hidden`, and that split in two:
+    `_occluded`, where its true position is inside the image, and `_outside`,
+    where it has left the frame. With a cutoff C, also on every forecast
+    frame, hidden or not, `_fut_all`. All points with the protocol's rescale,
+    and the moving ones without, as above. `moving` (B, N) is the points that
+    move, judged on visible frames.
+
+    `hidden_outside_frac` is the share of hidden entries that are outside,
+    per clip; NaN for a clip with none hidden.
     """
     T = gt_m.shape[1]
     frame = torch.arange(T, device=gt_m.device)[None, :, None]
     observed = frame < j.cutoff if j.cutoff else torch.ones_like(frame, dtype=torch.bool)
-    out = {}
+    inside = in_image(gt_m, b["intrinsics"], b["extrinsics"], b["hw"])
+    hidden = ~vis & observed
+    out = {"hidden_outside_frac": ((hidden & ~inside).flatten(1).sum(1)
+                                   / hidden.flatten(1).sum(1))}
     for name, points, scaling in (("apd", torch.ones_like(moving), j.scaling),
                                   ("apd_moving", moving, "none")):
-        hidden = ~vis & points[:, None] & observed
-        out[name + "_hidden"] = _apd(pred_m, gt_m, hidden, b, scaling)
+        mine = hidden & points[:, None]
+        score = lambda mask: _apd(pred_m, gt_m, mask, b, scaling)
+        out[name + "_hidden"] = score(mine)
+        out[name + "_occluded"] = score(mine & inside)
+        out[name + "_outside"] = score(mine & ~inside)
         if j.cutoff:
-            future = points[:, None] & ~observed
-            out[name + "_fut_all"] = _apd(pred_m, gt_m, future, b, scaling)
+            out[name + "_fut_all"] = score(points[:, None] & ~observed)
     return out
 
 

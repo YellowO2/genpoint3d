@@ -38,6 +38,12 @@ PIXEL_TO_FIXED_METRIC_THRESH = {1: 0.01, 2: 0.04, 4: 0.16, 8: 0.64, 16: 2.56}
 # each of them as well.
 MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
 
+# The scores of points nobody can see on the observed frames, all points and
+# moving ones: hidden, then split into occluded and out of the frame; and the
+# share of hidden entries that are out of the frame.
+HIDDEN_KEYS = ("apd_hidden", "apd_moving_hidden", "apd_occluded", "apd_moving_occluded",
+               "apd_outside", "apd_moving_outside", "hidden_outside_frac")
+
 
 def resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:
     """(T, 3, 3) pixel intrinsics, rescaled as if the frame's short side were
@@ -102,6 +108,24 @@ def _scale_factor(pred: torch.Tensor, gt: torch.Tensor, valid: torch.Tensor,
     else:
         raise ValueError(f"unknown scaling {scaling!r}")
     return (num / den.clamp(min=1e-12))[:, None, None, None]
+
+
+def in_image(gt: torch.Tensor, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
+             hw: torch.Tensor) -> torch.Tensor:
+    """(B, T, N) bool: is each true position inside its frame's image?
+
+    gt          (B, T, N, 3) in the frame-0 camera
+    intrinsics  (B, T, 3, 3) native pixels, to match `hw`
+    hw          (B, 2) the native frame's height and width
+
+    A point behind the camera is outside, wherever its projection lands.
+    """
+    gt_cam = _to_camera_t(gt, extrinsics)
+    uv = _project(gt_cam, intrinsics)
+    h, w = hw[:, 0, None, None], hw[:, 1, None, None]
+    return ((gt_cam[..., 2] > 0)
+            & (uv[..., 0] >= 0) & (uv[..., 0] < w)
+            & (uv[..., 1] >= 0) & (uv[..., 1] < h))
 
 
 @torch.no_grad()

@@ -6,7 +6,7 @@ import time
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.Report import Report
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import MOVING_THRESHOLDS
+from genpoint3d.train.tools.metrics import HIDDEN_KEYS, MOVING_THRESHOLDS
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class Progress:
             for t in MOVING_THRESHOLDS:
                 m[f"train_moving_within_{t}"] = f[f"moving_within_{t}"]
             m["train_eval_loss"] = f["val_loss"]
-            for k in MATCH_KEYS:
+            for k in (*MATCH_KEYS, *HIDDEN_KEYS):
                 if k in f:
                     m[f"train_{k}"] = f[k]
         if self.settings.match_learn:
@@ -74,7 +74,7 @@ class Progress:
                     f" MOVING {m['train_apd_moving']:.3f}"
                     f" (static {m['train_apd_moving_static']:.3f})"
                     if fit_scores is not None else "")
-                 + _hidden_line(m)
+                 + _hidden_line(m) + _hidden_line(m, "train_")
                  + _forecast_line(m)
                  + _match_line(m) + _match_line(m, "train_")
                  + f"  ({time.time() - self.tv:.0f}s)")
@@ -85,12 +85,16 @@ class Progress:
         log.info(f"\ndone in {(time.time() - self.t0) / 60:.1f} min -> {self.settings.out}")
 
 
-def _hidden_line(m: dict) -> str:
-    """APD where the point is hidden on the observed frames, all points and
-    then moving points. Empty if it was not scored."""
-    if "apd_hidden" not in m:
+def _hidden_line(m: dict, prefix: str = "") -> str:
+    """APD where the point is hidden on the observed frames, all/moving
+    points; then split into occluded and out of the frame, all/moving; then
+    the share of hidden entries out of the frame. Empty if it was not scored."""
+    if prefix + "apd_hidden" not in m:
         return ""
-    return f"  hid {m['apd_hidden']:.3f} mv {m['apd_moving_hidden']:.3f}"
+    v = [m[prefix + k] for k in HIDDEN_KEYS]
+    return (f"  {'trainHid' if prefix else 'hid'} {v[0]:.3f} mv {v[1]:.3f}"
+            f" (occ {v[2]:.3f}/{v[3]:.3f} out {v[4]:.3f}/{v[5]:.3f}"
+            f" outFrac {v[6]:.2f})")
 
 
 def _forecast_line(m: dict) -> str:
