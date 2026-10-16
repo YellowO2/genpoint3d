@@ -197,3 +197,9 @@ Queued after this (05:10): run39_noncausal = run32 + `--causal 0` (time attentio
 both ways). TAPIP3D looks both ways inside its 16-frame windows, so a hidden
 point between two visible stretches can be placed from where it reappears; ours
 only looks back. For tracking this is legitimate (published trackers do it).
+
+**Number for the report** (standard scoring, 100 clips, all 256 points, like
+run26's 0.832): run33_fine_xyz_48 **val 0.878 / train 0.928**
+(<1/2/4/8/16 px val 0.695 / 0.837 / 0.916 / 0.957 / 0.984). TAPIP3D 0.965.
+Previous best run26: 0.832 / 0.894. Week-8 starting point: 0.46 / 0.58.
+Moving hidden on those clips: val 0.283, train 0.327 (last seen 0.195, last speed 0.274).
