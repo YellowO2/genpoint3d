@@ -1,4 +1,8 @@
-"""Narrow a split to what this run uses, and say what that is."""
+"""Apply this run's settings to the train/val split.
+
+Used for debugging (`--overfit`) and for choosing which inputs to load
+(`--dino`, `--fine`). Also prints the run summary line.
+"""
 
 import logging
 from dataclasses import replace
@@ -10,7 +14,7 @@ from genpoint3d.train.data.Clips import Clips
 log = logging.getLogger(__name__)
 
 
-def choose_clips(clips: Clips, settings, hardware: Hardware) -> Clips:
+def apply_run_settings(clips: Clips, settings, hardware: Hardware) -> Clips:
     """`--overfit`, `--dino 0` and `--fine 1` applied to the split."""
     train, val = clips.train, clips.val
     if settings.overfit:

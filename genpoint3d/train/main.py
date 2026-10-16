@@ -30,7 +30,7 @@ from genpoint3d.train.Saver import Saver
 from genpoint3d.train.Settings import Settings
 from genpoint3d.train.data.Loaders import Loaders
 from genpoint3d.train.data.check_target_scale import check_target_scale
-from genpoint3d.train.data.choose_clips import choose_clips
+from genpoint3d.train.data.apply_run_settings import apply_run_settings
 from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.learn import learn
 from genpoint3d.train.model.build_model import build_model
@@ -43,7 +43,7 @@ def train(settings: Settings):
     hardware = Hardware.pick(settings)
     saver = Saver(settings)
     clips = split_clips(settings.cache, settings.val_frac, settings.seed)
-    clips = choose_clips(clips, settings, hardware)
+    clips = apply_run_settings(clips, settings, hardware)
     loaders = Loaders(clips, settings)
     check_target_scale(loaders, settings)
     model = build_model(settings, clips.feat_dim, clips.has_feats)
