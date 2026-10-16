@@ -39,10 +39,13 @@ PIXEL_TO_FIXED_METRIC_THRESH = {1: 0.01, 2: 0.04, 4: 0.16, 8: 0.64, 16: 2.56}
 MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
 
 # The scores of points nobody can see on the observed frames, all points and
-# moving ones: hidden, then split into occluded and out of the frame; and the
-# share of hidden entries that are out of the frame.
-HIDDEN_KEYS = ("apd_hidden", "apd_moving_hidden", "apd_occluded", "apd_moving_occluded",
-               "apd_outside", "apd_moving_outside", "hidden_outside_frac")
+# moving ones: hidden, then split into occluded and out of the frame, each
+# beside its two last-seen baselines; and the share of hidden entries that
+# are out of the frame.
+HIDDEN_KEYS = tuple(f"{name}{suffix}"
+                    for name in ("apd_hidden", "apd_moving_hidden", "apd_occluded",
+                                 "apd_moving_occluded", "apd_outside", "apd_moving_outside")
+                    for suffix in ("", "_lastseen", "_lastcv")) + ("hidden_outside_frac",)
 
 
 def resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:

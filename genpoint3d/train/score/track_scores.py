@@ -173,6 +173,17 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
 
     `hidden_outside_frac` is the share of hidden entries that are outside,
     per clip; NaN for a clip with none hidden.
+
+    Two baselines on the same entries, each with the same suffix after the
+    hidden, occluded and outside names:
+
+        _lastseen  the true position at the last frame the point was seen
+        _lastcv    constant speed from the true positions at the last two
+                   frames it was seen; the last seen one if it was seen once
+
+    They are generous: they use the TRUE positions at those frames, where a
+    tracker has only its own estimate of them. They show how much of a
+    hidden score carrying the last estimate forward could explain.
     """
     T = gt_m.shape[1]
     frame = torch.arange(T, device=gt_m.device)[None, :, None]
@@ -181,16 +192,41 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     hidden = ~vis & observed
     out = {"hidden_outside_frac": ((hidden & ~inside).flatten(1).sum(1)
                                    / hidden.flatten(1).sum(1))}
+    lastseen, lastcv = _last_seen(gt_m, vis)
     for name, points, scaling in (("apd", torch.ones_like(moving), j.scaling),
                                   ("apd_moving", moving, "none")):
         mine = hidden & points[:, None]
-        score = lambda mask: _apd(pred_m, gt_m, mask, b, scaling)
-        out[name + "_hidden"] = score(mine)
-        out[name + "_occluded"] = score(mine & inside)
-        out[name + "_outside"] = score(mine & ~inside)
+        for guess, suffix in ((pred_m, ""), (lastseen, "_lastseen"), (lastcv, "_lastcv")):
+            score = lambda mask: _apd(guess, gt_m, mask, b, scaling)
+            out[name + "_hidden" + suffix] = score(mine)
+            out[name + "_occluded" + suffix] = score(mine & inside)
+            out[name + "_outside" + suffix] = score(mine & ~inside)
         if j.cutoff:
-            out[name + "_fut_all"] = score(points[:, None] & ~observed)
+            out[name + "_fut_all"] = _apd(pred_m, gt_m, points[:, None] & ~observed, b, scaling)
     return out
+
+
+def _last_seen(gt_m, vis):
+    """Two guesses (B, T, N, 3) for every frame, from the true positions at
+    the frames where the point was last seen, up to and including this one:
+    the last seen position, and constant speed from the last two. A point
+    never seen up to a frame falls back to frame 0, and constant speed falls
+    back to the last seen position when there is no earlier sighting."""
+    T = gt_m.shape[1]
+    frame = torch.arange(T, device=gt_m.device)[None, :, None].expand_as(vis)
+    # The last frame seen up to each frame; -1 if none.
+    seen = torch.where(vis, frame, -1).cummax(1).values
+    last = seen.clamp(min=0)
+    # The last frame seen strictly before each frame; -1 if none.
+    seen_before = torch.cat([torch.full_like(seen[:, :1], -1), seen[:, :-1]], 1)
+    # The sighting before the last one; none if the last is only the fallback.
+    before = torch.where(seen >= 0, seen_before.gather(1, last), -1)
+    pick = lambda idx: gt_m.gather(1, idx.clamp(min=0)[..., None].expand_as(gt_m))
+    at_last, at_before = pick(last), pick(before)
+    speed = (at_last - at_before) / (last - before).clamp(min=1)[..., None]
+    lastcv = torch.where((before >= 0)[..., None],
+                         at_last + speed * (frame - last)[..., None], at_last)
+    return at_last, lastcv
 
 
 def _apd(pred_m, gt_m, mask, b: dict, scaling: str):

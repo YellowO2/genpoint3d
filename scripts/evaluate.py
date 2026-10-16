@@ -280,9 +280,10 @@ def main() -> int:
             print(f"  {k:<26} {m[k]:.4f}")
     hidden = [k for k in HIDDEN_KEYS if k in m]
     if hidden:
-        print("\n  hidden on the observed frames, occluded or out of the frame:")
+        print("\n  hidden on the observed frames, occluded or out of the frame,"
+              " each beside the last-seen and constant-speed baselines:")
         for k in hidden:
-            print(f"  {k:<26} {m[k]:.4f}")
+            print(f"  {k:<30} {m[k]:.4f}")
     forecast = [k for k in m if k.endswith("_obs") or "_fut" in k]
     if forecast:
         print(f"\n  forecast, frames {args.eval_cutoff}+ without images:")

@@ -8,7 +8,7 @@ import torch
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean
+from genpoint3d.train.tools.metrics import clip_mean
 
 log = logging.getLogger(__name__)
 
@@ -65,14 +65,17 @@ def _line(m: dict) -> str:
 
 def _hidden(m: dict) -> str:
     """APD where the point is hidden on the observed frames, all/moving
-    points; then split into occluded and out of the frame, all/moving; then
-    the share of hidden entries out of the frame."""
+    points, the moving one beside its last-seen and constant-speed baselines;
+    then split into occluded and out of the frame, all/moving; then the share
+    of hidden entries out of the frame."""
     if "apd_hidden" not in m:
         return ""
-    v = [m[k] for k in HIDDEN_KEYS]
-    return (f"  hid {v[0]:.3f} mv {v[1]:.3f}"
-            f" (occ {v[2]:.3f}/{v[3]:.3f} out {v[4]:.3f}/{v[5]:.3f}"
-            f" outFrac {v[6]:.2f})")
+    return (f"  hid {m['apd_hidden']:.3f} mv {m['apd_moving_hidden']:.3f}"
+            f" (last {m['apd_moving_hidden_lastseen']:.3f}"
+            f" cv {m['apd_moving_hidden_lastcv']:.3f})"
+            f" (occ {m['apd_occluded']:.3f}/{m['apd_moving_occluded']:.3f}"
+            f" out {m['apd_outside']:.3f}/{m['apd_moving_outside']:.3f}"
+            f" outFrac {m['hidden_outside_frac']:.2f})")
 
 
 def _forecast(m: dict) -> str:

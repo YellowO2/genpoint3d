@@ -20,7 +20,10 @@ with nothing to score. Out comes:
                points and on the moving ones alone
   hidden APD   where the point is truly hidden, split into occluded (inside
                the image) and out of the frame, all and moving points -- the
-               same masks validation uses (`track_scores._hidden_scores`)
+               same masks validation uses (`track_scores._hidden_scores`);
+               each beside two generous carry-forward baselines from the
+               TRUE positions where the point was last seen: `_lastseen`
+               stays there, `_lastcv` goes on at its last speed
 
 Run (see scripts/score_ref_preds.pbs):
   python scripts/score_ref_preds.py --preds ~/scratch/ref_preds/tapip3d \\
@@ -108,7 +111,7 @@ def main() -> int:
         print(f"{'  Jaccard':10}" + "".join(f"{x:>8.3f}" for x in jac) + "\n")
     print("--- hidden on every frame (all points, protocol rescale / moving, no rescale) ---")
     for k in HIDDEN_KEYS:
-        print(f"  {k:<22} {m[k]:.3f}")
+        print(f"  {k:<30} {m[k]:.3f}")
     return 0
 
 
