@@ -32,10 +32,10 @@ from genpoint3d.train.data.Loaders import Loaders
 from genpoint3d.train.data.check_target_scale import check_target_scale
 from genpoint3d.train.data.apply_run_settings import apply_run_settings
 from genpoint3d.train.data.split_clips import split_clips
-from genpoint3d.train.learn import learn
 from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.model.set_up_model import set_up_model
 from genpoint3d.train.score.main import score
+from genpoint3d.train.train_step.main import train_step
 from genpoint3d.train.validation_settings import validation_settings
 
 
@@ -52,10 +52,9 @@ def train(settings: Settings):
     judging = validation_settings(settings, hardware)
     progress = Progress(settings)
     for step in range(1, settings.steps + 1):
-        for batch in loaders.micro_batches(settings.accum):
-            losses = learn(model, batch, settings, hardware)
+        micro_batches = loaders.micro_batches(settings.accum)
+        for losses in train_step(model, micro_batches, optimiser, settings, hardware):
             progress.add(losses)
-        optimiser.step(model)
         progress.step(step, optimiser.lr())
         if step % settings.val_every == 0 or step == settings.steps:
             optimiser.swap_in_average(model)

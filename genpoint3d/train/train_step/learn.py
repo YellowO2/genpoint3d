@@ -14,7 +14,7 @@ from genpoint3d.train.tools.regress import regress_loss
 
 
 def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
-    """Forward and backward for one micro-batch, by `--method`; the caller
+    """Forward and backward for one micro-batch, by `--method`; `train_step`
     steps the optimiser once `--accum` of these have added up."""
     amp = hardware.amp
     b = to_device(batch, hardware.device, amp)
