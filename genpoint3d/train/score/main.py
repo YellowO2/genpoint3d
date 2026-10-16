@@ -10,7 +10,7 @@ from genpoint3d.train.score.track_scores import track_scores
 
 
 @torch.no_grad()
-def score(model, loader, judging: ScoreSettings) -> dict:
+def score(model, loader, judging: ScoreSettings, split: str) -> dict:
     """Two numbers, both standard -- no homemade units.
 
     val_loss  the SAME objective as training (`judging.method`), on held-out
@@ -24,9 +24,11 @@ def score(model, loader, judging: ScoreSettings) -> dict:
     take the query point's 3D position and assume it never moves. That is a
     real bar rather than a formality -- it scores 9.4 there, above TAPIR-3D's
     5.9 and not far below SpatialTracker's 15.5.
+
+    `split` names the clips in the line the scores are logged under.
     """
     predictor = Predictor(model, judging)
-    tally = Tally()
+    tally = Tally(split)
     for batch in loader:
         prediction = predictor(batch)
         tally.count(prediction)

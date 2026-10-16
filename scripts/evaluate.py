@@ -262,7 +262,7 @@ def main() -> int:
                             scaling=args.scaling, min_motion_px=args.min_motion_px,
                             method=method, refine_iters=refine_iters,
                             cutoff=args.eval_cutoff, samples=args.samples)
-    m = score(model, loader, judging)
+    m = score(model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
     for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac",
@@ -314,7 +314,7 @@ def main() -> int:
         print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
         for kind in kinds:
-            a = score(model, Ablated(loader, kind), judging)
+            a = score(model, Ablated(loader, kind), judging, split=kind)
             apd = a["average_pts_within_thresh"]
             print(f"    {kind:<16} {apd:>7.4f}"
                   f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
