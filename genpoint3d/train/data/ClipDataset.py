@@ -12,6 +12,10 @@ from genpoint3d.tools.feature_lookup import sample_at
 from genpoint3d.tools.traj_scale import TRAJ_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
+# The name each clip's depth has beside its frames: `<clip>.depth.npy`, as
+# `scripts/cache_frames.py` writes it.
+DEPTH = ".depth.npy"
+
 
 class ClipDataset(Dataset):
     """Serves cached clips, subsampling `num_points` of them per draw.
@@ -30,7 +34,7 @@ class ClipDataset(Dataset):
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
                  norm_mode: str = "median", target: str = "absolute",
                  fix_idcard: bool = True, frames: Path | None = None,
-                 features: bool = True):
+                 features: bool = True, depth: bool = False):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         # The RGB frames, for the relative finder: a directory from
         # `scripts/cache_frames.py` (checked by `frames_dir`) holding one uint8 array per clip, named
@@ -38,6 +42,9 @@ class ClipDataset(Dataset):
         # nothing here crops, flips or drops frames, and which POINTS are
         # drawn does not concern an image.
         self.frames = frames
+        # And beside each clip's frames its depth at every CNN cell, for a
+        # finder that reads where each cell is in 3D (`--fine-xyz`).
+        self.depth = depth
         # Off serves no DINOv3 feature, ID card or patch position at all, for
         # a model that is to track from the CNN alone.
         self.features = features
@@ -128,6 +135,9 @@ class ClipDataset(Dataset):
             if frames.shape[0] != traj.shape[0]:
                 raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
                                  f"for a {traj.shape[0]}-frame track")
+        depth = torch.zeros(0)
+        if self.depth:
+            depth = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}{DEPTH}"))
         norm = clip.norm(self.norm_mode, traj_scale=self.traj_scale)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis,
@@ -137,6 +147,8 @@ class ClipDataset(Dataset):
             # (T, R, R, 3) uint8, and it stays uint8 until the CNN takes a
             # clip of it: as floats a batch of 16 is 2 GB.
             "frames": frames,
+            # (T, R / 4, R / 4) float32 z-depth in metres at each CNN cell.
+            "depth": depth,
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
             # The benchmark's pixel thresholds are defined on a frame whose
@@ -157,10 +169,11 @@ class ClipDataset(Dataset):
         }
 
     @staticmethod
-    def frames_dir(path: str | None, clips: list, res: int) -> Path:
+    def frames_dir(path: str | None, clips: list, res: int, depth: bool = False) -> Path:
         """The frames cache for `clips`, checked before anything is trained on it:
-        a clip with no frames, or frames at another size than the model was told,
-        should stop the run now and not at the step that first draws it."""
+        a clip with no frames (or no depth, with `depth`), or frames at another
+        size than the model was told, should stop the run now and not at the
+        step that first draws it."""
         if not path:
             raise SystemExit("the relative finder reads RGB frames: pass --frames-cache, "
                              "a directory from scripts/cache_frames.py")
@@ -173,4 +186,15 @@ class ClipDataset(Dataset):
         got = np.load(d / f"{clips[0].stem}.npy", mmap_mode="r").shape[1:3]
         if got != (res, res):
             raise SystemExit(f"frames in {d} are {got[0]}x{got[1]}, --fine-res is {res}")
+        if depth:
+            missing = [c.stem for c in clips if not (d / f"{c.stem}{DEPTH}").exists()]
+            if missing:
+                raise SystemExit(f"{len(missing)} of {len(clips)} clips have no depth in {d}"
+                                 f" ({' '.join(missing[:5])}{' ...' if len(missing) > 5 else ''})"
+                                 " -- run scripts/cache_frames.py again, it adds it")
+            # One depth per cell of the CNN's map, which is 4 px of the frame.
+            got = np.load(d / f"{clips[0].stem}{DEPTH}", mmap_mode="r").shape[1:3]
+            if got != (res // 4, res // 4):
+                raise SystemExit(f"depth in {d} is {got[0]}x{got[1]} cells, --fine-res {res}"
+                                 f" needs {res // 4}x{res // 4}")
         return d

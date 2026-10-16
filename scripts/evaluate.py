@@ -132,9 +132,12 @@ class Ablated:
                 # cross-attention entirely -- no features, no positions.
                 b["context"] = b["patch_xyz"] = b["id_card"] = torch.zeros(0)
             elif self.kind == "swap-frames":
+                # with their depth: another clip's frames, whole
                 b["frames"] = b["frames"].roll(1, 0)
+                if b["depth"].numel():
+                    b["depth"] = b["depth"].roll(1, 0)
             elif self.kind == "no-fine":
-                b["frames"] = torch.zeros(0)
+                b["frames"] = b["depth"] = torch.zeros(0)
             yield b
 
 
@@ -234,9 +237,11 @@ def main() -> int:
                     target=targs.get("target", "absolute"),
                     # Absent means trained on the ID cards as they were cached.
                     fix_idcard=bool(targs.get("fix_idcard", 0)),
-                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
+                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384),
+                                                   depth=bool(targs.get("fine_xyz", 0)))
                             if targs.get("fine", 0) else None),
-                    features=bool(targs.get("dino", 1))),
+                    features=bool(targs.get("dino", 1)),
+                    depth=bool(targs.get("fine_xyz", 0))),
         batch_size=args.batch, shuffle=False, num_workers=4,
     )
 

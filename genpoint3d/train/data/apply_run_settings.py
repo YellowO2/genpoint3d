@@ -24,11 +24,13 @@ def apply_run_settings(clips: Clips, settings, hardware: Hardware) -> Clips:
         # bug in the pipeline -- no data or capacity excuse is available.
         train = val = (train + val)[: settings.overfit]
     has_feats = clips.has_feats and bool(settings.dino)
-    frames = (ClipDataset.frames_dir(settings.frames_cache, train + val, settings.fine_res)
+    frames = (ClipDataset.frames_dir(settings.frames_cache, train + val, settings.fine_res,
+                                     depth=bool(settings.fine_xyz))
               if settings.fine else None)
     log.info(f"device {hardware.device} | {len(train)} train clips, {len(val)} val clips"
              f"{' | OVERFIT (train == val)' if settings.overfit else ''}"
              + (" | TRACKING (with images)" if has_feats
                 else " | no DINOv3" if settings.fine else " | no images (step 2)")
-             + (f" | fine CNN at {settings.fine_res}px" if settings.fine else ""))
+             + (f" | fine CNN at {settings.fine_res}px" if settings.fine else "")
+             + (" with depth" if settings.fine_xyz else ""))
     return replace(clips, train=train, val=val, has_feats=has_feats, frames=frames)

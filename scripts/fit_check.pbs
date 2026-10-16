@@ -55,7 +55,8 @@ MOTION=${MOTION:-0}
 POINTS=${POINTS:-}
 [ -n "$POINTS" ] && PTS="--points $POINTS" || PTS=""
 # FRAMES=cache/kubric_frames384 (relative to ~/scratch) is the RGB frames cache
-# of CACHE's clips, which a --fine 1 checkpoint needs.
+# of CACHE's clips, which a --fine 1 checkpoint needs (with its depth, for
+# --fine-xyz 1).
 FRAMES=${FRAMES:-}
 [ -n "$FRAMES" ] && FR="--frames-cache $ROOT/$FRAMES" || FR=""
 # ITERS=8 overrides a regress checkpoint's refinement iterations at test time.

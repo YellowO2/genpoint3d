@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from genpoint3d.train.tools.camera import image_projection
+from genpoint3d.train.tools.camera import image_projection, unproject
 from genpoint3d.train.tools.matching import true_patch
 from genpoint3d.train.tools.metrics import _to_camera_t
 
@@ -25,8 +25,9 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     b = {k: v.to(device) for k, v in batch.items()}
     for k in ("context", "id_card", "patch_xyz"):
         b[k] = None if b[k].numel() == 0 else b[k].float()
-    if b["frames"].numel() == 0:
-        b["frames"] = None
+    for k in ("frames", "depth"):
+        if b[k].numel() == 0:
+            b[k] = None
     return b
 
 
@@ -118,8 +119,9 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
 
 def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
     """What the relative finder adds to a forward pass: the CNN's feature map
-    for the batch's frames, and each frame's camera. Empty for a model without
-    one, or a batch without frames.
+    for the batch's frames, each frame's camera and, for a finder that reads
+    depth, each cell's 3D position. Empty for a model without one, or a batch
+    without frames.
 
     The map is computed once and shared by every forward pass of the step. It
     comes back with no graph; with `grad` it is a leaf that collects the
@@ -130,9 +132,31 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
         return {}
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         fmap = model.fine.encode(b["frames"])
-    return {"fine_map": fmap.requires_grad_(grad),
-            "fine_proj": image_projection(b["intrinsics"], b["extrinsics"], b["hw"],
-                                          b["norm_scale"], b["norm_mean"])}
+    proj = image_projection(b["intrinsics"], b["extrinsics"], b["hw"],
+                            b["norm_scale"], b["norm_mean"])
+    out = {"fine_map": fmap.requires_grad_(grad), "fine_proj": proj}
+    if model.fine.xyz:
+        if b["depth"] is None:
+            raise ValueError("this finder reads each cell's depth, and the batch has "
+                             "none: load the clips with depth (--fine-xyz 1)")
+        out["fine_xyz"] = _cell_xyz(b["depth"].float(), proj)
+    return out
+
+
+def _cell_xyz(depth: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:
+    """depth (B, T, h, w) metres at each CNN cell, proj (B, T, 3, 4) ->
+    (B, T, 3, h, w): each cell's 3D position, scene-normalised like `anchor`.
+
+    Cell j of a w-wide map is centred on pixel INDEX 4j of the frame, which is
+    `(4j + 0.5) / W = (j + 1/8) / w` across (`FineFinder.py`'s docstring), and
+    `scripts/cache_frames.py` reads the depth at the same spot.
+    """
+    B, T, h, w = depth.shape
+    v = (torch.arange(h, device=depth.device, dtype=torch.float32) + 0.125) / h
+    u = (torch.arange(w, device=depth.device, dtype=torch.float32) + 0.125) / w
+    uv = torch.stack(torch.meshgrid(u, v, indexing="xy"), dim=-1).reshape(1, 1, -1, 2)
+    xyz = unproject(uv.expand(B, T, -1, -1), depth.flatten(2), proj.float())
+    return xyz.transpose(2, 3).reshape(B, T, 3, h, w)
 
 
 def match_targets(model, b: dict, visual_mask: torch.Tensor):

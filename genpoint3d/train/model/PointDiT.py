@@ -76,6 +76,7 @@ class PointDiT(nn.Module):
         fine: bool = False,
         fine_levels: int = 4,
         fine_radius: int = 3,
+        fine_xyz: bool = False,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -280,7 +281,14 @@ class PointDiT(nn.Module):
         if fine and legacy_lookup:
             raise ValueError("the relative finder projects the point's position, "
                              "which legacy_lookup does not compute")
-        self.fine = FineFinder(fine_levels, fine_radius) if fine else None
+        #
+        # With `fine_xyz` it also reads where each cell of the window is in
+        # 3D, from the depth map, relative to the current guess: one position
+        # per 4 px cell, where `patch_xyz` has one per 16 px patch. Zero at
+        # first too, inside the finder.
+        if fine_xyz and not fine:
+            raise ValueError("fine_xyz adds to the relative finder, which needs fine")
+        self.fine = FineFinder(fine_levels, fine_radius, xyz=fine_xyz) if fine else None
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
@@ -427,6 +435,7 @@ class PointDiT(nn.Module):
         patch_xyz: torch.Tensor | None = None,
         fine_map: torch.Tensor | None = None,
         fine_proj: torch.Tensor | None = None,
+        fine_xyz: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x:           (B, T, N, 3)    noisy trajectory, in model units
@@ -445,6 +454,9 @@ class PointDiT(nn.Module):
                                      (`fine.image_projection`). Required with
                                      `fine_map`; the pair is independent of the
                                      four above.
+        fine_xyz:    (B, T, 3, h, w) each CNN cell's 3D position, `anchor`'s
+                                     space, from its depth. Required with
+                                     `fine_map` for a finder with `fine_xyz`.
 
         returns      (B, T, N, 3)    predicted velocity
 
@@ -530,7 +542,11 @@ class PointDiT(nn.Module):
                 proj = fine_proj.float()
                 uv, _ = project(pos, proj)
                 uv0, _ = project(anchor.float()[:, None], proj[:, :1])
-            fine = self.fine(fine_map, uv, uv0[:, 0])
+                # Offsets in the units of the model's own target, which is
+                # what a difference of two positions turns into there.
+                places = (() if fine_xyz is None
+                          else (fine_xyz.float() / self.traj_scale, pos / self.traj_scale))
+            fine = self.fine(fine_map, uv, uv0[:, 0], *places)
             if visual_mask is not None:
                 fine = fine * visual_mask[..., None, None]
 

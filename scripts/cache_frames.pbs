@@ -1,6 +1,7 @@
 #!/bin/bash
 # Cache the RGB frames of every clip in a feature cache, at the size the
-# relative finder's CNN reads them (genpoint3d.train.main --fine 1 --frames-cache ...).
+# relative finder's CNN reads them (genpoint3d.train.main --fine 1 --frames-cache ...),
+# and beside them each CNN cell's depth (--fine-xyz 1).
 # No GPU: PNGs are decoded, shrunk and written. The feature cache is only
 # listed, so a training job can keep reading it.
 #
@@ -11,7 +12,8 @@
 # frames do not depend on the feature grid, so one frames cache serves the
 # 24-grid and the 48-grid cache alike; if one of them holds a clip the other
 # lacks, run this again with that SRC and the same DST and only the missing
-# clips are written. Resubmitting the same command resumes likewise.
+# clips are written. Resubmitting the same command resumes likewise, and on a
+# frames cache from before the depth it only adds the depth (0.9 MB a clip).
 #
 #PBS -N cache_frames
 #PBS -l select=1:ncpus=16:mem=32gb

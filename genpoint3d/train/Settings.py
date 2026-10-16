@@ -171,6 +171,13 @@ class Settings(argparse.Namespace):
         p.add_argument("--fine-radius", type=int, default=3,
                        help="--fine only: the window is this many cells either "
                             "side of its centre, at every level. 3 is 7x7")
+        p.add_argument("--fine-xyz", type=int, default=0, choices=[0, 1],
+                       help="--fine only: the finder also reads where each "
+                            "cell of its windows is in 3D, from the depth map "
+                            "at 4 px per cell, as an offset from the current "
+                            "guess. Needs depth in --frames-cache "
+                            "(scripts/cache_frames.py writes it). Starts at "
+                            "zero, so step 0 is the model without it")
         p.add_argument("--fine-init", default=None,
                        help="--fine only: weights for the CNN, as saved by "
                             "scripts/fetch_fnet.py (CoTracker3's). Without it "
@@ -220,6 +227,8 @@ class Settings(argparse.Namespace):
         settings = p.parse_args(argv, namespace=cls())
         if settings.eval_cutoff == 1 or settings.eval_cutoff < 0:
             p.error("--eval-cutoff is 0 (off) or at least 2")
+        if settings.fine_xyz and not settings.fine:
+            p.error("--fine-xyz adds to the relative finder: it needs --fine 1")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

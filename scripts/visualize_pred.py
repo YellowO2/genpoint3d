@@ -97,9 +97,11 @@ def main() -> int:
                     norm_mode=targs.get("norm_mode", "median"),
                     target=targs.get("target", "absolute"),
                     fix_idcard=bool(targs.get("fix_idcard", 0)),
-                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384))
+                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384),
+                                                   depth=bool(targs.get("fine_xyz", 0)))
                             if targs.get("fine", 0) else None),
-                    features=bool(targs.get("dino", 1))),
+                    features=bool(targs.get("dino", 1)),
+                    depth=bool(targs.get("fine_xyz", 0))),
         batch_size=1, shuffle=False,
     )
     b = to_device(next(iter(loader)), device)

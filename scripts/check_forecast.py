@@ -3,14 +3,15 @@ Check that forecasting leaks nothing: with a cutoff, the model's prediction
 for EVERY frame is bit-identical whatever the frames from the cutoff on hold.
 
   1. blind      every input of frames >= cutoff replaced by noise -- DINOv3
-                features, patch positions, RGB frames, cameras -- and the
+                features, patch positions, RGB frames, depth, cameras -- and the
                 tracks, the loss and the match loss are bit-identical
   2. sees       the same change on one observed frame does move the tracks,
                 so the check is not passing because nothing is read
 
 Run through the real scoring path (`Predictor`: `to_device`, `fine_inputs`,
 `visual_mask`, the sampler or the refiner) on a real cached batch, for flow
-and regress, with and without the relative finder, with the match trained.
+and regress, with and without the relative finder (and its depth), with the
+match trained.
 
 Every weight is pushed off its initial value first. Several readers start at
 exactly zero (the output head, the cost volume's gate, the finder's readers)
@@ -45,6 +46,9 @@ CONFIGS = [
     # upsampled grid, and attention to later frames.
     ["--method", "flow", "--fine", "1", "--match-topk", "3", "--upsample", "2",
      "--causal", "0"],
+    # The finder reading each cell's 3D position from the depth.
+    ["--method", "flow", "--fine", "1", "--fine-xyz", "1"],
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0"],
 ]
 
 
@@ -54,12 +58,13 @@ def report(name: str, ok: bool, detail: str) -> bool:
 
 
 def batch_from(cache: Path, points: int) -> dict:
-    """Two real clips, with random RGB frames for the finder."""
+    """Two real clips, with random RGB frames and depth for the finder."""
     clips = sorted(cache.glob("*.pt"))[:2]
     b = next(iter(DataLoader(ClipDataset(clips, points, resample=False), batch_size=2)))
     torch.manual_seed(1)
     B, T = b["traj"].shape[:2]
     b["frames"] = torch.randint(0, 256, (B, T, RES, RES, 3), dtype=torch.uint8)
+    b["depth"] = torch.rand(B, T, RES // 4, RES // 4) * 10 + 1
     return b
 
 
@@ -71,6 +76,7 @@ def changed(b: dict, frames: slice) -> dict:
     c["context"][:, frames] = (torch.randn(ctx.shape) * 50).to(ctx.dtype)
     c["patch_xyz"][:, frames] = torch.randn_like(c["patch_xyz"][:, frames]) * 5
     c["frames"][:, frames] = torch.randint_like(c["frames"][:, frames], 0, 256)
+    c["depth"][:, frames] = torch.rand_like(c["depth"][:, frames]) * 30 + 0.5
     c["intrinsics"][:, frames, :2] *= 1.5
     c["extrinsics"][:, frames, :3, 3] += torch.randn_like(c["extrinsics"][:, frames, :3, 3])
     return c

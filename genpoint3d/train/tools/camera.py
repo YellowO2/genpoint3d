@@ -38,3 +38,18 @@ def project(pos: torch.Tensor, proj: torch.Tensor) -> tuple[torch.Tensor, torch.
     z = q[..., 2]
     uv = q[..., :2] / z.clamp_min(1e-4)[..., None]
     return uv.clamp(-1.0, 2.0), z
+
+
+def unproject(uv: torch.Tensor, z: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:
+    """The inverse of `project`: uv (B, T, N, 2) in [0, 1] across the frame,
+    z (B, T, N) depth in metres, proj (B, T, 3, 4), all fp32 -> (B, T, N, 3)
+    scene-normalised positions.
+
+    Solved in float64: the matrix carries the clip's scale and the frame size,
+    and a point that comes back a millimetre off is the error this exists to
+    remove.
+    """
+    q = torch.cat([uv * z[..., None], z[..., None]], dim=-1).double()
+    inv = torch.linalg.inv(proj[..., :3].double())                     # (B, T, 3, 3)
+    pos = torch.einsum("btij,btnj->btni", inv, q - proj[:, :, None, :, 3].double())
+    return pos.to(uv.dtype)

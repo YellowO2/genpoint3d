@@ -16,6 +16,10 @@ this is that way, beside DINOv3 rather than instead of it:
     correlation    a 7x7 window around the current guess in every frame, against
                    a 7x7 support window around the query point in frame 0:
                    49 x 49 numbers per level, through an MLP
+    places         optionally (`xyz`), where each cell of that window is in 3D,
+                   from the depth map, as an offset from the current guess:
+                   49 x 3 more numbers per level into the same MLP (TAPIP3D
+                   gives every cell its 3D position the same way)
 
 It needs the current guess as a PIXEL, which the rest of the model never does:
 `image_projection` and `project` (`tools/camera.py`) are the camera, folded into one matrix per
@@ -68,7 +72,8 @@ class FineFinder(nn.Module):
     """
 
     def __init__(self, levels: int = 4, radius: int = 3, feat_dim: int = 128,
-                 hidden: int = 256, width: int = 64, chunk: int = 2) -> None:
+                 hidden: int = 256, width: int = 64, chunk: int = 2,
+                 xyz: bool = False) -> None:
         super().__init__()
         self.levels, self.radius, self.chunk = levels, radius, chunk
         self.out_dim = levels * width
@@ -82,6 +87,14 @@ class FineFinder(nn.Module):
         dy, dx = torch.meshgrid(r, r, indexing="ij")
         self.register_buffer("delta", torch.stack([dx, dy], dim=-1).reshape(k, 2),
                              persistent=False)
+        # The window's 3D offsets join the table at the MLP's first layer:
+        # these are that layer's extra columns, kept apart so the first
+        # layer keeps its name and shape. Zeros, made without drawing from
+        # the random generator, so with them the finder starts as it is
+        # without, and every weight after it is drawn as it is without.
+        self.xyz = xyz
+        if xyz:
+            self.xyz_in = nn.Parameter(torch.zeros(hidden, k * 3))
 
     # ---------------------------------------------------------------- the CNN
     def _features(self, frames: torch.Tensor) -> torch.Tensor:
@@ -130,30 +143,66 @@ class FineFinder(nn.Module):
             # the signal, and autocast would widen both arguments anyway.
             yield F.grid_sample(fmap.float(), grid, align_corners=True).permute(0, 2, 3, 1)
 
-    def _correlate(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor) -> torch.Tensor:
+    def _places(self, xyz: torch.Tensor, pos: torch.Tensor, cell: torch.Tensor):
+        """xyz (b, T, 3, h, w) each cell's 3D position, pos (b, T, N, 3) the
+        current guess, cell as `_windows` takes it -> per level (b, T, N, K * 3):
+        where each cell of the window is, relative to the guess.
+
+        The positions go through the same pyramid and the same sampling as the
+        features, so cell i of a window's offsets is cell i of its table. A
+        fourth channel of ones goes with them and comes out as how much of the
+        sample fell inside the frame: outside, the offset is zero, and not
+        minus the guess, which is what a zero position would give."""
+        b, T, N = pos.shape[:3]
+        inside = torch.ones_like(xyz[:, :, :1])
+        for p in self._windows(torch.cat([xyz, inside], dim=2).flatten(0, 1), cell):
+            p = p.reshape(b, T, N, -1, 4)
+            yield (p[..., :3] - p[..., 3:] * pos[:, :, :, None].float()).flatten(3)
+
+    def _read(self, table: torch.Tensor, places: torch.Tensor | None) -> torch.Tensor:
+        """The MLP on one level's table, and on its window's offsets if any."""
+        if places is None:
+            return self.corr_mlp(table)
+        first = self.corr_mlp[0](table) + F.linear(places, self.xyz_in)
+        return self.corr_mlp[1:](first)
+
+    def _correlate(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor,
+                   xyz: torch.Tensor | None, pos: torch.Tensor | None) -> torch.Tensor:
         b, T, C, h, w = fmap.shape
         N = uv.shape[2]
         size = uv.new_tensor([w, h])
         # See the module docstring for the eighth of a cell.
         sup = self._windows(fmap[:, 0], uv0 * size - 0.5 / STRIDE)
-        win = self._windows(fmap.flatten(0, 1), (uv * size - 0.5 / STRIDE).flatten(0, 1))
+        cell = (uv * size - 0.5 / STRIDE).flatten(0, 1)
+        win = self._windows(fmap.flatten(0, 1), cell)
+        places = (self._places(xyz, pos, cell) if xyz is not None
+                  else [None] * self.levels)
         out = []
-        for s, t in zip(sup, win):
+        for s, t, p in zip(sup, win, places):
             cost = torch.einsum("bnsc,btnkc->btnsk", s, t.reshape(b, T, N, -1, C)) * C ** -0.5
-            out.append(self.corr_mlp(cost.flatten(3)))
+            out.append(self._read(cost.flatten(3), p))
         return torch.cat(out, dim=-1)
 
-    def forward(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor) -> torch.Tensor:
+    def forward(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor,
+                xyz: torch.Tensor | None = None, pos: torch.Tensor | None = None) -> torch.Tensor:
         """
         fmap  (B, T, C, h, w)  from `encode`
         uv    (B, T, N, 2)     the current guess in each frame, [0, 1] across, fp32
         uv0   (B, N, 2)        the query point in frame 0, likewise
+        xyz   (B, T, 3, h, w)  each cell's 3D position, in the model's own
+                               units (the finder with `xyz` only)
+        pos   (B, T, N, 3)     the current guess in 3D, in the same units
 
         returns (B, T, N, out_dim)
         """
+        if self.xyz != (xyz is not None):
+            raise ValueError("a finder built with xyz reads each cell's 3D position, "
+                             "and only that one does")
         out = []
         for i in range(0, fmap.shape[0], self.chunk):
-            part = (fmap[i:i + self.chunk], uv[i:i + self.chunk], uv0[i:i + self.chunk])
+            cut = slice(i, i + self.chunk)
+            part = (fmap[cut], uv[cut], uv0[cut],
+                    None if xyz is None else xyz[cut], None if pos is None else pos[cut])
             if torch.is_grad_enabled():
                 out.append(checkpoint(self._correlate, *part, use_reentrant=False))
             else:
