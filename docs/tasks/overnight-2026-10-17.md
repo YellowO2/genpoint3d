@@ -102,3 +102,7 @@ at the last visible frames, so they are generous.
    virtual tracks), and its visibility estimate fed back into every iteration, so
    it knows when to ignore the image. Tonight's runs test exactly these two:
    more points (run34_pts256) and a visibility output (run35_vis, run36_vis_48).
+
+Queued (03:40): run37_visfb = run35_vis + `--vis-feedback 1` (the visibility
+guess fed back into the next refinement round, TAPIP3D's design; commit 2badd0c).
+Compared with run35_vis and run32_hidden.
