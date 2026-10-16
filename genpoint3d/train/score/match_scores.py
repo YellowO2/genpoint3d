@@ -1,4 +1,4 @@
-"""How often the patch that looks most like each point is the one it is in."""
+"""Check the matcher: is the patch it picks the one the point is really in?"""
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.tools.batch import match_targets, to_metres
