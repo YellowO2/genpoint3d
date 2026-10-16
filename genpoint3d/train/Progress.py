@@ -74,6 +74,7 @@ class Progress:
                     f" MOVING {m['train_apd_moving']:.3f}"
                     f" (static {m['train_apd_moving_static']:.3f})"
                     if fit_scores is not None else "")
+                 + _hidden_line(m)
                  + _forecast_line(m)
                  + _match_line(m) + _match_line(m, "train_")
                  + f"  ({time.time() - self.tv:.0f}s)")
@@ -82,6 +83,14 @@ class Progress:
 
     def finish(self) -> None:
         log.info(f"\ndone in {(time.time() - self.t0) / 60:.1f} min -> {self.settings.out}")
+
+
+def _hidden_line(m: dict) -> str:
+    """APD where the point is hidden on the observed frames, all points and
+    then moving points. Empty if it was not scored."""
+    if "apd_hidden" not in m:
+        return ""
+    return f"  hid {m['apd_hidden']:.3f} mv {m['apd_moving_hidden']:.3f}"
 
 
 def _forecast_line(m: dict) -> str:

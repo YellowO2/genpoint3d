@@ -70,7 +70,8 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
             # global rescale. About half our query points never move, and
             # "nothing moves" tracks those perfectly, so the plain average
             # can sit well above its baseline without any tracking in it.
-            mv = vis & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4)[:, None]
+            moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4
+            mv = vis & moving[:, None]
             s3 = lambda p: tapvid3d_metrics(p, gt_m, mv, b["intrinsics_256"],
                                             b["extrinsics"], scaling="none",
                                             per_clip=True)
@@ -82,6 +83,7 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
             for t in MOVING_THRESHOLDS:
                 m[f"moving_within_{t}"] = mv_m[f"pts_within_{t}"]
             m["apd_moving_static"] = s3(gt_m[:, :1].expand_as(gt_m))["average_pts_within_thresh"]
+            m.update(_hidden_scores(pred_m, gt_m, vis, moving, b, j))
             if j.cutoff:
                 others = [to_metres(o, b) for o in prediction.others]
                 m.update(_split_scores(pred_m, others, gt_m, vis, mv, b, j))
@@ -124,9 +126,7 @@ def _split_scores(pred_m, others, gt_m, vis, moving, b: dict, j: ScoreSettings) 
     for name, points, scaling in (("apd", vis, j.scaling), ("apd_moving", moving, "none")):
         for part, frames in (("_obs", ~future), ("_fut", future)):
             mask = points & frames[None, :, None]
-            score = lambda p: tapvid3d_metrics(p, gt_m, mask, b["intrinsics_256"],
-                                               b["extrinsics"], scaling=scaling,
-                                               per_clip=True)["average_pts_within_thresh"]
+            score = lambda p: _apd(p, gt_m, mask, b, scaling)
             out[name + part] = score(pred_m)
             out[name + "_static" + part] = score(gt_m[:, :1].expand_as(gt_m))
             if part == "_fut":
@@ -136,6 +136,33 @@ def _split_scores(pred_m, others, gt_m, vis, moving, b: dict, j: ScoreSettings) 
                 if best is not None:
                     out[name + f"_fut_best{len(others) + 1}"] = score(best)
     return out
+
+
+def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:
+    """The point still exists when nobody can see it. Scored where it is
+    hidden (occluded or out of the frame) on the observed frames, `_hidden`,
+    and with a cutoff C on every forecast frame, hidden or not, `_fut_all`.
+    All points with the protocol's rescale, and the moving ones without, as
+    above. `moving` (B, N) is the points that move, judged on visible frames.
+    """
+    T = gt_m.shape[1]
+    frame = torch.arange(T, device=gt_m.device)[None, :, None]
+    observed = frame < j.cutoff if j.cutoff else torch.ones_like(frame, dtype=torch.bool)
+    out = {}
+    for name, points, scaling in (("apd", torch.ones_like(moving), j.scaling),
+                                  ("apd_moving", moving, "none")):
+        hidden = ~vis & points[:, None] & observed
+        out[name + "_hidden"] = _apd(pred_m, gt_m, hidden, b, scaling)
+        if j.cutoff:
+            future = points[:, None] & ~observed
+            out[name + "_fut_all"] = _apd(pred_m, gt_m, future, b, scaling)
+    return out
+
+
+def _apd(pred_m, gt_m, mask, b: dict, scaling: str):
+    """(B,) APD of `pred_m` on the (point, frame) entries `mask` keeps."""
+    return tapvid3d_metrics(pred_m, gt_m, mask, b["intrinsics_256"], b["extrinsics"],
+                            scaling=scaling, per_clip=True)["average_pts_within_thresh"]
 
 
 def _best_of(pred_m, others, gt_m, mask):

@@ -205,6 +205,13 @@ class Settings(argparse.Namespace):
                             "(_fut), with the stop and constant-velocity "
                             "baselines beside the future ones. At least 2, which "
                             "constant velocity needs. 0 validates pure tracking.")
+        p.add_argument("--hidden-loss", type=float, default=0.0, metavar="W",
+                       help="the method's loss also counts the frames where a "
+                            "point is hidden (occluded or out of the frame), "
+                            "weighted W against a visible one. Kubric gives the "
+                            "true position there too. 1 counts them the same; 0 "
+                            "trains on visible frames only, every run before it. "
+                            "The match loss stays on visible points.")
         p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
         # Evaluate and checkpoint the averaged weights, not the jittering ones.
         # 0 disables. The paper lists EMA among its training ingredients.
@@ -229,6 +236,8 @@ class Settings(argparse.Namespace):
             p.error("--eval-cutoff is 0 (off) or at least 2")
         if settings.fine_xyz and not settings.fine:
             p.error("--fine-xyz adds to the relative finder: it needs --fine 1")
+        if settings.hidden_loss < 0:
+            p.error("--hidden-loss is a weight: 0 or more")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

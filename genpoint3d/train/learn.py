@@ -5,8 +5,8 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, fine_inputs, known_frame0, match_targets, random_cutoff, to_device,
-    visual_mask,
+    apd_weight, fine_inputs, hidden_weight, known_frame0, match_targets, random_cutoff,
+    to_device, visual_mask,
 )
 from genpoint3d.train.tools.flow import flow_matching_loss
 from genpoint3d.train.tools.matching import match_ce
@@ -26,6 +26,8 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     cutoff = random_cutoff(b, settings.min_context) if settings.random_cutoff else None
     vm = visual_mask(b, cutoff)
     w = apd_weight(b, traj) if settings.depth_scaled_loss else None
+    # The method's loss only: the match stays on visible points.
+    mask, w = hidden_weight(vis, w, settings.hidden_loss)
     kx0 = known_frame0(b) if settings.anchor_frame0 else None
     # Before any backward pass of the step, and shared by all of them.
     fine = fine_inputs(model, b, amp, grad=True)
@@ -52,13 +54,13 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
             # Back-propagated inside, one iteration at a time, so the
             # step holds one forward pass in memory rather than
             # --refine-iters of them. The loss comes back detached.
-            loss, _ = regress_loss(model, traj, anchor, mask=vis, weight=w,
+            loss, _ = regress_loss(model, traj, anchor, mask=mask, weight=w,
                                    known_x0=kx0, loss_type=settings.loss_type,
                                    iters=settings.refine_iters, backward=1 / settings.accum,
                                    context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                                    **fine)
         else:
-            loss, _ = flow_matching_loss(model, traj, anchor, mask=vis, weight=w,
+            loss, _ = flow_matching_loss(model, traj, anchor, mask=mask, weight=w,
                                          known_x0=kx0, loss_type=settings.loss_type,
                                          context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                                          **fine)

@@ -104,6 +104,20 @@ def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     return w / w.mean().clamp(min=1e-8)
 
 
+def hidden_weight(vis: torch.Tensor, weight: torch.Tensor | None,
+                  hidden: float) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The loss's `mask` and `weight` with hidden frames counted at `hidden`
+    times a visible one. 0 is visible frames only: `vis` and `weight` as given.
+
+    The loss divides by the sum of the weights it counts, so at 1 every frame
+    counts the same and the loss is the plain mean over all of them.
+    """
+    if not hidden:
+        return vis, weight
+    w = torch.where(vis, 1.0, hidden)
+    return torch.ones_like(vis), w if weight is None else w * weight
+
+
 def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     """(B, T, N, 3) model units -> metres, using each clip's own normalisation.
 
