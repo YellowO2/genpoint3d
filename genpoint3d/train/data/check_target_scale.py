@@ -1,4 +1,8 @@
-"""Stop a run whose denoising target is far from unit variance."""
+"""Stop a run whose target paths are far from unit size, before training starts.
+
+It matters for the flow (diffusion) method, which mixes the paths with noise
+of size 1. The no-noise method runs the same check, where it is only a sanity check.
+"""
 
 import logging
 
