@@ -16,6 +16,7 @@ Run:  python scripts/evaluate.py --ckpt outputs/run3493/best.pt \
 import argparse
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -95,10 +96,14 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
 #   blind           no features at all -- the forecasting null embedding
 #   swap-frames     another clip's RGB frames, for the relative finder's CNN
 #   no-fine         no RGB frames: the relative finder is skipped
+#   hide-hidden     every image input blanked for each point on each frame
+#                   where it is truly hidden, as if it were a forecast frame
 # The first five are about DINOv3 and leave the frames alone; on a checkpoint
-# without the relative finder the last two change nothing.
+# without the relative finder the next two change nothing. hide-hidden reads
+# the true visibility, so it is a diagnostic only: does the image of whatever
+# is in front pull a hidden point onto it?
 ABLATIONS = ("none", "swap-features", "noise-features", "shuffle-pos", "swap-id", "blind",
-             "swap-frames", "no-fine")
+             "swap-frames", "no-fine", "hide-hidden")
 
 
 class Ablated:
@@ -322,11 +327,21 @@ def main() -> int:
         print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
         for kind in kinds:
-            a = score(model, Ablated(loader, kind), judging, split=kind)
+            # hide-hidden changes what the model is shown per point, which the
+            # batch alone cannot say, so it goes through the scoring rules.
+            a = (score(model, loader, replace(judging, hide_hidden=True), split=kind)
+                 if kind == "hide-hidden"
+                 else score(model, Ablated(loader, kind), judging, split=kind))
             apd = a["average_pts_within_thresh"]
             print(f"    {kind:<16} {apd:>7.4f}"
                   f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
             m[f"ablate_{kind}"] = apd
+            if kind == "hide-hidden":
+                # The point of this one is the hidden score, so print it too.
+                for k in HIDDEN_KEYS:
+                    if k in a:
+                        print(f"      {k:<30} {a[k]:.4f}  (intact {m.get(k, float('nan')):.4f})")
+                        m[f"ablate_{kind}_{k}"] = a[k]
         print("\n    ~1.00x means the model is not using that input at all.")
         print(f"    For scale, the static baseline is {m['apd_static']:.4f}.")
 

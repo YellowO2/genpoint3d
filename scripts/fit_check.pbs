@@ -68,6 +68,10 @@ CUTOFF=${CUTOFF:-}
 [ -n "$CUTOFF" ] && FC="--eval-cutoff $CUTOFF" || FC=""
 SAMPLES=${SAMPLES:-}
 [ -n "$SAMPLES" ] && SM="--samples $SAMPLES" || SM=""
+# ABLATE="hide-hidden" (or any of evaluate.py's --ablate kinds, space
+# separated) also scores with that input destroyed.
+ABLATE=${ABLATE:-}
+[ -n "$ABLATE" ] && AB="--ablate $ABLATE" || AB=""
 # SPLITS=val scores only the validation clips.
 SPLITS=${SPLITS:-train val}
 # Per job, not shared: split_dir.py clears the directory before relinking, so
@@ -86,8 +90,8 @@ for SPLIT in $SPLITS; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT $FC $SM \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}.json"
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT $FC $SM $AB \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}${ABLATE:+_ab${ABLATE// /_}}.json"
 done
 
 echo "=== FIT CHECK DONE ==="

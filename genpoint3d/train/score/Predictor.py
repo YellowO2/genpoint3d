@@ -38,11 +38,21 @@ class Predictor:
                 raise ValueError(f"cutoff {j.cutoff} leaves none of {traj.shape[1]} frames to forecast")
             cutoff = torch.full((traj.shape[0],), j.cutoff, device=j.device)
         vm = visual_mask(b, cutoff)
+        # What the model is shown. The scores still use `vm`: hiding is a
+        # change to the input, not to which frames count.
+        shown = vm
+        if j.hide_hidden and vm is not None:
+            # A diagnostic that reads the truth, set only by `scripts/evaluate.py
+            # --ablate hide-hidden`: each point's image is blanked wherever it is
+            # hidden, as a forecast frame is, except frame 0, the query.
+            in_view = vis.bool().clone()
+            in_view[:, 0] = True
+            shown = vm[..., None] & in_view
 
         kx0 = known_frame0(b) if j.anchor_frame0 else None
         # The same autocast as the training step: a model trained in bf16 and
         # scored in fp32 is being scored on numerics it never saw.
-        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+        cond = dict(context=ctx, visual_mask=shown, id_card=idc, patch_xyz=pxyz,
                     **fine_inputs(model, b, j.amp))
         # Regress is deterministic: k samples would be k copies of one answer.
         others = ()

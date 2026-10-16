@@ -474,6 +474,10 @@ class PointDiT(nn.Module):
         context:     (B, T, P, D)    DINOv3 patch features per frame  [4c]
         visual_mask: (B, T) bool     True = frame has visual conditioning.
                                      False swaps in `null_ctx` -> forecasting.
+                     or (B, T, N)    the same per point: each point's frame is
+                                     blanked on its own, as a forecast frame
+                                     is. Only the `hide-hidden` diagnostic in
+                                     `scripts/evaluate.py` passes this shape.
         id_card:     (B, N, D)       DINOv3 feature sampled at the query  [3]
         patch_xyz:   (B, T, P, 3)    each patch's 3D position, `anchor`'s space.
                                      Required with `context`: *what* plus *where*.
@@ -499,6 +503,15 @@ class PointDiT(nn.Module):
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
+        # Every image reading below is per point once it has been looked up
+        # (the match, the cost volume, the finder, the distances), so a mask
+        # per point blanks it exactly. The feature map itself is shared by a
+        # frame's points: it is blanked for a frame only when every point is,
+        # and each blanked point's cross-attention reads `null_ctx` instead.
+        point_mask = frame_mask = None
+        if visual_mask is not None:
+            point_mask = visual_mask if visual_mask.dim() == 3 else visual_mask[..., None]
+            frame_mask = visual_mask.any(-1) if visual_mask.dim() == 3 else visual_mask
 
         if self.upsample > 1 and context is not None and patch_xyz is not None:
             context, patch_xyz = self._upsample(context, patch_xyz)
@@ -562,8 +575,8 @@ class PointDiT(nn.Module):
 
             cost = torch.einsum("bnsc,btnkc->btnsk", sup, nb) * self.cv_dim ** -0.5
             cv = self.cv_mlp(torch.cat([cost.flatten(3), off.flatten(3)], dim=-1))
-            if visual_mask is not None:
-                cv = cv * visual_mask[..., None, None]
+            if point_mask is not None:
+                cv = cv * point_mask[..., None]
 
         # --- [relative finder] the window at the guess vs the window at the query ---
         # The lookup the comment at the top says is unnecessary in 3D, done
@@ -582,8 +595,8 @@ class PointDiT(nn.Module):
                 places = (() if fine_xyz is None
                           else (fine_xyz.float() / self.traj_scale, pos / self.traj_scale))
             fine = self.fine(fine_map, uv, uv0[:, 0], *places)
-            if visual_mask is not None:
-                fine = fine * visual_mask[..., None, None]
+            if point_mask is not None:
+                fine = fine * point_mask[..., None]
 
         # --- [correlation] template vs every patch, on the RAW features ---
         # Read before the adapter overwrites `context`. The model previously had
@@ -597,8 +610,8 @@ class PointDiT(nn.Module):
                 # fp32: the match is decided by differences in the third
                 # decimal of a cosine, which bf16 does not hold.
                 corr = self._cosine(context.float(), id_card.float())
-                if visual_mask is not None:
-                    corr = corr * visual_mask[..., None, None]
+                if point_mask is not None:
+                    corr = corr * point_mask[..., None]
                 # The best match, by appearance alone and over the whole frame:
                 # the patch that looks most like the point, then a soft-argmax
                 # over its 3x3 on the grid for sub-patch precision (TAPIR's
@@ -631,23 +644,23 @@ class PointDiT(nn.Module):
                         self._describe(corr, pk, corr.gather(-1, pk[..., None])[..., 0],
                                        vals, idx, pxyz, a0, tau)
                         for pk in peaks.unbind(-1)[1:]], dim=-1)
-                if visual_mask is not None:
-                    match = match * visual_mask[..., None, None]
+                if point_mask is not None:
+                    match = match * point_mask[..., None]
         elif (self.correlate and context is not None and id_card is not None
                 and patch_xyz is not None):
             q = self.corr_q(id_card)                                  # (B, N, D)
             corr = torch.einsum("bnc,btpc->btnp", q, self.corr_k(context))
             corr = corr * self.dim ** -0.5
-            if visual_mask is not None:
-                corr = corr * visual_mask[..., None, None]
+            if point_mask is not None:
+                corr = corr * point_mask[..., None]
             # Softly, where in this frame the template matches best. Independent
             # of the diffused path, so it is evidence rather than an echo of the
             # model's own guess -- the one term here that the image alone decides.
             with torch.autocast(device_type=dev.type, enabled=False):
                 match_xyz = torch.einsum("btnp,btpc->btnc",
                                          corr.float().softmax(-1), patch_xyz.float())
-            if visual_mask is not None:
-                match_xyz = match_xyz * visual_mask[..., None, None]
+            if point_mask is not None:
+                match_xyz = match_xyz * point_mask[..., None]
 
         # --- [3] one conditioning vector per (frame, point) ---
         if k.dim() == 1:
@@ -675,9 +688,9 @@ class PointDiT(nn.Module):
             context = context + self.patch_pos(patch_xyz).to(context.dtype)
 
             # Masked frames lose features AND positions, before any attention.
-            if visual_mask is not None:
+            if frame_mask is not None:
                 context = torch.where(
-                    visual_mask[..., None, None], context, self.null_ctx.to(context.dtype)
+                    frame_mask[..., None, None], context, self.null_ctx.to(context.dtype)
                 )
 
         # --- the same distances, folded into the attention bias ---
@@ -690,8 +703,8 @@ class PointDiT(nn.Module):
             # same null vector, whatever the weights. Zeroed anyway: this is the
             # forecasting path, and a hole in it should not wait for the null
             # handling to change before it becomes a leak.
-            if visual_mask is not None:
-                dist2 = dist2 * visual_mask[..., None, None]
+            if point_mask is not None:
+                dist2 = dist2 * point_mask[..., None]
             dist2 = dist2.reshape(B * T, N, -1)
         else:
             dist2 = None
@@ -750,8 +763,18 @@ class PointDiT(nn.Module):
 
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:
-                h = cross(h, cs, context.reshape(B * T, -1, self.dim),
-                          dist2=dist2, corr=corr, noise=noise)
+                frame_ctx = context.reshape(B * T, -1, self.dim)
+                seen = cross(h, cs, frame_ctx, dist2=dist2, corr=corr, noise=noise)
+                if visual_mask is not None and visual_mask.dim() == 3:
+                    # A point blanked in a frame its neighbours still see reads
+                    # exactly what a fully blanked frame would give it: the
+                    # null in every patch, and its distances and match already
+                    # zeroed above. Each point's cross-attention is its own, so
+                    # picking between the two per point leaks nothing.
+                    blank = cross(h, cs, self.null_ctx.to(frame_ctx.dtype).expand_as(frame_ctx),
+                                  dist2=dist2, corr=corr, noise=noise)
+                    seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
+                h = seen
             h = h.view(B, T, N, -1)
 
         # --- [5] head ---
