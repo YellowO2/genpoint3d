@@ -78,3 +78,27 @@ Its hidden-point ingredients (from its code): equal-weight position loss on
 occluded frames (we have that now), a visibility prediction fed back each
 iteration, and a starting guess carried forward from the last estimate through
 sliding windows. Ours starts every frame from the query position.
+
+### Is TAPIP3D's hidden score just "keep the last place you saw it"? No. (04:00)
+
+Moving points, same 100 clips. The baselines use the TRUE position (and speed)
+at the last visible frames, so they are generous.
+
+| | Hidden | Occluded | Out of frame |
+|---|---|---|---|
+| TAPIP3D | **0.635** | 0.674 | 0.494 |
+| last seen, held still | 0.188 | 0.220 | 0.115 |
+| last seen, kept at its last speed | 0.267 | 0.301 | 0.212 |
+| ours (run31 / run32, 349 val clips) | 0.148 / 0.170 | 0.171 / 0.190 | 0.089 / 0.113 |
+
+1. TAPIP3D is far above both carry-forward baselines, so it really works out where
+   hidden points go. Carrying the last estimate forward is not what makes it good.
+2. We are BELOW "hold the last place you saw it". The model does worse than not
+   moving a hidden point at all: something actively pulls hidden points to the
+   wrong place. That fits the diagnosis that every image input in a hidden frame
+   describes the object in front.
+3. Where TAPIP3D's extra skill can come from: other points on the same object
+   that are still visible (it trains on 384 points per clip, tracks talk through
+   virtual tracks), and its visibility estimate fed back into every iteration, so
+   it knows when to ignore the image. Tonight's runs test exactly these two:
+   more points (run34_pts256) and a visibility output (run35_vis, run36_vis_48).
