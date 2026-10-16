@@ -15,8 +15,8 @@ Three numbers come out of it:
        today.
   AJ   `average_jaccard` -- the headline number in every paper. Counts a point
        only if it is both close enough AND predicted visible, so it needs a
-       visibility PREDICTION. We have no visibility head yet, so this is None
-       until step 4 lands.
+       visibility PREDICTION, so it is scored only for a model trained
+       with the visibility head (`--vis-loss`).
   OA   `occlusion_accuracy` -- also needs the prediction. Same story.
 
 The thresholds are the 2D TAP pixel thresholds {1,2,4,8,16} back-projected into

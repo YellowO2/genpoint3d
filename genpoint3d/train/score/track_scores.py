@@ -51,6 +51,8 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
         pred_m = pred_m.clone()
         pred_m[..., a] = gt_m[..., a]
     m = score(pred_m)
+    if prediction.visibility is not None:
+        m.update(_jaccard_scores(pred_m, gt_m, prediction, judging))
     # Static Baseline: each point stays where it started. Free -- no
     # sampling -- and the number a reader will ask for first.
     m["apd_static"] = score(
@@ -89,6 +91,28 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
                 m.update(_split_scores(pred_m, others, gt_m, vis, mv, b, j))
     out.update(m)
     return out
+
+
+def _jaccard_scores(pred_m, gt_m, prediction: Prediction, j: ScoreSettings) -> dict:
+    """The benchmark's two scores that need the visibility head's answer:
+    `average_jaccard` (with `jaccard_{t}` at each threshold) and
+    `occlusion_accuracy`. A logit above 0 (sigmoid above 0.5) says visible.
+
+    Only on the frames that have their image: with a cutoff, a forecast frame
+    has nothing to see, so AJ and OA are for the observed frames alone.
+    Over every query point and the true visibility, even when the other
+    scores keep only the moving points: a point left out of the truth but
+    called visible would count against the head for no reason. The rescale is
+    the protocol's, fitted on those observed frames.
+    """
+    b = prediction.batch
+    T = j.cutoff or gt_m.shape[1]
+    m = tapvid3d_metrics(pred_m[:, :T], gt_m[:, :T], b["visibility"][:, :T],
+                         b["intrinsics_256"][:, :T], b["extrinsics"][:, :T],
+                         pred_visible=prediction.visibility[:, :T] > 0,
+                         space=j.space, scaling=j.scaling, per_clip=True)
+    return {k: v for k, v in m.items() if k.startswith("jaccard_")
+            or k in ("average_jaccard", "occlusion_accuracy")}
 
 
 def _split_scores(pred_m, others, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict:

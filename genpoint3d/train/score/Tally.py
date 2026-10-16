@@ -101,8 +101,10 @@ def _match(m: dict) -> str:
 
 def _visible(m: dict) -> str:
     """The visibility head's accuracy: over every entry, then where the
-    point is hidden, then where it is in view."""
+    point is hidden, then where it is in view; then the benchmark's average
+    Jaccard and occlusion accuracy, on the observed frames."""
     if "vis_acc" not in m:
         return ""
     return (f"  vis {m['vis_acc']:.2f} (hid {m['vis_acc_hidden']:.2f}"
-            f" seen {m['vis_acc_visible']:.2f})")
+            f" seen {m['vis_acc_visible']:.2f})"
+            f"  AJ {m['average_jaccard']:.3f} OA {m['occlusion_accuracy']:.3f}")
