@@ -240,3 +240,7 @@ runs (48 grid, 6,000 steps). Since run33 already gives the baseline, the most
 informative single long run is probably run33 + `--hidden-loss 1 --vis-loss 1
 --vis-feedback 1 --causal 0` (everything TAPIP3D does that we now have), compared
 with run33's 0.271 hidden. If that moves hidden clearly, split it up afterwards.
+
+Queued (06:45), chained after run38 so it blocks nothing now: **run40_hidden_all_48**
+= run33 + `--hidden-loss 1 --vis-loss 1 --vis-feedback 1 --causal 0`. Starts
+around 16:30 and runs ~10 h. Cancel it with `qdel` if you prefer a different long run.
