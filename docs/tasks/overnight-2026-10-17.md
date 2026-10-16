@@ -139,3 +139,33 @@ queued instead **run38_fc_xyz_48**: the best tracker (48 grid, CNN + 3D, as
 run33) trained and scored in forecasting mode (random cutoff, eval cutoff 12).
 That gives the report its forecasting numbers on our best tracker, whatever the
 hidden-point work turns out to need.
+
+## Blanking the image on hidden points does not help (05:00)
+
+`--ablate hide-hidden` (evaluation only, uses the truth): every image input of a
+(point, frame) that is truly hidden is blanked, exactly as a forecast frame is.
+Moving points, val, 349 clips. Last seen (true position held): 0.204.
+
+| Model | Hidden, normal | Hidden, image blanked |
+|---|---|---|
+| run32_hidden (trained on tracking only; never saw blanked frames) | 0.170 | 0.088 |
+| run29_fc_rg24_fine (trained with forecast blanking, so it knows blanked frames) | 0.167 | 0.164 |
+
+The forecasting-trained model, which understands blanked inputs, scores the same
+with the image removed. So the misleading image is not what keeps hidden points
+low; my earlier diagnosis was wrong, or at least not the main cause. With or
+without eyes, the model places a hidden point about as well as holding its own
+last estimate.
+
+That is the same thing we saw in forecasting: the future part barely beats
+freezing its own last guess. Hidden frames and future frames fail the same way:
+**when it cannot see, the model does not reason about motion at all.** That
+supports the user's view that occlusion and forecasting are one problem.
+
+TAPIP3D's 0.635 is far above "keep the last speed" (0.267), so it does reason
+when blind. The likely source is the other points of the same object that are
+still visible (a hidden point on a visible ball can be placed from the ball), but
+256 points per clip did not help us in 600 steps. The open question for the
+morning: is that skill something we lack in the design, or does it only appear
+with much longer training? run38_fc_xyz_48 (long, forecasting mode) will show
+whether the future part starts to beat freezing with long training.
