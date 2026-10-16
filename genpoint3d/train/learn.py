@@ -11,6 +11,7 @@ from genpoint3d.train.tools.batch import (
 from genpoint3d.train.tools.flow import flow_matching_loss
 from genpoint3d.train.tools.matching import match_ce
 from genpoint3d.train.tools.regress import regress_loss
+from genpoint3d.train.tools.visibility import visible_target
 
 
 def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
@@ -29,6 +30,11 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     # The method's loss only: the match stays on visible points.
     mask, w = hidden_weight(vis, w, settings.hidden_loss)
     kx0 = known_frame0(b) if settings.anchor_frame0 else None
+    # With --vis-loss, what the visibility head should say: every frame,
+    # hidden and forecast ones included, whatever --hidden-loss is.
+    seen = {}
+    if settings.vis_loss:
+        seen = dict(visible=visible_target(vis, vm), vis_weight=settings.vis_loss)
     # Before any backward pass of the step, and shared by all of them.
     fine = fine_inputs(model, b, amp, grad=True)
     match = 0.0
@@ -54,22 +60,26 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
             # Back-propagated inside, one iteration at a time, so the
             # step holds one forward pass in memory rather than
             # --refine-iters of them. The loss comes back detached.
-            loss, _ = regress_loss(model, traj, anchor, mask=mask, weight=w,
-                                   known_x0=kx0, loss_type=settings.loss_type,
-                                   iters=settings.refine_iters, backward=1 / settings.accum,
-                                   context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
-                                   **fine)
+            loss, parts = regress_loss(model, traj, anchor, mask=mask, weight=w,
+                                       known_x0=kx0, loss_type=settings.loss_type,
+                                       iters=settings.refine_iters, backward=1 / settings.accum,
+                                       context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
+                                       **seen, **fine)
         else:
-            loss, _ = flow_matching_loss(model, traj, anchor, mask=mask, weight=w,
-                                         known_x0=kx0, loss_type=settings.loss_type,
-                                         context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
-                                         **fine)
+            loss, parts = flow_matching_loss(model, traj, anchor, mask=mask, weight=w,
+                                             known_x0=kx0, loss_type=settings.loss_type,
+                                             context=ctx, visual_mask=vm, id_card=idc,
+                                             patch_xyz=pxyz, **seen, **fine)
     if settings.method == "flow":
         (loss / settings.accum).backward()
+        # Logged as the position loss alone, so train_loss stays comparable
+        # with runs without the visibility loss.
+        loss = parts["loss"]
     if fine:
         # Every backward pass above stopped at the feature map. This
         # takes what they left there the rest of the way into the CNN.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             model.fine.replay(b["frames"], fine["fine_map"])
         del fine
-    return Losses(method=loss.item() / settings.accum, match=match)
+    return Losses(method=loss.item() / settings.accum, match=match,
+                  visibility=parts["visibility"].item() / settings.accum)

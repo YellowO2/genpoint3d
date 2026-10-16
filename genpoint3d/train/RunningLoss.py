@@ -16,16 +16,19 @@ class RunningLoss:
 
     def __init__(self, settings) -> None:
         self.match_learn = settings.match_learn
+        self.vis_learn = settings.vis_loss > 0
         self.t0 = time.time()
         self.running = 0.0
         self.since_val, self.since_val_n = 0.0, 0
         self.micro_loss = 0.0
         self.match_sum = 0.0
+        self.vis_sum = 0.0
 
     def add(self, losses: Losses) -> None:
         """One micro-batch's losses."""
         self.micro_loss += losses.method
         self.match_sum += losses.match
+        self.vis_sum += losses.visibility
 
     def step(self, step: int, lr: float) -> None:
         """The optimiser has stepped; every 100 steps, say how it went."""
@@ -43,10 +46,13 @@ class RunningLoss:
         """The mean losses since the last validation, and a fresh start."""
         n = max(self.since_val_n, 1)
         interval = Interval(step=step, train_loss=self.since_val / n,
-                            match_loss=self.match_sum / n if self.match_learn else None)
+                            match_loss=self.match_sum / n if self.match_learn else None,
+                            vis_loss=self.vis_sum / n if self.vis_learn else None)
         self.since_val, self.since_val_n = 0.0, 0
-        self.match_sum = 0.0
+        self.match_sum = self.vis_sum = 0.0
         log.info(f"  VAL step {step}  train_loss {interval.train_loss:.4f}"
                  + (f"  match_loss {interval.match_loss:.4f}"
-                    if interval.match_loss is not None else ""))
+                    if interval.match_loss is not None else "")
+                 + (f"  vis_loss {interval.vis_loss:.4f}"
+                    if interval.vis_loss is not None else ""))
         return interval

@@ -7,6 +7,7 @@ from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.Tally import Tally
 from genpoint3d.train.score.match_scores import match_scores
 from genpoint3d.train.score.track_scores import track_scores
+from genpoint3d.train.score.visibility_scores import visibility_scores
 
 
 @torch.no_grad()
@@ -34,6 +35,7 @@ def score(model, loader, judging: ScoreSettings, split: str) -> dict:
         tally.count(prediction)
         tally.add(match_scores(model, prediction))
         tally.add(track_scores(prediction, judging))
+        tally.add(visibility_scores(prediction))
     predictor.done()
     scores = tally.mean(judging)
     return scores

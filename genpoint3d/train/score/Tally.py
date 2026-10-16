@@ -53,14 +53,14 @@ class Tally:
 def _line(m: dict) -> str:
     """The scores worth a glance, each group only if it was scored: loss and
     APD beside the static baseline; in 2D and on moving points; hidden points;
-    observed and forecast frames; the matcher."""
+    observed and forecast frames; the matcher; the visibility head."""
     line = (f"  loss {m['val_loss']:.4f}"
             f"  APD {m['average_pts_within_thresh']:.3f} (static {m['apd_static']:.3f})")
     if "apd_2d" in m:
         line += f"  2D {m['apd_2d']:.3f} (static {m['apd_2d_static']:.3f})"
     if "apd_moving" in m:
         line += f"  MOVING {m['apd_moving']:.3f} (static {m['apd_moving_static']:.3f})"
-    return line + _hidden(m) + _forecast(m) + _match(m)
+    return line + _hidden(m) + _forecast(m) + _match(m) + _visible(m)
 
 
 def _hidden(m: dict) -> str:
@@ -97,3 +97,12 @@ def _match(m: dict) -> str:
     v = [m[k] for k in MATCH_KEYS[:4]]
     return (f"  match {v[0]:.2f}/{v[1]:.2f} mv {v[2]:.2f}/{v[3]:.2f}"
             f" top5 {m['match_acc_top5_near']:.2f}/{m['match_acc_top5_near_moving']:.2f}")
+
+
+def _visible(m: dict) -> str:
+    """The visibility head's accuracy: over every entry, then where the
+    point is hidden, then where it is in view."""
+    if "vis_acc" not in m:
+        return ""
+    return (f"  vis {m['vis_acc']:.2f} (hid {m['vis_acc_hidden']:.2f}"
+            f" seen {m['vis_acc_visible']:.2f})")

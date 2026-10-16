@@ -77,6 +77,7 @@ class PointDiT(nn.Module):
         fine_levels: int = 4,
         fine_radius: int = 3,
         fine_xyz: bool = False,
+        visibility: bool = False,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -293,6 +294,18 @@ class PointDiT(nn.Module):
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
+        # [visibility head] one logit per (point, frame): can the model see the
+        # point there? Not when it is occluded, out of the frame, or in a
+        # frame with no image. Read from the same final tokens as the
+        # position head, and trained apart from it (`--vis-loss`); nothing
+        # reads it back. Zeros, made without drawing from the random
+        # generator, so every other weight, and every draw after them, is
+        # as it is without it.
+        self.visibility = visibility
+        if visibility:
+            self.vis_weight = nn.Parameter(torch.zeros(dim))
+            self.vis_bias = nn.Parameter(torch.zeros(()))
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -436,7 +449,8 @@ class PointDiT(nn.Module):
         fine_map: torch.Tensor | None = None,
         fine_proj: torch.Tensor | None = None,
         fine_xyz: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        visibility: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         x:           (B, T, N, 3)    noisy trajectory, in model units
         k:           (B,) or (B, T)  noise level in [0, 1]. Per-frame `k` is
@@ -457,6 +471,9 @@ class PointDiT(nn.Module):
         fine_xyz:    (B, T, 3, h, w) each CNN cell's 3D position, `anchor`'s
                                      space, from its depth. Required with
                                      `fine_map` for a finder with `fine_xyz`.
+
+        visibility:  bool            also return the visibility head's
+                                     logits, (B, T, N); a model built with it
 
         returns      (B, T, N, 3)    predicted velocity
 
@@ -716,4 +733,9 @@ class PointDiT(nn.Module):
             h = h.view(B, T, N, -1)
 
         # --- [5] head ---
-        return self.out(self.out_norm(h))
+        h = self.out_norm(h)
+        if not visibility:
+            return self.out(h)
+        if not self.visibility:
+            raise ValueError("this model was built without the visibility head")
+        return self.out(h), F.linear(h, self.vis_weight[None], self.vis_bias[None])[..., 0]

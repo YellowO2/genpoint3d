@@ -212,6 +212,14 @@ class Settings(argparse.Namespace):
                             "true position there too. 1 counts them the same; 0 "
                             "trains on visible frames only, every run before it. "
                             "The match loss stays on visible points.")
+        p.add_argument("--vis-loss", type=float, default=0.0, metavar="W",
+                       help="a visibility head: for every (point, frame) the "
+                            "model also says whether it can see the point "
+                            "there, trained by cross-entropy weighted W next to "
+                            "the method's loss. Not visible is occluded, out of "
+                            "the frame, or in a forecast frame with no image. "
+                            "Nothing reads the answer back yet. 0 builds no "
+                            "head: every run before it.")
         p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
         # Evaluate and checkpoint the averaged weights, not the jittering ones.
         # 0 disables. The paper lists EMA among its training ingredients.
@@ -238,6 +246,8 @@ class Settings(argparse.Namespace):
             p.error("--fine-xyz adds to the relative finder: it needs --fine 1")
         if settings.hidden_loss < 0:
             p.error("--hidden-loss is a weight: 0 or more")
+        if settings.vis_loss < 0:
+            p.error("--vis-loss is a weight: 0 or more")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

@@ -13,3 +13,6 @@ class Interval:
     # The mean matching loss over the same steps, with --match-learn; None
     # without it.
     match_loss: float | None
+    # The mean visibility loss over the same steps, with --vis-loss; None
+    # without it.
+    vis_loss: float | None

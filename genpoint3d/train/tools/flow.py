@@ -21,6 +21,8 @@ from typing import Optional
 import torch
 from torch import nn
 
+from genpoint3d.train.tools.visibility import visibility_error
+
 
 def sample_k(
     batch: int,
@@ -70,6 +72,8 @@ def flow_matching_loss(
     known_x0: Optional[torch.Tensor] = None,
     loss_type: str = "l2",
     per_frame_k: bool = False,
+    visible: Optional[torch.Tensor] = None,
+    vis_weight: float = 0.0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -87,6 +91,10 @@ def flow_matching_loss(
     loss_type: "l2" squares the error, so the worst points dominate; "l21"
             uses the Euclidean distance, which is what the metric counts and
             what TAPIP3D uses (`training/criterion.py`, `loss_type: l21`).
+    visible: (B, T, N) bool, True where the model can see the point
+            (`visible_target`). Given, the model's visibility head is scored
+            against it by cross-entropy, and that loss, times `vis_weight`,
+            is added to the one returned; the dict holds it alone.
     cond:   optional `context` / `visual_mask` / `id_card`, passed straight to
             the model. Absent means the model sees no images.
 
@@ -108,10 +116,16 @@ def flow_matching_loss(
         x_k = torch.cat([known_x0[:, None], x_k[:, 1:]], dim=1)
         target = torch.cat([torch.zeros_like(target[:, :1]), target[:, 1:]], dim=1)
 
-    pred = model(x_k, k, anchor, **cond)
+    if visible is None:
+        pred = model(x_k, k, anchor, **cond)
+        vis_loss = x1.new_zeros(())
+    else:
+        pred, logits = model(x_k, k, anchor, visibility=True, **cond)
+        vis_loss = visibility_error(logits, visible)
     loss = masked_error(pred, target, mask, weight, loss_type)
 
-    return loss, {"loss": loss.detach(), "k_mean": k.mean().detach()}
+    return loss + vis_weight * vis_loss, {"loss": loss.detach(), "k_mean": k.mean().detach(),
+                                          "visibility": vis_loss.detach()}
 
 
 @torch.no_grad()
@@ -122,8 +136,9 @@ def sample(
     steps: int = 50,
     generator: Optional[torch.Generator] = None,
     known_x0: Optional[torch.Tensor] = None,
+    visibility: bool = False,
     **cond,
-) -> torch.Tensor:
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Integrate the velocity field from noise (k=0) to data (k=1).
 
     Plain Euler. The path is straight by construction, so a first-order solver
@@ -133,6 +148,9 @@ def sample(
     training saw it. Measured on run3493: frame 0 scored APD 0.028 despite the
     model being handed that exact position as `anchor`, and every later frame
     inherits the error.
+
+    `visibility` also returns the visibility logits (B, T, N) of the last
+    step, the one nearest the clean tracks.
     """
     B, N, _ = anchor.shape
     x = torch.randn(B, num_frames, N, 3, device=anchor.device, generator=generator)
@@ -140,9 +158,13 @@ def sample(
         x = torch.cat([known_x0[:, None], x[:, 1:]], dim=1)
 
     dk = 1.0 / steps
+    logits = None
     for i in range(steps):
         k = torch.full((B,), i * dk, device=anchor.device)
-        x = x + model(x, k, anchor, **cond) * dk
+        v = model(x, k, anchor, visibility=visibility, **cond)
+        if visibility:
+            v, logits = v
+        x = x + v * dk
         if known_x0 is not None:
             x = torch.cat([known_x0[:, None], x[:, 1:]], dim=1)
-    return x
+    return (x, logits) if visibility else x

@@ -4,14 +4,15 @@ for EVERY frame is bit-identical whatever the frames from the cutoff on hold.
 
   1. blind      every input of frames >= cutoff replaced by noise -- DINOv3
                 features, patch positions, RGB frames, depth, cameras -- and the
-                tracks, the loss and the match loss are bit-identical
+                tracks, the loss, the match loss and the visibility head's
+                logits are bit-identical
   2. sees       the same change on one observed frame does move the tracks,
                 so the check is not passing because nothing is read
 
 Run through the real scoring path (`Predictor`: `to_device`, `fine_inputs`,
 `visual_mask`, the sampler or the refiner) on a real cached batch, for flow
 and regress, with and without the relative finder (and its depth), with the
-match trained.
+match trained and the visibility head on.
 
 Every weight is pushed off its initial value first. Several readers start at
 exactly zero (the output head, the cost volume's gate, the finder's readers)
@@ -83,7 +84,8 @@ def changed(b: dict, frames: slice) -> dict:
 
 
 def run(model, b: dict, judging: ScoreSettings):
-    """The tracks, the loss and the match loss of the training step."""
+    """The tracks, the loss, the match loss of the training step and the
+    visibility logits."""
     # The flow loss draws its noise level and noise from the global generator.
     torch.manual_seed(3)
     prediction = Predictor(model, judging)(b)
@@ -91,14 +93,15 @@ def run(model, b: dict, judging: ScoreSettings):
     with torch.no_grad():
         scores, target, valid = match_targets(model, pb, prediction.visual_mask)
         match = match_ce(scores, model.match_head.tau(), target, valid).sum() / valid.sum()
-    return prediction.tracks, prediction.loss, match
+    return prediction.tracks, prediction.loss, match, prediction.visibility
 
 
 def check(flags: list[str], cache: Path, b: dict) -> bool:
     settings = Settings.from_command_line(
         ["--cache", str(cache), "--dim", "32", "--depth", "2", "--heads", "2",
          "--match-learn", "1", "--match-dim", "16", "--fine-levels", "2",
-         "--refine-iters", "2", "--target", "displacement", "--no-amp"] + flags)
+         "--refine-iters", "2", "--target", "displacement", "--vis-loss", "1",
+         "--no-amp"] + flags)
     torch.manual_seed(0)
     model = build_model(settings, b["context"].shape[-1], True)
     with torch.no_grad():
@@ -111,11 +114,12 @@ def check(flags: list[str], cache: Path, b: dict) -> bool:
     base = run(model, b, judging)
     blind = run(model, changed(b, slice(CUT, None)), judging)
     sees = run(model, changed(b, slice(CUT - 1, CUT)), judging)
-    same = [torch.equal(base[0], blind[0]), base[1] == blind[1], torch.equal(base[2], blind[2])]
+    same = [torch.equal(base[0], blind[0]), base[1] == blind[1], torch.equal(base[2], blind[2]),
+            torch.equal(base[3], blind[3])]
     moved = (sees[0] - base[0]).abs().max().item()
     return all([
         report("blind", all(same),
-               f"tracks / loss / match loss {'/'.join('same' if s else 'DIFFER' for s in same)}"
+               f"tracks / loss / match loss / visibility {'/'.join('same' if s else 'DIFFER' for s in same)}"
                f" with every input of frames >= {CUT} changed (want all same)"),
         report("sees", moved > 0,
                f"changing frame {CUT - 1}'s inputs moved the tracks {moved:.1e} (want >0)"),

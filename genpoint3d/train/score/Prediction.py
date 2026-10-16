@@ -12,3 +12,4 @@ class Prediction:
     tracks: torch.Tensor                 # (B, T, N, 3) in model units
     loss: float                          # the method's objective on the batch
     others: tuple = ()                   # more samples like `tracks`, for best-of-k
+    visibility: torch.Tensor | None = None  # (B, T, N) the visibility head's logits

@@ -271,6 +271,11 @@ def main() -> int:
             print(f"  {k:<26} {m[k]:.4f}")
     if "moving_clips" in m:
         print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(clips)}")
+    visible = [k for k in ("vis_acc", "vis_acc_hidden", "vis_acc_visible") if k in m]
+    if visible:
+        print("\n  visibility head, right where it can and cannot see the point:")
+        for k in visible:
+            print(f"  {k:<26} {m[k]:.4f}")
     hidden = [k for k in HIDDEN_KEYS if k in m]
     if hidden:
         print("\n  hidden on the observed frames, occluded or out of the frame:")

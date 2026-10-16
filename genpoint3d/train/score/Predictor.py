@@ -46,23 +46,26 @@ class Predictor:
                     **fine_inputs(model, b, j.amp))
         # Regress is deterministic: k samples would be k copies of one answer.
         others = ()
+        seen, logits = model.visibility, None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             if j.method == "regress":
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                     loss_type=j.loss_type, iters=j.refine_iters, **cond)
                 pred = refine(model, anchor, num_frames=traj.shape[1],
-                              iters=j.refine_iters, known_x0=kx0, **cond)
+                              iters=j.refine_iters, known_x0=kx0, visibility=seen, **cond)
             else:
                 l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                           loss_type=j.loss_type, **cond)
                 pred = sample(model, anchor, num_frames=traj.shape[1], steps=j.steps,
-                              generator=self.gen, known_x0=kx0, **cond)
+                              generator=self.gen, known_x0=kx0, visibility=seen, **cond)
                 others = tuple(
                     sample(model, anchor, num_frames=traj.shape[1], steps=j.steps,
                            generator=self.more_gen, known_x0=kx0, **cond)
                     for _ in range(j.samples - 1 if cutoff is not None else 0))
+        if seen:
+            pred, logits = pred
         return Prediction(batch=b, visual_mask=vm, tracks=pred, loss=l.item(),
-                          others=others)
+                          others=others, visibility=logits)
 
     def done(self) -> None:
         self.model.train()
