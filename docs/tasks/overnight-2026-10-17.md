@@ -203,3 +203,40 @@ run26's 0.832): run33_fine_xyz_48 **val 0.878 / train 0.928**
 (<1/2/4/8/16 px val 0.695 / 0.837 / 0.916 / 0.957 / 0.984). TAPIP3D 0.965.
 Previous best run26: 0.832 / 0.894. Week-8 starting point: 0.46 / 0.58.
 Moving hidden on those clips: val 0.283, train 0.327 (last seen 0.195, last speed 0.274).
+
+## Last two short runs (06:40)
+
+| Run | Step 1,200: visible / hidden / occluded / out of frame | Note |
+|---|---|---|
+| run32_hidden (reference) | 0.529 / 0.170 / 0.190 / 0.113 | |
+| run37_visfb (visibility output fed back) | 0.508 / 0.158 / 0.179 / 0.101 | AJ 0.577, finds 71% of hidden |
+| run39_noncausal (time attention both ways) | 0.527 / 0.171 / 0.193 / 0.108 | |
+
+Both flat. Even seeing the frames after a point reappears does not help it in
+1,200 steps.
+
+## Morning summary
+
+1. **Report number:** run33 (48 grid, CNN + 3D per 4 px cell) scores **0.878 val /
+   0.928 train** in standard scoring (run26 was 0.832 / 0.894; TAPIP3D 0.965).
+   Train passes the 0.9 target. Within 1 px on moving points: 0.478 (run26 0.400).
+2. **Hidden points are learnable:** TAPIP3D places moving hidden points at 0.635,
+   far above "keep the last speed" (0.267), so it really reasons when blind.
+3. **None of tonight's short (1,200-step) ideas moved hidden points:** 256 points,
+   "visible?" output, visibility fed back, two-way time attention. Blanking the
+   image on hidden points does not help either, so the misleading image was not
+   the main cause.
+4. **But long training does:** run33's hidden score rose steadily from 0.143 to
+   0.271 over 6,000 steps with no hidden loss at all (0.283 on the 100-clip
+   standard check). Short tests cannot judge this skill.
+5. **Hidden and future frames fail the same way:** when the model cannot see, it
+   places points about as well as holding its own last estimate. That matches the
+   user's view that occlusion and forecasting are one problem.
+
+Still running: run38_fc_xyz_48 (best tracker in forecasting mode, ~10 h left).
+
+Suggested next decision for the user: test the hidden-point ideas only in long
+runs (48 grid, 6,000 steps). Since run33 already gives the baseline, the most
+informative single long run is probably run33 + `--hidden-loss 1 --vis-loss 1
+--vis-feedback 1 --causal 0` (everything TAPIP3D does that we now have), compared
+with run33's 0.271 hidden. If that moves hidden clearly, split it up afterwards.
