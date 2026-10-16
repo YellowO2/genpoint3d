@@ -6,7 +6,7 @@ import time
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.Report import Report
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import HIDDEN_KEYS, MOVING_THRESHOLDS
+from genpoint3d.train.tools.metrics import HIDDEN_KEYS
 
 log = logging.getLogger(__name__)
 
@@ -46,18 +46,8 @@ class Progress:
         """The validation's line, with the train-split scores folded in."""
         m = scores
         if fit_scores is not None:
-            f = fit_scores
-            m["train_apd"] = f["average_pts_within_thresh"]
-            m["train_apd_static"] = f["apd_static"]
-            m["train_apd_2d"] = f["apd_2d"]
-            m["train_apd_moving"] = f["apd_moving"]
-            m["train_apd_moving_static"] = f["apd_moving_static"]
-            for t in MOVING_THRESHOLDS:
-                m[f"train_moving_within_{t}"] = f[f"moving_within_{t}"]
-            m["train_eval_loss"] = f["val_loss"]
-            for k in (*MATCH_KEYS, *HIDDEN_KEYS):
-                if k in f:
-                    m[f"train_{k}"] = f[k]
+            # Every train-split score, under the same name as its val one.
+            m.update({f"train_{k}": v for k, v in fit_scores.items()})
         if self.settings.match_learn:
             m["train_match_loss"] = self.match_sum / max(self.since_val_n, 1)
         self.match_sum = 0.0
@@ -68,7 +58,7 @@ class Progress:
                  f"  (static {m['apd_static']:.3f})"
                  f"  2D {m['apd_2d']:.3f} (static {m['apd_2d_static']:.3f})"
                  f"  MOVING {m['apd_moving']:.3f} (static {m['apd_moving_static']:.3f})"
-                 + (f"  trainAPD {m['train_apd']:.3f}"
+                 + (f"  trainAPD {m['train_average_pts_within_thresh']:.3f}"
                     f" (static {m['train_apd_static']:.3f})"
                     f" 2D {m['train_apd_2d']:.3f}"
                     f" MOVING {m['train_apd_moving']:.3f}"

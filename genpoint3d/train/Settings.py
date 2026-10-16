@@ -24,7 +24,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--points", type=int, default=128)
         p.add_argument("--train-eval", type=int, default=0, metavar="N",
                        help="also score N clips from the TRAIN split at every "
-                            "validation, logged as train_apd. Without it a run "
+                            "validation, logged as train_average_pts_within_thresh. Without it a run "
                             "reports only val APD, which cannot separate bias from "
                             "variance: a model that scores badly on clips it has "
                             "trained on is underfitting, and more data will not "
