@@ -106,3 +106,29 @@ at the last visible frames, so they are generous.
 Queued (03:40): run37_visfb = run35_vis + `--vis-feedback 1` (the visibility
 guess fed back into the next refinement round, TAPIP3D's design; commit 2badd0c).
 Compared with run35_vis and run32_hidden.
+
+## Short-run results (04:35)
+
+24 grid, CNN + 3D, hidden loss 1, moving points, val. Same total length (1,200), so
+step 600 is comparable across runs.
+
+| Run | Step | Visible | Hidden | Occluded | Out of frame | Train hidden | Visible? acc (hidden / visible) |
+|---|---|---|---|---|---|---|---|
+| run32_hidden | 600 | 0.486 | 0.149 | — | — | — | — |
+| run34_pts256 (256 points) | 600 | 0.488 | 0.153 | 0.174 | 0.092 | 0.155 | — |
+| run35_vis ("visible?" output) | 600 | 0.468 | 0.140 | 0.158 | 0.086 | 0.144 | 0.67 / 0.98 |
+| run37_visfb (+ fed back) | 600 | 0.459 | 0.134 | 0.153 | 0.084 | 0.137 | 0.66 / 0.98 |
+| run32_hidden | 1200 | 0.529 | 0.170 | 0.190 | 0.113 | 0.173 | — |
+| run35_vis | 1200 | 0.511 | 0.161 | 0.182 | 0.101 | 0.164 | 0.71 / 0.98 |
+
+None of the three helps hidden points; the visibility ones cost a little on
+visible points. The model learns to tell hidden from visible fairly well (71% of
+hidden cases at 1,200), but knowing it does not change where it puts the point.
+Short runs underrated `--fine-xyz` before, so this is not final, but there is no
+early sign.
+
+Remaining suspect, by elimination: the image inputs on hidden frames — above all
+the matcher, which hands the model an explicit "the point is here" that, on a
+hidden frame, points at the object in front. TAPIP3D has no matcher. Next check
+(evaluation only, no training): blank every image input on hidden frames, the way
+forecast frames are blanked, and see whether hidden scores jump.
