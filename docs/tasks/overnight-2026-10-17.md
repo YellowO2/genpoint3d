@@ -60,3 +60,21 @@ Note (03:15): run34_pts256 runs at 6.8 s/step, so 1,200 steps need ~2.3 h and th
 1:55 walltime will stop it around step 1,000. Its step-600 validation is still a
 fair comparison with run32's step 600 (same total steps, so the same learning
 rate there): run32 at 600 was moving 0.486, hidden 0.245 / moving hidden 0.149.
+
+## TAPIP3D on hidden points (rescored from its saved predictions, 03:40)
+
+Same 100 val clips, our scorer (`scripts/score_ref_preds.py`). Moving points, no rescale.
+
+| | Visible APD | AJ | OA | Hidden | Occluded | Out of frame |
+|---|---|---|---|---|---|---|
+| TAPIP3D | 0.926 | 0.836 | 0.933 | **0.635** | 0.674 | 0.494 |
+| ours, run31 (24 grid, val split) | 0.551 | — | — | 0.148 | 0.171 | 0.089 |
+| ours, run32 (+ hidden loss) | 0.529 | — | — | 0.170 | 0.190 | 0.113 |
+
+All points (protocol rescale): TAPIP3D APD 0.965, AJ 0.917, OA 0.966.
+
+So hidden points are learnable: TAPIP3D places them about 4x better than we do.
+Its hidden-point ingredients (from its code): equal-weight position loss on
+occluded frames (we have that now), a visibility prediction fed back each
+iteration, and a starting guess carried forward from the last estimate through
+sliding windows. Ours starts every frame from the query position.
