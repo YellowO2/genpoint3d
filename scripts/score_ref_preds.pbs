@@ -1,0 +1,32 @@
+#!/bin/bash
+# Rescore the TAPIP3D predictions saved by scripts/ref_tapip3d.pbs with our
+# scorer: APD, AJ and OA, and APD on hidden points. See scripts/score_ref_preds.py.
+# No GPU and no TAPIP3D environment: only our venv.
+#
+#   qsub scripts/score_ref_preds.pbs
+#
+#PBS -N score_ref_preds
+#PBS -l select=1:ncpus=4:mem=16gb
+# 100 clips, each two small loads and a few metric calls: a minute or two.
+#PBS -l walltime=00:20:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/score_ref_preds.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+# PBS only writes its -o file when the job ENDS. Tee to scratch so
+# progress can be watched live with: tail -f ~/scratch/<name>.live.log
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+
+python scripts/score_ref_preds.py \
+  --preds $ROOT/ref_preds/tapip3d \
+  --clips $ROOT/ref_eval/val100
+
+echo "=== SCORE REF PREDS DONE ==="
