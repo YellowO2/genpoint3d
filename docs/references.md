@@ -157,6 +157,20 @@ in 3D and we never project. TAPIP3D makes the same substitution
     of 2D pixel coordinates". Trajectory tensor `x in R^{H/s x W/s x T x 2}`.
     No world/camera-frame question because it is not a 3D method.
 
+## Physics simulation with networks (an idea source, not a benchmark)
+- **Learning to Simulate Complex Physics with Graph Networks** — Sanchez-Gonzalez,
+  Godwin, Pfaff, Ying, Leskovec, Battaglia (DeepMind). ICML 2020.
+  - arXiv: https://arxiv.org/abs/2002.09405
+  - Predicts the next state of particles from their current states, by passing
+    messages between neighbouring particles. Needs the true particle positions,
+    no video, so it cannot be run on our task.
+  - The idea we take from it: things are points that push on their neighbours.
+    For us that means tracking support points on the same object together, so
+    a point's future follows its object's (see "support points" in CoTracker).
+
+Forecasting shortlist (kept to a few on purpose): Gen-points, What Happens Next?,
+MolmoMotion, Learning to Simulate.
+
 ## 3D point forecasting — the most directly comparable work
 - **MolmoMotion: Forecasting Point Trajectories in 3D with Language Instruction**
   — Zhang, Zheng, Yang et al. (AI2 / UW / UNC-Chapel Hill).
