@@ -169,3 +169,31 @@ still visible (a hidden point on a visible ball can be placed from the ball), bu
 morning: is that skill something we lack in the design, or does it only appear
 with much longer training? run38_fc_xyz_48 (long, forecasting mode) will show
 whether the future part starts to beat freezing with long training.
+
+## The 48-grid run with 3D in the CNN windows finished: train passes 0.9 (05:15)
+
+run33_fine_xyz_48 (48 grid, CNN + 3D per 4 px cell, 6,000 steps, no hidden loss),
+val split 349 clips, in-training scores:
+
+| Step | All points val / train | Moving val / train | <1 px | <2 px | Moving hidden |
+|---|---|---|---|---|---|
+| 1,000 | 0.724 / 0.762 | 0.562 / 0.556 | 0.246 | 0.392 | 0.143 |
+| 2,000 | 0.788 / 0.810 | 0.638 / 0.649 | 0.312 | 0.487 | 0.182 |
+| 3,000 | 0.832 / 0.872 | 0.699 / 0.731 | 0.387 | 0.572 | 0.223 |
+| 4,000 | 0.856 / 0.893 | 0.734 / 0.782 | 0.440 | 0.624 | 0.253 |
+| 5,000 | 0.865 / 0.909 | 0.749 / 0.810 | 0.469 | 0.649 | 0.267 |
+| **6,000** | **0.866 / 0.916** | **0.754 / 0.820** | **0.478** | **0.656** | **0.271** |
+| run26, same without 3D | 0.833 / 0.877 | 0.702 / 0.763 | 0.400 | 0.580 | — |
+
+- Train passes 0.9 (0.916): the target from the Week 8 email.
+- Hidden points improve steadily with long training even with no hidden loss:
+  0.143 → 0.271, above "hold last seen" (0.204) and close to "keep last speed"
+  (0.284). So the blind-reasoning skill does grow with training; the 1,200-step
+  tests were far too short to show it. TAPIP3D is at 0.635.
+- The train–val gap is now visible (moving 0.820 vs 0.754).
+- A standard-scoring run on 100 clips (like run26's 0.832) is queued for the report.
+
+Queued after this (05:10): run39_noncausal = run32 + `--causal 0` (time attention
+both ways). TAPIP3D looks both ways inside its 16-frame windows, so a hidden
+point between two visible stretches can be placed from where it reappears; ours
+only looks back. For tracking this is legitimate (published trackers do it).
