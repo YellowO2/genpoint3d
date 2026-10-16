@@ -217,7 +217,8 @@ class PointDiT(nn.Module):
         self.time_rope = RoPE(head_dim, num_heads, n_axes=1)   # position = frame time
         self.space_rope = RoPE(head_dim, num_heads, n_axes=3)  # position = query xyz
 
-        # [4c] point-image cross-attention, and the tracking/forecasting switch.
+        # [4c] point-image cross-attention (a soft pick of the patches that look
+        # like the point), and the tracking/forecasting switch.
         # A masked frame's features are replaced wholesale by `null_ctx`, which
         # means "nothing here". One shared vector suffices because RoPE already
         # tells the model which frame it is looking at.

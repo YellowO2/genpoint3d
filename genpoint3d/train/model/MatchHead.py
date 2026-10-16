@@ -1,4 +1,4 @@
-"""Score every patch against each point's template, with a trainable twist."""
+"""Score how alike each patch looks to each point; the best is the match."""
 
 import torch
 import torch.nn.functional as F

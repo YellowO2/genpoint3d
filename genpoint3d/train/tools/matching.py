@@ -1,4 +1,4 @@
-"""Which patch looks like each point, scored against where it truly is.
+"""The matcher: which patch looks most like each point, and is it right.
 
 Supervising the match: "which patch looks like me" as a trained answer.
 

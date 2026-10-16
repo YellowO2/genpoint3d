@@ -241,7 +241,8 @@ class Block(nn.Module):
 
 
 class CrossBlock(nn.Module):
-    """Cross-attention + feed-forward. Point tokens read the visual feature map.
+    """Cross-attention: each point scores every patch by how alike they look,
+    and reads a blend of the patches weighted by those scores (a soft pick).
 
     Same shape as `Block`, but keys and values come from `context` instead of
     from the tokens themselves. This is stage [4c], and it is the whole
