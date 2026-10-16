@@ -18,6 +18,10 @@ output that flow matching reads as a velocity is read here as a correction.
 a scalar in [0, 1] that tells it how far along it is and, with
 `locality_mode="sched"`, how wide to look: wide on the first guess, one patch
 spacing on the last.
+
+A model built with `vis_feedback` is also given, at every iteration, the
+visibility logits the iteration before it gave, detached like the guess and
+0 before the first, as TAPIP3D does.
 """
 
 from typing import Optional
@@ -34,6 +38,12 @@ def _pin(g: torch.Tensor, known_x0: Optional[torch.Tensor]) -> torch.Tensor:
     if known_x0 is None:
         return g
     return torch.cat([known_x0[:, None], g[:, 1:]], dim=1)
+
+
+def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
+    """(B, T, N) zeros for the first iteration's fed-back visibility, or None
+    for a model that is not given it."""
+    return x.new_zeros(x.shape[:3]) if model.vis_feedback else None
 
 
 def _clock(i: int, iters: int, batch: int, device: torch.device) -> torch.Tensor:
@@ -76,6 +86,8 @@ def regress_loss(
               (TAPIP3D appendix, "memory-saving strategy"). The caller still
               zeroes, clips and steps. The loss returned is then the position
               loss alone, and the visibility loss is only in the dict.
+              With no `visible`, a model built with `vis_feedback` still
+              computes its visibility, to feed it back, but nothing scores it.
 
     Frame 0 is scored before it is pinned again: the network is asked for a
     zero correction there, as the flow loss asks for a zero velocity.
@@ -85,15 +97,19 @@ def regress_loss(
     w = [v / sum(w) for v in w]
 
     g = _pin(torch.zeros_like(x1), known_x0)
+    prev = _no_logits(model, x1)
     total = vis_total = x1.new_zeros(())
     for i in range(iters):
         k = _clock(i, iters, B, x1.device)
-        if visible is None:
+        vis_loss = x1.new_zeros(())
+        if visible is None and prev is None:
             step = model(g.detach(), k, anchor, **cond)
-            vis_loss = x1.new_zeros(())
         else:
-            step, logits = model(g.detach(), k, anchor, visibility=True, **cond)
-            vis_loss = w[i] * visibility_error(logits, visible)
+            step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **cond)
+            if visible is not None:
+                vis_loss = w[i] * visibility_error(logits, visible)
+            if prev is not None:
+                prev = logits.detach()
         g = g.detach() + step
         loss = w[i] * masked_error(g, x1, mask, weight, loss_type)
         if backward is not None:
@@ -131,11 +147,14 @@ def refine(
     """
     B, N, _ = anchor.shape
     g = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
+    prev = _no_logits(model, g)
     logits = None
     for i in range(iters):
         out = model(g, _clock(i, iters, B, anchor.device), anchor,
-                    visibility=visibility, **cond)
-        if visibility:
+                    visibility=visibility or prev is not None, vis_prev=prev, **cond)
+        if visibility or prev is not None:
             out, logits = out
+        if prev is not None:
+            prev = logits
         g = _pin(g + out, known_x0)
     return (g, logits) if visibility else g

@@ -12,7 +12,7 @@ for EVERY frame is bit-identical whatever the frames from the cutoff on hold.
 Run through the real scoring path (`Predictor`: `to_device`, `fine_inputs`,
 `visual_mask`, the sampler or the refiner) on a real cached batch, for flow
 and regress, with and without the relative finder (and its depth), with the
-match trained and the visibility head on.
+match trained and the visibility head on, and fed back.
 
 Every weight is pushed off its initial value first. Several readers start at
 exactly zero (the output head, the cost volume's gate, the finder's readers)
@@ -50,6 +50,10 @@ CONFIGS = [
     # The finder reading each cell's 3D position from the depth.
     ["--method", "flow", "--fine", "1", "--fine-xyz", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0"],
+    # Each iteration given the visibility the one before it predicted.
+    ["--method", "regress", "--vis-feedback", "1"],
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0",
+     "--vis-feedback", "1"],
 ]
 
 

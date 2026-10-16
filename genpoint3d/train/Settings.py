@@ -218,8 +218,14 @@ class Settings(argparse.Namespace):
                             "there, trained by cross-entropy weighted W next to "
                             "the method's loss. Not visible is occluded, out of "
                             "the frame, or in a forecast frame with no image. "
-                            "Nothing reads the answer back yet. 0 builds no "
-                            "head: every run before it.")
+                            "0 builds no head: every run before it.")
+        p.add_argument("--vis-feedback", type=int, default=0, choices=[0, 1],
+                       help="regress only, with --vis-loss: each refinement "
+                            "iteration is also given the visibility the one "
+                            "before it predicted (0 before the first), as "
+                            "TAPIP3D does, so a point the model thinks is hidden "
+                            "can learn to stop trusting what the image shows "
+                            "there. 0: every run before it.")
         p.add_argument("--anchor-frame0", type=int, default=1, choices=[0, 1])
         # Evaluate and checkpoint the averaged weights, not the jittering ones.
         # 0 disables. The paper lists EMA among its training ingredients.
@@ -248,6 +254,9 @@ class Settings(argparse.Namespace):
             p.error("--hidden-loss is a weight: 0 or more")
         if settings.vis_loss < 0:
             p.error("--vis-loss is a weight: 0 or more")
+        if settings.vis_feedback and (settings.vis_loss <= 0 or settings.method != "regress"):
+            p.error("--vis-feedback feeds the visibility head back between "
+                    "refinement iterations: it needs --vis-loss > 0 and --method regress")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

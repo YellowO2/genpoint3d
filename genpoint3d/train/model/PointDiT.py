@@ -78,6 +78,7 @@ class PointDiT(nn.Module):
         fine_radius: int = 3,
         fine_xyz: bool = False,
         visibility: bool = False,
+        vis_feedback: bool = False,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -297,14 +298,26 @@ class PointDiT(nn.Module):
         # [visibility head] one logit per (point, frame): can the model see the
         # point there? Not when it is occluded, out of the frame, or in a
         # frame with no image. Read from the same final tokens as the
-        # position head, and trained apart from it (`--vis-loss`); nothing
-        # reads it back. Zeros, made without drawing from the random
-        # generator, so every other weight, and every draw after them, is
-        # as it is without it.
+        # position head, and trained apart from it (`--vis-loss`). Zeros,
+        # made without drawing from the random generator, so every other
+        # weight, and every draw after them, is as it is without it.
         self.visibility = visibility
         if visibility:
             self.vis_weight = nn.Parameter(torch.zeros(dim))
             self.vis_bias = nn.Parameter(torch.zeros(()))
+
+        # [visibility fed back] with `vis_feedback` the regression's next
+        # iteration is given the logit this head gave on the one before, as
+        # TAPIP3D does: a point the model thinks it cannot see can learn to
+        # stop trusting what the image shows where it is. Added to the token
+        # by one vector, a linear from 1 number to `dim`; zeros made without
+        # the random generator, like the head, so step 0 is the model
+        # without it.
+        if vis_feedback and not visibility:
+            raise ValueError("vis_feedback feeds the visibility head back, which needs visibility")
+        self.vis_feedback = vis_feedback
+        if vis_feedback:
+            self.vis_in = nn.Parameter(torch.zeros(dim))
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -450,6 +463,7 @@ class PointDiT(nn.Module):
         fine_proj: torch.Tensor | None = None,
         fine_xyz: torch.Tensor | None = None,
         visibility: bool = False,
+        vis_prev: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         x:           (B, T, N, 3)    noisy trajectory, in model units
@@ -474,6 +488,10 @@ class PointDiT(nn.Module):
 
         visibility:  bool            also return the visibility head's
                                      logits, (B, T, N); a model built with it
+        vis_prev:    (B, T, N)       the logits the previous refinement
+                                     iteration gave, 0 before the first.
+                                     Required by a model built with
+                                     `vis_feedback`, refused by any other.
 
         returns      (B, T, N, 3)    predicted velocity
 
@@ -698,6 +716,10 @@ class PointDiT(nn.Module):
                 h = h + self.match_more(match[..., 5:])
         if fine is not None:
             h = h + self.fine_tok(fine).to(h.dtype)
+        if self.vis_feedback != (vis_prev is not None):
+            raise ValueError("vis_prev is given exactly when the model was built with vis_feedback")
+        if vis_prev is not None:
+            h = h + vis_prev[..., None].to(h.dtype) * self.vis_in.to(h.dtype)
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in
