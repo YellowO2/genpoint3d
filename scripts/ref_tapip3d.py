@@ -46,6 +46,12 @@ def main() -> int:
     p.add_argument("--num-iters", type=int, default=6)
     p.add_argument("--support-grid", type=int, default=16)
     p.add_argument("--min-motion-px", type=float, default=4.0)
+    p.add_argument("--max-points", type=int, default=0,
+                   help="track only the first M query points (0 = all)")
+    p.add_argument("--chunk", type=int, default=0,
+                   help="track the queries K at a time, so each sees only K-1 "
+                        "others (0 = all together). With --support-grid 0 and "
+                        "--chunk 1 every point is tracked alone.")
     args = p.parse_args()
 
     ref = Path(args.ref_repo).expanduser().resolve()
@@ -96,20 +102,26 @@ def main() -> int:
 
         gt = c["traj_metric"].float().to(dev)                              # (T, N, 3) frame-0 camera, metres
         vis = c["visibility"].to(dev)
+        if args.max_points:
+            gt, vis = gt[:, :args.max_points], vis[:, :args.max_points]
         E = c["extrinsics"].float().to(dev)                         # cam_0 -> cam_t
         query = torch.cat([torch.zeros_like(gt[0, :, :1]), gt[0]], dim=-1)   # (N, 4): t, x, y, z
 
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            coords, visibs = inference(
-                model=model,
-                video=(torch.from_numpy(video).permute(0, 3, 1, 2).float() / 255.0).to(dev),
-                depths=torch.from_numpy(depths).float().to(dev),
-                intrinsics=torch.from_numpy(K_in).float().to(dev),
-                extrinsics=E, query_point=query,
-                num_iters=args.num_iters, grid_size=args.support_grid,
-            )
-        pred = coords.float()[:, : gt.shape[1]]
-        pvis = visibs[:, : gt.shape[1]].bool()
+        chunk = args.chunk or query.shape[0]
+        parts = []
+        for q in query.split(chunk):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                coords, visibs = inference(
+                    model=model,
+                    video=(torch.from_numpy(video).permute(0, 3, 1, 2).float() / 255.0).to(dev),
+                    depths=torch.from_numpy(depths).float().to(dev),
+                    intrinsics=torch.from_numpy(K_in).float().to(dev),
+                    extrinsics=E, query_point=q,
+                    num_iters=args.num_iters, grid_size=args.support_grid,
+                )
+            parts.append((coords.float()[:, : q.shape[0]], visibs[:, : q.shape[0]].bool()))
+        pred = torch.cat([c_ for c_, _ in parts], dim=1)
+        pvis = torch.cat([v_ for _, v_ in parts], dim=1)
         if out:
             torch.save({"seq_id": seq, "coords": pred.cpu(), "visibs": pvis.cpu()}, out / path.name)
 

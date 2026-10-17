@@ -61,11 +61,14 @@ def main() -> int:
         c = torch.load(clip_dir / path.name, weights_only=False)
         if r["seq_id"] != c["seq_id"]:
             raise SystemExit(f"{path.name}: prediction is for {r['seq_id']}, clip is {c['seq_id']}")
-        gt = c["traj_metric"].float()[None]                          # (1, T, N, 3)
         pred = r["coords"].float()[None]
+        # A run on a subset of the queries (ref_tapip3d.py --max-points) keeps
+        # the first ones, so it is scored against those.
+        n = pred.shape[2]
+        gt = c["traj_metric"].float()[None][:, :, :n]                # (1, T, N, 3)
         if pred.shape != gt.shape:
             raise SystemExit(f"{path.name}: prediction {tuple(pred.shape)} vs truth {tuple(gt.shape)}")
-        vis = c["visibility"].bool()[None]
+        vis = c["visibility"].bool()[None][:, :, :n]
         pvis = r["visibs"].bool()[None]
         K = c["intrinsics"].float()[None]
         b = {"intrinsics": K, "intrinsics_256": resize_intrinsics(K, c["hw"]),
