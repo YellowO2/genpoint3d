@@ -184,8 +184,10 @@ class KubricSequenceDataset:
         N_total = traj_3d.shape[1]
         if self.num_query_points is not None and self.num_query_points < N_total:
             visible_at_0 = np.where(visibility[0])[0]
-            pool = visible_at_0 if len(visible_at_0) >= self.num_query_points else np.arange(N_total)
-            chosen = np.random.choice(pool, size=self.num_query_points, replace=False)
+            if len(visible_at_0) < self.num_query_points:
+                raise ValueError(f"only {len(visible_at_0)} of {N_total} points are visible "
+                                 f"in frame 0, fewer than the {self.num_query_points} queries")
+            chosen = np.random.choice(visible_at_0, size=self.num_query_points, replace=False)
         else:
             chosen = np.arange(N_total)
 
