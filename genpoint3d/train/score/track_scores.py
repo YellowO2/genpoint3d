@@ -7,6 +7,11 @@ from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.tools.batch import to_metres
 from genpoint3d.train.tools.metrics import MOVING_THRESHOLDS, in_image, motion_px, tapvid3d_metrics
 
+# A point counts as still if its true position never moves more than this
+# (metres): saved positions are not bit-exact, but a still object in Kubric
+# does not move at all in the frame-0 camera.
+STILL_M = 1e-3
+
 
 def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
     """Per clip (B,) values, by name.
@@ -169,7 +174,8 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     where it has left the frame. With a cutoff C, also on every forecast
     frame, hidden or not, `_fut_all`. All points with the protocol's rescale,
     the moving ones without, as above, and the still ones (`apd_still_*`) without
-    too. `moving` (B, N) is the points that move, judged on visible frames.
+    too. `moving` (B, N) is the points that move, judged on visible frames;
+    still points are the ones whose true position never changes at all.
 
     `hidden_outside_frac` is the share of hidden entries that are outside,
     per clip; NaN for a clip with none hidden.
@@ -193,12 +199,14 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     out = {"hidden_outside_frac": ((hidden & ~inside).flatten(1).sum(1)
                                    / hidden.flatten(1).sum(1))}
     lastseen, lastcv = _last_seen(gt_m, vis)
-    # `apd_still` is the easy case: points that do not move, so a hidden one
-    # only has to stay where it was. Anything short of near perfect there means
-    # the model loses points it cannot see even when nothing happens to them.
+    # `apd_still` is the easy case: points whose true position never changes,
+    # hidden frames included, so holding the last seen position is exactly
+    # right (`_lastseen` scores 1). Anything below that is the model losing
+    # points it cannot see even when nothing happens to them.
+    still = (gt_m - gt_m[:, :1]).norm(dim=-1).amax(1) < STILL_M     # (B, N)
     for name, points, scaling in (("apd", torch.ones_like(moving), j.scaling),
                                   ("apd_moving", moving, "none"),
-                                  ("apd_still", ~moving, "none")):
+                                  ("apd_still", still, "none")):
         mine = hidden & points[:, None]
         for guess, suffix in ((pred_m, ""), (lastseen, "_lastseen"), (lastcv, "_lastcv")):
             score = lambda mask: _apd(guess, gt_m, mask, b, scaling)
