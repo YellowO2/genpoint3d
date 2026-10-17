@@ -298,3 +298,19 @@ passes with `--causal 0`.
 **Running: run40_blind_48** = run33 + `--hidden-loss 1 --vis-loss 1 --vis-feedback 1
 --causal 0 --random-cutoff 1 --eval-cutoff 12`, 6,000 steps (~10 h). Compare with
 run38 (forecast masking alone): hidden 0.334, future 0.293 vs freeze 0.266.
+
+## Correction (18:10): forecast training does NOT help hidden points
+
+run38's hidden score (0.334) was measured with the forecast cutoff, so only
+frames 0–11 counted; run33's (0.271) counted all 24 frames. Rescored like for
+like (100 val clips, all frames, no cutoff):
+
+| | All points APD | Moving hidden | Occluded | Out of frame |
+|---|---|---|---|---|
+| run33 (tracking only) | 0.878 | **0.283** | 0.325 | 0.163 |
+| run38 (+ forecast masking) | 0.808 | 0.208 | 0.242 | 0.112 |
+
+Forecast training made hidden points worse and cost tracking accuracy. The
+earlier "one skill, forecasting helps occluded points" claim was an artifact of
+the different frames. The fast runs px0–px3 are all scored without a cutoff,
+so they compare fairly.
