@@ -257,3 +257,19 @@ around 16:30 and runs ~10 h. Cancel it with `qdel` if you prefer a different lon
 - run40_hidden_all_48 (queued, starts ~16:30) reads the code when it starts, so it
   will use the new weighting too. That is one more difference from run33 (which
   used per-frame depth weights on visible frames only).
+
+## Still hidden points: basic permanence is mostly there (14:00)
+
+Hidden points that do not move (the easy case: the answer is "stay put"), no
+rescale, 100 val clips. "Hold last seen" is not 1.0 because "still" allows up to
+4 px of motion on visible frames.
+
+| | Still hidden | still occluded | still out of frame | Moving hidden |
+|---|---|---|---|---|
+| run33 (ours, best) | 0.875 | 0.878 | 0.860 | 0.283 |
+| TAPIP3D | 0.939 | 0.955 | 0.916 | 0.635 |
+| hold last seen (true) | 0.930 | 0.934 | 0.898 | 0.195 |
+
+Our model keeps still points in place when they are hidden or off screen, a bit
+worse than just holding them (0.875 vs 0.930). So basic object permanence is
+there; the real gap is moving hidden points (0.283 vs TAPIP3D's 0.635).
