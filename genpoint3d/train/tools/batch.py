@@ -10,7 +10,6 @@ from genpoint3d.train.tools.metrics import _to_camera_t
 
 # TAPIP3D clamps depth the same way before dividing, so a point behind the
 # camera or at zero depth cannot produce an enormous weight.
-DEPTH_MIN = 0.1
 
 
 def to_device(batch: dict, device, amp: bool = False) -> dict:
@@ -93,15 +92,21 @@ def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     instead, which is what TAPIP3D's `scale_loss_by_depth` does
     (`training/criterion.py:165`, "Normalize to match with the APD metric").
 
+    One weight per point, from frame 0, kept for all its frames: how clearly
+    the point was seen when it was picked. Every query point is visible and in
+    front of the camera there. A later frame's depth is not: off screen a point
+    can sit beside or behind the camera, where `depth / focal` goes to zero and
+    one hidden point would outweigh the rest of the batch.
+
     Normalised to mean 1 over the batch so the loss keeps its magnitude and the
     learning rate stays comparable across runs -- only the RELATIVE weighting
     of points is the point here.
     """
-    gt_cam = _to_camera_t(to_metres(traj, b), b["extrinsics"])
-    depth = gt_cam[..., 2].abs().clamp(min=DEPTH_MIN)                  # (B, T, N)
-    focal = (b["intrinsics"][..., 0, 0] * b["intrinsics"][..., 1, 1]).sqrt()
+    gt_cam = _to_camera_t(to_metres(traj[:, :1], b), b["extrinsics"][:, :1])
+    depth = gt_cam[..., 2]                                             # (B, 1, N)
+    focal = (b["intrinsics"][:, :1, 0, 0] * b["intrinsics"][:, :1, 1, 1]).sqrt()
     w = focal[..., None] / depth * b["norm_scale"][:, None, None]
-    return w / w.mean().clamp(min=1e-8)
+    return (w / w.mean().clamp(min=1e-8)).expand_as(traj[..., 0])
 
 
 def hidden_weight(vis: torch.Tensor, weight: torch.Tensor | None,
