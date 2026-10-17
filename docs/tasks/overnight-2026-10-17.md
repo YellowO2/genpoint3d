@@ -273,3 +273,28 @@ rescale, 100 val clips. "Hold last seen" is not 1.0 because "still" allows up to
 Our model keeps still points in place when they are hidden or off screen, a bit
 worse than just holding them (0.875 vs 0.930). So basic object permanence is
 there; the real gap is moving hidden points (0.283 vs TAPIP3D's 0.635).
+
+## run38 (forecasting on the best tracker) and the restarted run40 (15:10)
+
+run38_fc_xyz_48 = run33 trained with forecast masking (random cutoff, eval cutoff
+12). Stopped at step 5,900 of 6,000 by mistake; step 5,000 is the last score.
+
+| Step | Seen frames (moving) | Future (moving) | Freeze own guess | Hidden (moving) |
+|---|---|---|---|---|
+| 1,000 | 0.642 | 0.211 | 0.227 | 0.247 |
+| 3,000 | 0.723 | 0.272 | 0.256 | 0.310 |
+| 5,000 | 0.760 | 0.293 | 0.266 | 0.334 |
+
+- With long training the future part starts to beat freezing (+0.03 at 5,000).
+- Forecast training lifted hidden points from 0.271 (run33, same model, tracking
+  only) to 0.334: practice at blind frames carries over to hidden points, as the
+  user expected (one skill).
+
+TAPIP3D note: it looks both ways in time, so for a point that reappears it fills
+in between known positions. Ours looked only backwards (`--causal 1`). Forecasting
+does not need one-way time: masked frames have no images, and the leak check
+passes with `--causal 0`.
+
+**Running: run40_blind_48** = run33 + `--hidden-loss 1 --vis-loss 1 --vis-feedback 1
+--causal 0 --random-cutoff 1 --eval-cutoff 12`, 6,000 steps (~10 h). Compare with
+run38 (forecast masking alone): hidden 0.334, future 0.293 vs freeze 0.266.
