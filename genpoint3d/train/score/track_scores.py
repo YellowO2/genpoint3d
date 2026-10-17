@@ -168,8 +168,8 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     `_occluded`, where its true position is inside the image, and `_outside`,
     where it has left the frame. With a cutoff C, also on every forecast
     frame, hidden or not, `_fut_all`. All points with the protocol's rescale,
-    and the moving ones without, as above. `moving` (B, N) is the points that
-    move, judged on visible frames.
+    the moving ones without, as above, and the still ones (`apd_still_*`) without
+    too. `moving` (B, N) is the points that move, judged on visible frames.
 
     `hidden_outside_frac` is the share of hidden entries that are outside,
     per clip; NaN for a clip with none hidden.
@@ -193,8 +193,12 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     out = {"hidden_outside_frac": ((hidden & ~inside).flatten(1).sum(1)
                                    / hidden.flatten(1).sum(1))}
     lastseen, lastcv = _last_seen(gt_m, vis)
+    # `apd_still` is the easy case: points that do not move, so a hidden one
+    # only has to stay where it was. Anything short of near perfect there means
+    # the model loses points it cannot see even when nothing happens to them.
     for name, points, scaling in (("apd", torch.ones_like(moving), j.scaling),
-                                  ("apd_moving", moving, "none")):
+                                  ("apd_moving", moving, "none"),
+                                  ("apd_still", ~moving, "none")):
         mine = hidden & points[:, None]
         for guess, suffix in ((pred_m, ""), (lastseen, "_lastseen"), (lastcv, "_lastcv")):
             score = lambda mask: _apd(guess, gt_m, mask, b, scaling)

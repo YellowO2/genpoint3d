@@ -43,8 +43,9 @@ MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
 # beside its two last-seen baselines; and the share of hidden entries that
 # are out of the frame.
 HIDDEN_KEYS = tuple(f"{name}{suffix}"
-                    for name in ("apd_hidden", "apd_moving_hidden", "apd_occluded",
-                                 "apd_moving_occluded", "apd_outside", "apd_moving_outside")
+                    for name in ("apd_hidden", "apd_moving_hidden", "apd_still_hidden",
+                                 "apd_occluded", "apd_moving_occluded", "apd_still_occluded",
+                                 "apd_outside", "apd_moving_outside", "apd_still_outside")
                     for suffix in ("", "_lastseen", "_lastcv")) + ("hidden_outside_frac",)
 
 
