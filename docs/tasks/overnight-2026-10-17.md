@@ -244,3 +244,16 @@ with run33's 0.271 hidden. If that moves hidden clearly, split it up afterwards.
 Queued (06:45), chained after run38 so it blocks nothing now: **run40_hidden_all_48**
 = run33 + `--hidden-loss 1 --vis-loss 1 --vis-feedback 1 --causal 0`. Starts
 around 16:30 and runs ~10 h. Cancel it with `qdel` if you prefer a different long run.
+
+## Changes on 2026-10-17 (daytime)
+
+- The depth weight in the loss (`apd_weight`) now uses each point's frame-0
+  depth for all its frames ("how clearly the point was seen when picked").
+  Before, it used each frame's depth, which blew up for hidden points beside or
+  behind the camera (up to 10–100× weight) once `--hidden-loss` counted them.
+- `--hidden-loss` now defaults to 1: every query point counts in every frame.
+- Query points must be visible in frame 0; building a cache now stops with an
+  error instead of quietly using hidden points.
+- run40_hidden_all_48 (queued, starts ~16:30) reads the code when it starts, so it
+  will use the new weighting too. That is one more difference from run33 (which
+  used per-frame depth weights on visible frames only).
