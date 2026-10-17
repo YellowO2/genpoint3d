@@ -198,7 +198,10 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     k = 0
     for batch in loader:
-        pred = predictor(batch)
+        # The scorer is wrapped in no_grad (score/main.py); calling the
+        # Predictor directly is not, and would keep every activation.
+        with torch.no_grad():
+            pred = predictor(batch)
         b = pred.batch
         gt_m = to_metres(b["traj"], b)
         pr_m = gt_m if args.draw_truth_as_pred else to_metres(pred.tracks.float(), b)
