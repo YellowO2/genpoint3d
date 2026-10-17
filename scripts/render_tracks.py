@@ -78,19 +78,28 @@ def border_arrow(img, p: np.ndarray, colour) -> None:
     d = p - c
     d = d / max(np.linalg.norm(d), 1e-6)
     tip = np.clip(p, 3, SIZE - 4)
-    tail = tip - 16 * d
+    tail = tip - 10 * d
     cv2.arrowedLine(img, tuple(int(v) for v in tail), tuple(int(v) for v in tip),
-                    colour, 2, cv2.LINE_AA, tipLength=0.5)
+                    colour, 1, cv2.LINE_AA, tipLength=0.4)
 
 
 def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
                cols: list, cutoff: int) -> np.ndarray:
     """One frame: rgb (R, R, 3) uint8, gt and pr each (pixels (T, N, 2),
-    depth (T, N)), vis (T, N) bool. Returns SIZE x SIZE BGR."""
-    img = cv2.resize(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), (SIZE, SIZE),
-                     interpolation=cv2.INTER_LINEAR)
+    depth (T, N)), vis (T, N) bool. Returns SIZE x SIZE BGR.
+
+    Drawn at twice the size and shrunk, so the small dots and thin lines come
+    out smooth. Green is the truth (faded while the point is hidden), red the
+    prediction, a faint line between them, and a thin trail in the point's own
+    colour."""
+    k = 2
+    img = cv2.resize(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), (SIZE * k, SIZE * k),
+                     interpolation=cv2.INTER_CUBIC)
     (gp, gz), (pp, pz) = gt, pr
+    gp, pp = gp * k, pp * k
     N = gp.shape[1]
+    at = lambda xy: tuple(np.round(xy).astype(int))
+    on = lambda xy, z: inside(xy / k, z)
     # The trails first, oldest faintest, so the dots sit on top of them.
     for age in range(TRAIL - 1, 0, -1):
         s = t - age
@@ -99,31 +108,31 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
         layer = img.copy()
         for n in range(N):
             a, b = pp[s, n], pp[s + 1, n]
-            if inside(a, pz[s, n]) and inside(b, pz[s + 1, n]):
-                cv2.line(layer, tuple(a.astype(int)), tuple(b.astype(int)), cols[n], 2, cv2.LINE_AA)
-        alpha = 1.0 - age / TRAIL
+            if on(a, pz[s, n]) and on(b, pz[s + 1, n]):
+                cv2.line(layer, at(a), at(b), cols[n], 2, cv2.LINE_AA)
+        alpha = 0.7 * (1.0 - age / TRAIL)
         img = cv2.addWeighted(layer, alpha, img, 1 - alpha, 0)
+    links, hidden = img.copy(), img.copy()
     for n in range(N):
-        g_in, p_in = inside(gp[t, n], gz[t, n]), inside(pp[t, n], pz[t, n])
-        g, p = tuple(gp[t, n].astype(int)), tuple(pp[t, n].astype(int))
-        if g_in and p_in:
-            cv2.line(img, g, p, WHITE, 1, cv2.LINE_AA)
-        if g_in:
-            cv2.circle(img, g, 5, GREEN, -1 if vis[t, n] else 2, cv2.LINE_AA)
-        if p_in:
-            cv2.circle(img, p, 4, RED, -1, cv2.LINE_AA)
-            cv2.circle(img, p, 4, cols[n], 1, cv2.LINE_AA)
-        elif pz[t, n] > 0:
-            border_arrow(img, pp[t, n], RED)
-    n_vis = int(vis[t].sum())
-    lines = [f"frame {t}", f"VISIBLE {n_vis} / HIDDEN {N - n_vis}"]
-    if cutoff:
-        lines.append("SEEN" if t < cutoff else "FORECAST")
-    for i, s in enumerate(lines):
-        y = 22 + 22 * i
-        cv2.putText(img, s, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        colour = (0, 165, 255) if s == "FORECAST" else WHITE
-        cv2.putText(img, s, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 1, cv2.LINE_AA)
+        if on(gp[t, n], gz[t, n]) and on(pp[t, n], pz[t, n]):
+            cv2.line(links, at(gp[t, n]), at(pp[t, n]), WHITE, 1, cv2.LINE_AA)
+    img = cv2.addWeighted(links, 0.5, img, 0.5, 0)
+    for n in range(N):
+        if on(gp[t, n], gz[t, n]):
+            cv2.circle(hidden if not vis[t, n] else img, at(gp[t, n]), 6, GREEN, -1, cv2.LINE_AA)
+    # Hidden truth at 40%: the point is still there, just not seen.
+    mask = (hidden != img).any(-1)
+    img[mask] = cv2.addWeighted(hidden, 0.4, img, 0.6, 0)[mask]
+    for n in range(N):
+        if on(pp[t, n], pz[t, n]):
+            cv2.circle(img, at(pp[t, n]), 6, RED, -1, cv2.LINE_AA)
+    img = cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
+    for n in range(N):
+        if not on(pp[t, n], pz[t, n]) and pz[t, n] > 0:
+            border_arrow(img, pp[t, n] / k, RED)
+    label = f"{t}" + ("" if not cutoff else ("" if t < cutoff else "  forecast"))
+    cv2.putText(img, label, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(img, label, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, WHITE, 1, cv2.LINE_AA)
     return img
 
 
