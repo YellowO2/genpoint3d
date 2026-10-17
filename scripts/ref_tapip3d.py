@@ -119,7 +119,11 @@ def main() -> int:
                     extrinsics=E, query_point=q,
                     num_iters=args.num_iters, grid_size=args.support_grid,
                 )
-            parts.append((coords.float()[:, : q.shape[0]], visibs[:, : q.shape[0]].bool()))
+            # Their inference squeezes its output, so one query comes back
+            # without its point axis.
+            T_ = coords.shape[0]
+            parts.append((coords.float().reshape(T_, -1, 3)[:, : q.shape[0]],
+                          visibs.reshape(T_, -1)[:, : q.shape[0]].bool()))
         pred = torch.cat([c_ for c_, _ in parts], dim=1)
         pvis = torch.cat([v_ for _, v_ in parts], dim=1)
         if out:
