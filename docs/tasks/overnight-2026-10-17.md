@@ -314,3 +314,21 @@ Forecast training made hidden points worse and cost tracking accuracy. The
 earlier "one skill, forecasting helps occluded points" claim was an artifact of
 the different frames. The fast runs px0–px3 are all scored without a cutoff,
 so they compare fairly.
+
+## 2026-10-18: the blind-practice ideas do not help hidden points
+
+Moving hidden points, all frames, no cutoff (100 val clips, standard check):
+
+| Run | APD (all points) | Moving hidden | Occluded | Out of frame |
+|---|---|---|---|---|
+| run33 (tracking, best) | 0.878 | **0.283** | 0.325 | 0.163 |
+| run38 (+ forecast masking) | 0.808 | 0.208 | 0.242 | 0.112 |
+| run40 (+ forecast, hidden loss, two-way time, visibility fed back) | 0.785 | 0.230 | 0.258 | 0.143 |
+
+Fast 24-grid runs (no CNN, 4,000 steps, val): px0 tracking 0.155, px1 + forecast
+0.145, px2 + two-way 0.148, px3 + visibility 0.148. Hidden barely moves in this
+setup, so it is too weak to use as a proxy.
+
+Conclusion: training-setup changes (forecast masking, hidden loss, two-way time,
+a visibility output) do not close the hidden-point gap, and forecast masking
+costs tracking. TAPIP3D is at 0.635. The next candidate is architectural.
