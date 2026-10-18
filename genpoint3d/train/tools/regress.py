@@ -22,6 +22,20 @@ spacing on the last.
 A model built with `vis_feedback` is also given, at every iteration, the
 visibility logits the iteration before it gave, detached like the guess and
 0 before the first, as TAPIP3D does.
+
+`param` says what each correction the network gives per frame means, before
+it is added to the guess:
+
+    position      a change to that frame's displacement, as above
+    velocity      a change to the speed from that frame on: a correction at
+                  frame t moves every later frame by the same amount
+    acceleration  a change to how fast the speed changes from that frame on:
+                  a correction at frame t changes the speed of every later frame
+
+So an output of zero at a frame the network cannot see keeps the guess there
+moving the way it already moves, rather than holding it in place. Either way
+the correction is summed into a displacement first, so the guess, the loss
+and the score all stay in displacement units.
 """
 
 from typing import Optional
@@ -38,6 +52,27 @@ def _pin(g: torch.Tensor, known_x0: Optional[torch.Tensor]) -> torch.Tensor:
     if known_x0 is None:
         return g
     return torch.cat([known_x0[:, None], g[:, 1:]], dim=1)
+
+
+def _integrate(step: torch.Tensor, param: str) -> torch.Tensor:
+    """(B, T, N, 3) the network's per-frame output, as a change in displacement.
+
+    Velocity and acceleration are summed over frames 1..t, with time measured
+    in clip lengths, one frame being 1 / (T - 1). An output the same size in
+    every frame then moves the last frame by about that much (all of it for a
+    velocity, half for an acceleration), as a position output would: without
+    the step, a velocity would move it T - 1 times as far and an acceleration
+    about T^2 / 2 times, and every weight change near the output would be
+    that much larger from the first step on. Frame 0 always gets zero.
+    """
+    if param == "position":
+        return step
+    dt = 1.0 / max(step.shape[1] - 1, 1)
+    rate = torch.cat([torch.zeros_like(step[:, :1]), step[:, 1:]], dim=1)
+    rate = rate.cumsum(dim=1) * dt
+    if param == "acceleration":
+        rate = rate.cumsum(dim=1) * dt
+    return rate
 
 
 def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
@@ -64,6 +99,7 @@ def regress_loss(
     backward: Optional[float] = None,
     visible: Optional[torch.Tensor] = None,
     vis_weight: float = 0.0,
+    param: str = "position",
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -88,9 +124,11 @@ def regress_loss(
               loss alone, and the visibility loss is only in the dict.
               With no `visible`, a model built with `vis_feedback` still
               computes its visibility, to feed it back, but nothing scores it.
+    param:    what the network's output means, see the top of this file.
 
     Frame 0 is scored before it is pinned again: the network is asked for a
-    zero correction there, as the flow loss asks for a zero velocity.
+    zero correction there, as the flow loss asks for a zero velocity. With a
+    velocity or an acceleration its correction there is zero by construction.
     """
     B = x1.shape[0]
     w = [gamma ** (iters - 1 - i) for i in range(iters)]
@@ -110,7 +148,7 @@ def regress_loss(
                 vis_loss = w[i] * visibility_error(logits, visible)
             if prev is not None:
                 prev = logits.detach()
-        g = g.detach() + step
+        g = g.detach() + _integrate(step, param)
         loss = w[i] * masked_error(g, x1, mask, weight, loss_type)
         if backward is not None:
             # Out of autocast, where the training loop's own backward runs.
@@ -134,6 +172,7 @@ def refine(
     iters: int = 4,
     known_x0: Optional[torch.Tensor] = None,
     visibility: bool = False,
+    param: str = "position",
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -143,7 +182,8 @@ def refine(
     baseline.
 
     `visibility` also returns the visibility logits (B, T, N) of the last
-    iteration, the one the training weighs most.
+    iteration, the one the training weighs most. `param` is as in
+    `regress_loss`, and must be what the model was trained with.
     """
     B, N, _ = anchor.shape
     g = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
@@ -156,5 +196,5 @@ def refine(
             out, logits = out
         if prev is not None:
             prev = logits
-        g = _pin(g + out, known_x0)
+        g = _pin(g + _integrate(out, param), known_x0)
     return (g, logits) if visibility else g

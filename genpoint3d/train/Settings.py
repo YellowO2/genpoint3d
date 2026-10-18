@@ -40,6 +40,19 @@ class Settings(argparse.Namespace):
                             "in evaluation. Each is a full forward and backward "
                             "pass, so a step costs this many times a flow step in "
                             "time, and the same in memory. TAPIP3D trains with 4.")
+        p.add_argument("--param", default="position",
+                       choices=["position", "velocity", "acceleration"],
+                       help="regress with --target displacement only: what each "
+                            "per-frame correction the network gives means. "
+                            "position: a change to that frame's displacement. "
+                            "velocity: a change to the speed from that frame on. "
+                            "acceleration: a change to how fast the speed changes "
+                            "from that frame on. Summed along time into a "
+                            "displacement before anything uses it, so a point the "
+                            "network cannot see keeps moving as it was rather than "
+                            "staying put. Not for flow: there the output is a "
+                            "velocity from the noisy sample to the tracks, not "
+                            "along time. See tools/regress.py.")
         p.add_argument("--accum", type=int, default=1,
                        help="micro-batches per optimiser step. A wider model does "
                             "not fit at --batch 16 on a 40GB A100, and halving the "
@@ -257,6 +270,11 @@ class Settings(argparse.Namespace):
         if settings.vis_feedback and (settings.vis_loss <= 0 or settings.method != "regress"):
             p.error("--vis-feedback feeds the visibility head back between "
                     "refinement iterations: it needs --vis-loss > 0 and --method regress")
+        if settings.param != "position" and (settings.method != "regress"
+                                             or settings.target != "displacement"):
+            p.error("--param velocity/acceleration sums the corrections along time "
+                    "from frame 0, which stays where it is: it needs --method "
+                    "regress and --target displacement")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

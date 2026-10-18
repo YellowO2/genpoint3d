@@ -54,6 +54,10 @@ CONFIGS = [
     ["--method", "regress", "--vis-feedback", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0",
      "--vis-feedback", "1"],
+    # Corrections summed along time into the displacement.
+    ["--method", "regress", "--param", "acceleration"],
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0",
+     "--vis-feedback", "1", "--param", "acceleration"],
 ]
 
 
@@ -112,7 +116,8 @@ def check(flags: list[str], cache: Path, b: dict) -> bool:
         for p in model.parameters():
             p.add_(torch.randn_like(p) * 0.1)
     judging = ScoreSettings(device=torch.device("cpu"), method=settings.method, steps=4,
-                            refine_iters=settings.refine_iters, anchor_frame0=True,
+                            refine_iters=settings.refine_iters, param=settings.param,
+                            anchor_frame0=True,
                             loss_type=settings.loss_type, cutoff=CUT)
     print(" ".join(flags))
     base = run(model, b, judging)

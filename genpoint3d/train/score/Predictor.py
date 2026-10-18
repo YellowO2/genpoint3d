@@ -60,9 +60,10 @@ class Predictor:
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             if j.method == "regress":
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
-                                    loss_type=j.loss_type, iters=j.refine_iters, **cond)
-                pred = refine(model, anchor, num_frames=traj.shape[1],
-                              iters=j.refine_iters, known_x0=kx0, visibility=seen, **cond)
+                                    loss_type=j.loss_type, iters=j.refine_iters,
+                                    param=j.param, **cond)
+                pred = refine(model, anchor, num_frames=traj.shape[1], iters=j.refine_iters,
+                              known_x0=kx0, visibility=seen, param=j.param, **cond)
             else:
                 l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                           loss_type=j.loss_type, **cond)

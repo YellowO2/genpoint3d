@@ -12,6 +12,7 @@ class ScoreSettings:
     method: str = "flow"          # "flow" samples, "regress" refines
     steps: int = 50               # flow: Euler steps from noise to tracks
     refine_iters: int = 4         # regress: corrections to the first guess
+    param: str = "position"       # regress: what a correction means, as trained
     anchor_frame0: bool = False   # hold frame 0 at its known position
     loss_type: str = "l2"         # the objective val_loss is measured by
     space: str = "3d"             # "2d" scores the projections in pixels
