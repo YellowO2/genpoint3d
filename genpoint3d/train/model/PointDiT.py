@@ -79,6 +79,7 @@ class PointDiT(nn.Module):
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
+        vel_input: bool = False,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -125,6 +126,12 @@ class PointDiT(nn.Module):
 
         # [path encoder] representing the current diffused path for the video
         self.token_proj = nn.Linear(3, dim, bias=False)
+        # [velocity in] with `vel_input` each token is also given how far its
+        # guess moved since the frame before, 0 at frame 0, in clip-length time
+        # units like `regress._integrate`. The time attention could take that
+        # difference itself; Learning to Simulate found that handing it in
+        # matters. From near zero, so the model starts as it would without.
+        self.vel_proj = zero_init(nn.Linear(3, dim, bias=False)) if vel_input else None
         
         # [feature adapter] trainable, unlike VisualEncoder.py which is cached frozen.
         # Always on when there are features: the patch position is added to
@@ -720,6 +727,9 @@ class PointDiT(nn.Module):
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
+        if self.vel_proj is not None:
+            v = torch.cat([torch.zeros_like(x[:, :1]), x.diff(dim=1)], dim=1) * max(T - 1, 1)
+            h = h + self.vel_proj(v)
         if match is not None:
             # Added, not folded into `cond`: conditioning only rescales
             # channels (AdaRMSNorm), and a displacement has to be copied.

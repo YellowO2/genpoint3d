@@ -58,6 +58,8 @@ CONFIGS = [
     ["--method", "regress", "--param", "acceleration"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0",
      "--vis-feedback", "1", "--param", "acceleration"],
+    # Each token also given how far its guess moved since the frame before.
+    ["--method", "regress", "--param", "velocity", "--vel-input", "1"],
 ]
 
 

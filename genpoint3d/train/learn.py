@@ -6,7 +6,7 @@ from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
     apd_weight, fine_inputs, hidden_weight, known_frame0, match_targets, random_cutoff,
-    to_device, visual_mask,
+    rigid_pairs, to_device, visual_mask,
 )
 from genpoint3d.train.tools.flow import flow_matching_loss
 from genpoint3d.train.tools.matching import match_ce
@@ -30,6 +30,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     # The method's loss only: the match stays on visible points.
     mask, w = hidden_weight(vis, w, settings.hidden_loss)
     kx0 = known_frame0(b) if settings.anchor_frame0 else None
+    rigid = dict(pairs=rigid_pairs(b), rigid_weight=settings.rigid_loss) if settings.rigid_loss else {}
     # With --vis-loss, what the visibility head should say: every frame,
     # hidden and forecast ones included, whatever --hidden-loss is.
     seen = {}
@@ -64,7 +65,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
                                        known_x0=kx0, loss_type=settings.loss_type,
                                        iters=settings.refine_iters, backward=1 / settings.accum,
                                        param=settings.param, vel_weight=settings.vel_loss,
-                                       acc_weight=settings.acc_loss,
+                                       acc_weight=settings.acc_loss, **rigid,
                                        context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                                        **seen, **fine)
         else:

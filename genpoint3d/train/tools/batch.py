@@ -136,6 +136,25 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     return scene * scale + b["norm_mean"][:, None, None, :]
 
 
+def rigid_pairs(b: dict, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor:
+    """(B, N, N) bool: the pairs of points the truth shows on one moving rigid
+    object, for the rigidity loss.
+
+    The cache keeps no object ids, but every Kubric object is rigid: two
+    points on one keep their distance in every frame, the hidden ones too.
+    A pair counts when that distance never strays more than `tol` metres from
+    its frame-0 value and both points move more than `moved` metres at some
+    frame -- two points of the still background keep their distance as well,
+    and say nothing about motion. A point is never paired with itself.
+    """
+    p = to_metres(b["traj"], b)                                   # (B, T, N, 3)
+    d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)          # (B, T, N, N)
+    rigid = (d - d[:, :1]).abs().amax(dim=1) < tol
+    move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved       # (B, N)
+    eye = torch.eye(p.shape[2], dtype=torch.bool, device=p.device)
+    return rigid & move[:, :, None] & move[:, None, :] & ~eye
+
+
 def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
     """What the relative finder adds to a forward pass: the CNN's feature map
     for the batch's frames, each frame's camera and, for a finder that reads

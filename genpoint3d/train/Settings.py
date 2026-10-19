@@ -228,6 +228,14 @@ class Settings(argparse.Namespace):
                        help="regress only: as --vel-loss, for how the guess's "
                             "speed changes from each frame to the next against "
                             "how the truth's does. 0 leaves it out.")
+        p.add_argument("--rigid-loss", type=float, default=0.0, metavar="W",
+                       help="regress only: the loss also scores the gap between "
+                            "every two points the truth shows on one moving "
+                            "rigid object, in every frame, hidden ones too, "
+                            "weighted W against the position loss. 0 leaves it out.")
+        p.add_argument("--vel-input", type=int, default=0, choices=[0, 1],
+                       help="also give each token how far its guess moved since "
+                            "the frame before.")
         p.add_argument("--hidden-loss", type=float, default=1.0, metavar="W",
                        help="the method's loss also counts the frames where a "
                             "point is hidden (occluded or out of the frame), "
@@ -273,8 +281,8 @@ class Settings(argparse.Namespace):
             p.error("--eval-cutoff is 0 (off) or at least 2")
         if settings.fine_xyz and not settings.fine:
             p.error("--fine-xyz adds to the relative finder: it needs --fine 1")
-        if (settings.vel_loss or settings.acc_loss) and settings.method != "regress":
-            p.error("--vel-loss and --acc-loss are only built for --method regress")
+        if (settings.vel_loss or settings.acc_loss or settings.rigid_loss) and settings.method != "regress":
+            p.error("--vel-loss, --acc-loss and --rigid-loss are only built for --method regress")
         if settings.hidden_loss < 0:
             p.error("--hidden-loss is a weight: 0 or more")
         if settings.vis_loss < 0:

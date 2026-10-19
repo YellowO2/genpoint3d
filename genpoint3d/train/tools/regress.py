@@ -106,6 +106,19 @@ def _motion_error(g, x1, mask, weight, loss_type, order):
     return masked_error(dg, dx, m, w, loss_type)
 
 
+def _rigid_error(g, x1, pairs, loss_type):
+    """The error of the gap between two points of one rigid object, `pairs`
+    (B, N, N), against the true gap, in every frame. The gap's error is the
+    difference of the two points' own errors, so this asks the points of an
+    object to be wrong together: a hidden point that stays behind while its
+    object's visible points move costs, even where both are close to right.
+    """
+    e = (g - x1)[:, :, :, None] - (g - x1)[:, :, None]           # (B, T, N, N, 3)
+    err = e.norm(dim=-1) if loss_type == "l21" else e.pow(2).mean(dim=-1)
+    w = pairs[:, None].to(err.dtype).expand_as(err)
+    return (err * w).sum() / w.sum().clamp(min=1e-8)
+
+
 def _clock(i: int, iters: int, batch: int, device: torch.device) -> torch.Tensor:
     """(B,) `k` for iteration `i`. A single iteration is the last one."""
     return torch.full((batch,), i / (iters - 1) if iters > 1 else 1.0, device=device)
@@ -127,6 +140,8 @@ def regress_loss(
     param: str = "position",
     vel_weight: float = 0.0,
     acc_weight: float = 0.0,
+    pairs: Optional[torch.Tensor] = None,
+    rigid_weight: float = 0.0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -157,6 +172,9 @@ def regress_loss(
               iteration. Part of the returned loss.
     acc_weight: the same for each change of that change, how the speed of the
               guess changes against how the truth's does.
+    pairs, rigid_weight: (B, N, N) the pairs of points on one rigid object
+              (`batch.rigid_pairs`), and the weight of the loss that keeps
+              the gap between them true, at every iteration.
 
     Frame 0 is scored before it is pinned again: the network is asked for a
     zero correction there, as the flow loss asks for a zero velocity. With a
@@ -186,6 +204,8 @@ def regress_loss(
             loss = loss + w[i] * vel_weight * _motion_error(g, x1, mask, weight, loss_type, 1)
         if acc_weight:
             loss = loss + w[i] * acc_weight * _motion_error(g, x1, mask, weight, loss_type, 2)
+        if rigid_weight:
+            loss = loss + w[i] * rigid_weight * _rigid_error(g, x1, pairs, loss_type)
         if backward is not None:
             # Out of autocast, where the training loop's own backward runs.
             with torch.autocast(device_type=x1.device.type, enabled=False):
