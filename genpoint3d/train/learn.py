@@ -64,6 +64,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
                                        known_x0=kx0, loss_type=settings.loss_type,
                                        iters=settings.refine_iters, backward=1 / settings.accum,
                                        param=settings.param, vel_weight=settings.vel_loss,
+                                       acc_weight=settings.acc_loss,
                                        context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                                        **seen, **fine)
         else:
