@@ -48,7 +48,7 @@ HIDDEN_KEYS = tuple(f"{name}{suffix}"
                                  "apd_outside", "apd_moving_outside", "apd_still_outside",
                                  "apd_returns", "apd_moving_returns", "apd_still_returns",
                                  "apd_gone", "apd_moving_gone", "apd_still_gone")
-                    for suffix in ("", "_lastseen", "_lastcv", "_interp", "_buddy")) + ("hidden_outside_frac",)
+                    for suffix in ("", "_lastseen", "_lastcv", "_interp", "_buddy", "_buddypred")) + ("hidden_outside_frac",)
 
 
 def resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:
