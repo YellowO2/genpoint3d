@@ -4,7 +4,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.tools.batch import to_metres
+from genpoint3d.train.tools.batch import rigid_buddies, to_metres
 from genpoint3d.train.tools.metrics import MOVING_THRESHOLDS, in_image, motion_px, tapvid3d_metrics
 
 # A point counts as still if its true position never moves more than this
@@ -189,6 +189,12 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
         _interp    a straight line from the true position where it was last
                    seen to the one where it is next seen; the last seen one
                    if it is never seen again
+        _buddy     carried from where it was last seen by the rotation and
+                   shift that best move its object's points visible in this
+                   frame (`rigid_buddies`, among the scored points) from
+                   there to here; the shift alone with fewer than three, the
+                   last seen position with none. What knowing which visible
+                   points share its rigid object could give.
 
 And each hidden set split by whether the point is seen again later in the
 clip: `_returns`, a gap that a tracker reading the whole clip can fill from
@@ -207,6 +213,7 @@ both ends, and `_gone`, which only a guess forward can.
                                    / hidden.flatten(1).sum(1))}
     lastseen, lastcv = _last_seen(gt_m, vis)
     interp, returns = _between_sightings(gt_m, vis)
+    buddy = _with_buddies(gt_m, vis, lastseen)
     # `apd_still` is the easy case: points whose true position never changes,
     # hidden frames included, so holding the last seen position is exactly
     # right (`_lastseen` scores 1). Anything below that is the model losing
@@ -217,7 +224,7 @@ both ends, and `_gone`, which only a guess forward can.
                                   ("apd_still", still, "none")):
         mine = hidden & points[:, None]
         for guess, suffix in ((pred_m, ""), (lastseen, "_lastseen"), (lastcv, "_lastcv"),
-                              (interp, "_interp")):
+                              (interp, "_interp"), (buddy, "_buddy")):
             score = lambda mask: _apd(guess, gt_m, mask, b, scaling)
             out[name + "_hidden" + suffix] = score(mine)
             out[name + "_occluded" + suffix] = score(mine & inside)
@@ -250,6 +257,30 @@ def _last_seen(gt_m, vis):
     lastcv = torch.where((before >= 0)[..., None],
                          at_last + speed * (frame - last)[..., None], at_last)
     return at_last, lastcv
+
+
+def _with_buddies(gt_m, vis, lastseen):
+    """A guess (B, T, N, 3) for every frame: each point carried from its last
+    sighting by the rigid motion of its object's points visible now. See
+    `_buddy` in `_hidden_scores`."""
+    B, T, N, _ = gt_m.shape
+    frame = torch.arange(T, device=gt_m.device)[None, :, None].expand_as(vis)
+    last = torch.where(vis, frame, -1).cummax(1).values.clamp(min=0)   # (B, T, N)
+    w = (rigid_buddies(gt_m)[:, None] & vis[:, :, None, :]).float()   # (B, T, i, j)
+    n = w.sum(-1)                                                       # (B, T, i)
+    src = gt_m[torch.arange(B)[:, None, None], last]                   # (B, T, i, j, 3)
+    dst = gt_m[:, :, None]                                              # (B, T, 1, j, 3)
+    mean = lambda x: (w[..., None] * x).sum(-2) / n.clamp(min=1)[..., None]
+    cs, cd = mean(src), mean(dst)                                       # (B, T, i, 3)
+    H = torch.einsum("btij,btijk,btijl->btikl", w, src - cs[..., None, :],
+                     (dst - cd[..., None, :]).expand_as(src))
+    U, _, Vh = torch.linalg.svd(H)
+    flip = torch.ones_like(cs)
+    flip[..., 2] = torch.linalg.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
+    R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
+    R = torch.where((n >= 3)[..., None, None], R, torch.eye(3, device=gt_m.device))
+    guess = (R @ (lastseen - cs)[..., None])[..., 0] + cd
+    return torch.where((n >= 1)[..., None], guess, lastseen)
 
 
 def _between_sightings(gt_m, vis):

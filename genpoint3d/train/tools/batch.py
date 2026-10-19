@@ -136,9 +136,15 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     return scene * scale + b["norm_mean"][:, None, None, :]
 
 
-def rigid_pairs(b: dict, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor:
+def rigid_pairs(b: dict) -> torch.Tensor:
     """(B, N, N) bool: the pairs of points the truth shows on one moving rigid
-    object, for the rigidity loss.
+    object, for the rigidity loss. See `rigid_buddies`."""
+    return rigid_buddies(to_metres(b["traj"], b))
+
+
+def rigid_buddies(p: torch.Tensor, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor:
+    """(B, N, N) bool from true positions `p` (B, T, N, 3) in metres: the pairs
+    of points on one moving rigid object.
 
     The cache keeps no object ids, but every Kubric object is rigid: two
     points on one keep their distance in every frame, the hidden ones too.
@@ -147,7 +153,6 @@ def rigid_pairs(b: dict, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor
     frame -- two points of the still background keep their distance as well,
     and say nothing about motion. A point is never paired with itself.
     """
-    p = to_metres(b["traj"], b)                                   # (B, T, N, 3)
     d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)          # (B, T, N, N)
     rigid = (d - d[:, :1]).abs().amax(dim=1) < tol
     move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved       # (B, N)
