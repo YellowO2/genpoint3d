@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from genpoint3d.train.model.Buddies import Buddies
 from genpoint3d.train.model.FineFinder import FineFinder
 from genpoint3d.train.model.MatchHead import MatchHead
 from genpoint3d.train.tools.camera import project
@@ -80,6 +81,8 @@ class PointDiT(nn.Module):
         visibility: bool = False,
         vis_feedback: bool = False,
         vel_input: bool = False,
+        buddies: bool = False,
+        buddy_bias: bool = False,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -325,6 +328,16 @@ class PointDiT(nn.Module):
         self.vis_feedback = vis_feedback
         if vis_feedback:
             self.vis_in = nn.Parameter(torch.zeros(dim))
+
+        # [buddies] where each point's rigid object says it is (`Buddies.py`),
+        # as an offset from its guess and how much buddy weight backs it, into
+        # the token from zero; optionally a per-pair spatial attention bias.
+        # Built last, so every weight above draws what it draws without it.
+        if buddy_bias and not buddies:
+            raise ValueError("buddy_bias is part of buddies")
+        self.buddies = Buddies(num_heads, depth, bias=buddy_bias) if buddies else None
+        if buddies:
+            self.buddy_tok = zero_init(nn.Linear(4, dim, bias=False), almost=False)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -743,6 +756,14 @@ class PointDiT(nn.Module):
             raise ValueError("vis_prev is given exactly when the model was built with vis_feedback")
         if vis_prev is not None:
             h = h + vis_prev[..., None].to(h.dtype) * self.vis_in.to(h.dtype)
+        biases = [None] * self.depth
+        if self.buddies is not None:
+            prop, support, bb = self.buddies(self._lookup_pos(x, anchor), anchor, vis_prev)
+            # Clamped: early on a guess can be far off, and so can the offset.
+            prop = (prop / self.traj_scale).clamp(-10, 10)
+            h = h + self.buddy_tok(torch.cat([prop, support[..., None]], -1).to(h.dtype))
+            if bb is not None:
+                biases = [b.to(h.dtype) for b in bb]
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in
@@ -759,7 +780,8 @@ class PointDiT(nn.Module):
 
         # --- [4] blocks ---
         cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth
-        for temporal, spatial, cross in zip(self.temporal_blocks, self.spatial_blocks, cross_blocks):
+        for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
+                                                  cross_blocks, biases):
             # each point's own timeline; a frame may only see its own past
             ht = h.permute(0, 2, 1, 3).reshape(B * N, T, -1)
             ct = cond.permute(0, 2, 1, 3).reshape(B * N, T, -1)
@@ -769,7 +791,7 @@ class PointDiT(nn.Module):
             # all points within one frame
             hs = h.reshape(B * T, N, -1)
             cs = cond.reshape(B * T, N, -1)
-            h = spatial(hs, cs, theta=theta_space)
+            h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
 
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:

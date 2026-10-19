@@ -60,6 +60,10 @@ CONFIGS = [
      "--vis-feedback", "1", "--param", "acceleration"],
     # Each token also given how far its guess moved since the frame before.
     ["--method", "regress", "--param", "velocity", "--vel-input", "1"],
+    # Each point told where the points that move with it say it is.
+    ["--method", "regress", "--param", "velocity", "--buddies", "1", "--buddy-bias", "1"],
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--vis-loss", "1",
+     "--vis-feedback", "1", "--param", "velocity", "--buddies", "1"],
 ]
 
 

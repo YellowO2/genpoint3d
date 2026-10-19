@@ -236,6 +236,13 @@ class Settings(argparse.Namespace):
         p.add_argument("--vel-input", type=int, default=0, choices=[0, 1],
                        help="also give each token how far its guess moved since "
                             "the frame before.")
+        p.add_argument("--buddies", type=int, default=0, choices=[0, 1],
+                       help="give each point where the points that have kept "
+                            "their distance to it say it is: carried by their "
+                            "rotation and shift since frame 0 (Buddies.py).")
+        p.add_argument("--buddy-bias", type=int, default=0, choices=[0, 1],
+                       help="--buddies only: also a learned spatial attention "
+                            "bias per pair of points, from the same numbers.")
         p.add_argument("--hidden-loss", type=float, default=1.0, metavar="W",
                        help="the method's loss also counts the frames where a "
                             "point is hidden (occluded or out of the frame), "
