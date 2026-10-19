@@ -45,8 +45,10 @@ MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
 HIDDEN_KEYS = tuple(f"{name}{suffix}"
                     for name in ("apd_hidden", "apd_moving_hidden", "apd_still_hidden",
                                  "apd_occluded", "apd_moving_occluded", "apd_still_occluded",
-                                 "apd_outside", "apd_moving_outside", "apd_still_outside")
-                    for suffix in ("", "_lastseen", "_lastcv")) + ("hidden_outside_frac",)
+                                 "apd_outside", "apd_moving_outside", "apd_still_outside",
+                                 "apd_returns", "apd_moving_returns", "apd_still_returns",
+                                 "apd_gone", "apd_moving_gone", "apd_still_gone")
+                    for suffix in ("", "_lastseen", "_lastcv", "_interp")) + ("hidden_outside_frac",)
 
 
 def resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:

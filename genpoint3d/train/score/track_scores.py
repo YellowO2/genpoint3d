@@ -186,6 +186,13 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
         _lastseen  the true position at the last frame the point was seen
         _lastcv    constant speed from the true positions at the last two
                    frames it was seen; the last seen one if it was seen once
+        _interp    a straight line from the true position where it was last
+                   seen to the one where it is next seen; the last seen one
+                   if it is never seen again
+
+And each hidden set split by whether the point is seen again later in the
+clip: `_returns`, a gap that a tracker reading the whole clip can fill from
+both ends, and `_gone`, which only a guess forward can.
 
     They are generous: they use the TRUE positions at those frames, where a
     tracker has only its own estimate of them. They show how much of a
@@ -199,6 +206,7 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     out = {"hidden_outside_frac": ((hidden & ~inside).flatten(1).sum(1)
                                    / hidden.flatten(1).sum(1))}
     lastseen, lastcv = _last_seen(gt_m, vis)
+    interp, returns = _between_sightings(gt_m, vis)
     # `apd_still` is the easy case: points whose true position never changes,
     # hidden frames included, so holding the last seen position is exactly
     # right (`_lastseen` scores 1). Anything below that is the model losing
@@ -208,11 +216,14 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
                                   ("apd_moving", moving, "none"),
                                   ("apd_still", still, "none")):
         mine = hidden & points[:, None]
-        for guess, suffix in ((pred_m, ""), (lastseen, "_lastseen"), (lastcv, "_lastcv")):
+        for guess, suffix in ((pred_m, ""), (lastseen, "_lastseen"), (lastcv, "_lastcv"),
+                              (interp, "_interp")):
             score = lambda mask: _apd(guess, gt_m, mask, b, scaling)
             out[name + "_hidden" + suffix] = score(mine)
             out[name + "_occluded" + suffix] = score(mine & inside)
             out[name + "_outside" + suffix] = score(mine & ~inside)
+            out[name + "_returns" + suffix] = score(mine & returns)
+            out[name + "_gone" + suffix] = score(mine & ~returns)
         if j.cutoff:
             out[name + "_fut_all"] = _apd(pred_m, gt_m, points[:, None] & ~observed, b, scaling)
     return out
@@ -239,6 +250,22 @@ def _last_seen(gt_m, vis):
     lastcv = torch.where((before >= 0)[..., None],
                          at_last + speed * (frame - last)[..., None], at_last)
     return at_last, lastcv
+
+
+def _between_sightings(gt_m, vis):
+    """A guess (B, T, N, 3) for every frame on a straight line between the
+    true positions at the last sighting up to it and the next one from it,
+    and (B, T, N) whether there is a next one. With none, the last sighting;
+    with no earlier one, frame 0, as `_last_seen` does."""
+    T = gt_m.shape[1]
+    frame = torch.arange(T, device=gt_m.device)[None, :, None].expand_as(vis)
+    last = torch.where(vis, frame, -1).cummax(1).values.clamp(min=0)
+    nxt = torch.where(vis, frame, T).flip(1).cummin(1).values.flip(1)
+    returns = nxt < T
+    pick = lambda idx: gt_m.gather(1, idx.clamp(max=T - 1)[..., None].expand_as(gt_m))
+    at_last, at_next = pick(last), pick(nxt)
+    w = ((frame - last) / (nxt - last).clamp(min=1))[..., None]
+    return torch.where(returns[..., None], at_last + w * (at_next - at_last), at_last), returns
 
 
 def _apd(pred_m, gt_m, mask, b: dict, scaling: str):
