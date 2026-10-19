@@ -67,12 +67,18 @@ class Buddies(nn.Module):
                  and, with `bias`, one (B*T, H, N, N) attention bias per
                  block, else None.
         """
+        # fp32 throughout: the SVD has no bf16 kernel, and distances of a few
+        # centimetres are what the weights read.
+        with torch.autocast(device_type=pos.device.type, enabled=False):
+            return self._forward(pos.float(), anchor.float(),
+                                 None if seen is None else seen.float())
+
+    def _forward(self, pos, anchor, seen):
         B, T, N, _ = pos.shape
-        pos, anchor = pos.float(), anchor.float()
         gap0 = (anchor[:, :, None] - anchor[:, None]).norm(dim=-1)          # (B, N, N)
         gap = (pos[:, :, :, None] - pos[:, :, None]).norm(dim=-1)           # (B, T, N, N)
         now = gap - gap0[:, None]
-        sj = (torch.sigmoid(seen.float()) if seen is not None
+        sj = (torch.sigmoid(seen) if seen is not None
               else torch.full((B, T, N), 0.5, device=pos.device))
         both = sj[:, :, :, None] * sj[:, :, None, :]                       # (B, T, N, N)
         change = (now.abs() * both).cumsum(1) / both.cumsum(1).clamp(min=1e-6)
