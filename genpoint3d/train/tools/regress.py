@@ -81,6 +81,20 @@ def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
     return x.new_zeros(x.shape[:3]) if model.vis_feedback else None
 
 
+def _velocity_error(g, x1, mask, weight, loss_type):
+    """The error of each frame-to-frame change of `g` against the truth's.
+
+    A pair of frames counts when both count in the position loss, at the mean
+    of their weights. Times T - 1, so it is in the same clip-length time units
+    as `_integrate`, and a guess that drifts away a little every frame costs
+    about as much as one that is off by that drift at the end.
+    """
+    s = x1.shape[1] - 1
+    m = None if mask is None else mask[:, 1:] & mask[:, :-1]
+    w = None if weight is None else (weight[:, 1:] + weight[:, :-1]) / 2
+    return masked_error(g.diff(dim=1) * s, x1.diff(dim=1) * s, m, w, loss_type)
+
+
 def _clock(i: int, iters: int, batch: int, device: torch.device) -> torch.Tensor:
     """(B,) `k` for iteration `i`. A single iteration is the last one."""
     return torch.full((batch,), i / (iters - 1) if iters > 1 else 1.0, device=device)
@@ -100,6 +114,7 @@ def regress_loss(
     visible: Optional[torch.Tensor] = None,
     vis_weight: float = 0.0,
     param: str = "position",
+    vel_weight: float = 0.0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -125,6 +140,9 @@ def regress_loss(
               With no `visible`, a model built with `vis_feedback` still
               computes its visibility, to feed it back, but nothing scores it.
     param:    what the network's output means, see the top of this file.
+    vel_weight: also score each frame-to-frame change of the guess against the
+              truth's, weighted this against the position loss, at every
+              iteration. Part of the returned loss.
 
     Frame 0 is scored before it is pinned again: the network is asked for a
     zero correction there, as the flow loss asks for a zero velocity. With a
@@ -150,6 +168,8 @@ def regress_loss(
                 prev = logits.detach()
         g = g.detach() + _integrate(step, param)
         loss = w[i] * masked_error(g, x1, mask, weight, loss_type)
+        if vel_weight:
+            loss = loss + w[i] * vel_weight * _velocity_error(g, x1, mask, weight, loss_type)
         if backward is not None:
             # Out of autocast, where the training loop's own backward runs.
             with torch.autocast(device_type=x1.device.type, enabled=False):
