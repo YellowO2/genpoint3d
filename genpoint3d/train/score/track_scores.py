@@ -180,6 +180,12 @@ def _hidden_scores(pred_m, gt_m, vis, moving, b: dict, j: ScoreSettings) -> dict
     `hidden_outside_frac` is the share of hidden entries that are outside,
     per clip; NaN for a clip with none hidden.
 
+    Beside them, the moving points where they ARE seen, by third of the clip
+    (`apd_moving_seen_early`, `_mid`, `_late`, frame 0 left out): whether the
+    model gets less precise the further a frame is from frame 0, whose look
+    is the template. `_static` after each is "nothing moves" on the same
+    entries, how far the points have gone by then.
+
     Two baselines on the same entries, each with the same suffix after the
     hidden, occluded and outside names:
 
@@ -215,6 +221,11 @@ both ends, and `_gone`, which only a guess forward can.
     hidden = ~vis & observed
     out = {"hidden_outside_frac": ((hidden & ~inside).flatten(1).sum(1)
                                    / hidden.flatten(1).sum(1))}
+    seen = vis & moving[:, None]
+    for part, frames in zip(("early", "mid", "late"), torch.arange(1, T).tensor_split(3)):
+        mask = seen & torch.isin(frame, frames.to(frame.device))
+        out[f"apd_moving_seen_{part}"] = _apd(pred_m, gt_m, mask, b, "none")
+        out[f"apd_moving_seen_{part}_static"] = _apd(gt_m[:, :1].expand_as(gt_m), gt_m, mask, b, "none")
     lastseen, lastcv = _last_seen(gt_m, vis)
     interp, returns = _between_sightings(gt_m, vis)
     pairs = rigid_buddies(gt_m)
