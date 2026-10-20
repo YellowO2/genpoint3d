@@ -56,8 +56,8 @@ def train(settings: Settings):
         for batch in loaders.micro_batches(settings.accum):
             losses = learn(model, batch, settings, hardware)
             running_loss.add(losses)
-        optimiser.step(model)
-        running_loss.step(step, optimiser.lr())
+        norm = optimiser.step(model)
+        running_loss.step(step, optimiser.lr(), norm)
         if step % settings.val_every == 0 or step == settings.steps:
             optimiser.swap_in_average(model)
             interval = running_loss.interval(step)

@@ -29,15 +29,17 @@ class Optimiser:
         log.info(f"lr {settings.lr:.1e} | warmup {warmup} steps ({settings.warmup_frac:.0%})"
                  f" | wdecay {settings.wdecay:g} | amp {'bf16' if hardware.amp else 'off'}")
 
-    def step(self, model) -> None:
-        """One optimiser step on the gradient the micro-batches left."""
-        if self.clip:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip)
+    def step(self, model) -> float:
+        """One optimiser step on the gradient the micro-batches left. Returns
+        the gradient's norm before the clip, to tell how often the clip bites:
+        a clip under the usual norm shrinks every step, like a smaller rate."""
+        norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip or float("inf")))
         self.opt.step()
         self.opt.zero_grad(set_to_none=True)
         if self.ema is not None:
             self.ema.update(model)
         self.sched.step()
+        return norm
 
     def lr(self) -> float:
         return self.sched.get_last_lr()[0]

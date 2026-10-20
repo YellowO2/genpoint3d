@@ -23,6 +23,8 @@ class RunningLoss:
         self.micro_loss = 0.0
         self.match_sum = 0.0
         self.vis_sum = 0.0
+        self.clip = settings.clip
+        self.norm_sum, self.clipped = 0.0, 0
 
     def add(self, losses: Losses) -> None:
         """One micro-batch's losses."""
@@ -30,8 +32,11 @@ class RunningLoss:
         self.match_sum += losses.match
         self.vis_sum += losses.visibility
 
-    def step(self, step: int, lr: float) -> None:
-        """The optimiser has stepped; every 100 steps, say how it went."""
+    def step(self, step: int, lr: float, norm: float) -> None:
+        """The optimiser has stepped; every 100 steps, say how it went.
+        `norm` is the gradient's norm before the clip."""
+        self.norm_sum += norm
+        self.clipped += bool(self.clip) and norm > self.clip
         self.running += self.micro_loss
         self.since_val += self.micro_loss
         self.since_val_n += 1
@@ -39,8 +44,10 @@ class RunningLoss:
         if step % 100 == 0:
             log.info(f"  step {step:>6}  loss {self.running / 100:.5f}"
                      f"  lr {lr:.2e}"
+                     f"  grad {self.norm_sum / 100:.2f} (clipped {self.clipped}%)"
                      f"  {(time.time() - self.t0) / step:.3f}s/it")
             self.running = 0.0
+            self.norm_sum, self.clipped = 0.0, 0
 
     def interval(self, step: int) -> Interval:
         """The mean losses since the last validation, and a fresh start."""
