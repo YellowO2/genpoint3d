@@ -105,7 +105,8 @@ visible moving points on val. fx0 is the reference for this batch.
 | fx5 | CNN only, carry, two-way time, clip 1 | 0.300 | cancelled | | |
 | fx6 | fx5 with TAPIP3D's 3D neighbourhood (`--fine-neigh 32`) | 0.282 | cancelled | | |
 | fx7 | fx5 with `--clip 10` | 0.454 | 0.566 | 0.26 | 0.85 |
-| fx8 | fx1 with `--clip 10` | 0.599 | running | | |
+| fx8 | fx1 with `--clip 10` | 0.599 | 0.653 | 0.36 | 0.90 |
+| fx9 | fx7 with `--motion-waves 1` | 0.488 | (NSCC dropped at step 1900) | | |
 
 1. Writing each window cell's 3D offset as sin and cos at many scales (the
    "ruler", Fourier features) lifts precision most at 1 px.
@@ -125,5 +126,7 @@ visible moving points on val. fx0 is the reference for this batch.
 5. The 20-clip memorisation test reaches 0.943 moving APD (0.80 within 1 px):
    the design can output pixel-precise tracks on clips it has seen.
 
-Queued: fx9, fx7 + TAPIP3D's Fourier-encoded motion and pixel input
-(`--motion-waves 1`).
+6. TAPIP3D's Fourier-encoded motion and pixel input (`--motion-waves 1`,
+   which replaces the raw `--vel-input`) helps the CNN-only model: 0.488
+   against fx7's 0.454 at step 1000. fx9's last scores are on NSCC in
+   `outputs/fx9_cnn_motion/log.json`.
