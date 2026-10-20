@@ -251,6 +251,12 @@ class Settings(argparse.Namespace):
         p.add_argument("--fine-width", type=int, default=64,
                        help="numbers the finder keeps per pyramid level from each "
                             "window's comparison table.")
+        p.add_argument("--carry", type=int, default=0, choices=[0, 1],
+                       help="regress only: between refinement iterations, the "
+                            "frames past a horizon that moves to the last frame "
+                            "restart from the horizon's guess, so each frame's "
+                            "window starts near where the point last was "
+                            "(`regress._carry`).")
         p.add_argument("--hidden-loss", type=float, default=1.0, metavar="W",
                        help="the method's loss also counts the frames where a "
                             "point is hidden (occluded or out of the frame), "
@@ -298,6 +304,8 @@ class Settings(argparse.Namespace):
             p.error("--fine-xyz adds to the relative finder: it needs --fine 1")
         if (settings.vel_loss or settings.acc_loss or settings.rigid_loss) and settings.method != "regress":
             p.error("--vel-loss, --acc-loss and --rigid-loss are only built for --method regress")
+        if settings.carry and settings.method != "regress":
+            p.error("--carry restarts frames between refinement iterations: regress only")
         if settings.fine_waves and not settings.fine_xyz:
             p.error("--fine-waves encodes the offsets --fine-xyz reads")
         if settings.hidden_loss < 0:

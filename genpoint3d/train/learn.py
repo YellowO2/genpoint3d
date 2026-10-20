@@ -64,7 +64,8 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
             loss, parts = regress_loss(model, traj, anchor, mask=mask, weight=w,
                                        known_x0=kx0, loss_type=settings.loss_type,
                                        iters=settings.refine_iters, backward=1 / settings.accum,
-                                       param=settings.param, vel_weight=settings.vel_loss,
+                                       param=settings.param, carry=bool(settings.carry),
+                                       vel_weight=settings.vel_loss,
                                        acc_weight=settings.acc_loss, **rigid,
                                        context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                                        **seen, **fine)

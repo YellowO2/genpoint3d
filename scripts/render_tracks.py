@@ -199,7 +199,8 @@ def main() -> int:
                             anchor_frame0=bool(targs.get("anchor_frame0", 0)),
                             loss_type=targs.get("loss_type", "l21"), method=method,
                             refine_iters=targs.get("refine_iters", 4),
-                            param=targs.get("param", "position"), cutoff=args.eval_cutoff)
+                            param=targs.get("param", "position"),
+                            carry=bool(targs.get("carry", 0)), cutoff=args.eval_cutoff)
     predictor = Predictor(model, judging)
     print(f"step {ckpt['step']} of {args.ckpt} | {device} | {method} | {len(clips)} clips"
           f" | drawing {args.points} of {targs['points']} points", flush=True)

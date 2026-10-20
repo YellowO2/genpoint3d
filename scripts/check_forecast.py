@@ -67,6 +67,8 @@ CONFIGS = [
     # A finer ruler for the finder's window offsets, and more room per level.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-waves", "10",
      "--fine-width", "128"],
+    # Later frames restart from a horizon's guess between iterations.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--carry", "1"],
 ]
 
 

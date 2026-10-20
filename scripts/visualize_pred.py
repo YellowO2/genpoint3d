@@ -117,7 +117,8 @@ def main() -> int:
     if targs.get("method", "flow") == "regress":
         pred = refine(model, anchor, num_frames=traj.shape[1],
                       iters=targs.get("refine_iters", 4), known_x0=kx0,
-                      param=targs.get("param", "position"), **cond)
+                      param=targs.get("param", "position"),
+                      carry=bool(targs.get("carry", 0)), **cond)
     else:
         pred = flow_sample(model, anchor, num_frames=traj.shape[1],
                            steps=args.sample_steps, known_x0=kx0, **cond)

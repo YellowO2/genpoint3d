@@ -61,9 +61,10 @@ class Predictor:
             if j.method == "regress":
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                     loss_type=j.loss_type, iters=j.refine_iters,
-                                    param=j.param, **cond)
+                                    param=j.param, carry=j.carry, **cond)
                 pred = refine(model, anchor, num_frames=traj.shape[1], iters=j.refine_iters,
-                              known_x0=kx0, visibility=seen, param=j.param, **cond)
+                              known_x0=kx0, visibility=seen, param=j.param,
+                              carry=j.carry, **cond)
             else:
                 l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                           loss_type=j.loss_type, **cond)

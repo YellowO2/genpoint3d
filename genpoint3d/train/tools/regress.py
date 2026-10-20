@@ -75,6 +75,28 @@ def _integrate(step: torch.Tensor, param: str) -> torch.Tensor:
     return rate
 
 
+def _carry(g: torch.Tensor, i: int, iters: int) -> torch.Tensor:
+    """After iteration `i`, every frame past a horizon restarts from the
+    horizon's own guess, the horizon moving from frame 0 to the last frame
+    over the first `iters - 1` iterations.
+
+    The guess starts at frame 0's position in every frame, and each frame's
+    window looks around its own guess: a point that has gone 200 px by frame
+    20 is outside it, and only the whole-frame match can bring it back. With
+    the horizon, the frames just past it start where the point last was, and
+    the window walks forward with it, as TAPIP3D's overlapping windows do
+    (each starting from the one before). With 4 iterations and 24 frames,
+    frames past 8 restart from frame 8, then frames past 15 from frame 15.
+    """
+    T = g.shape[1]
+    if iters < 2:
+        return g
+    h = round((T - 1) * (i + 1) / (iters - 1))
+    if h >= T - 1:
+        return g
+    return torch.cat([g[:, :h + 1], g[:, h:h + 1].expand_as(g[:, h + 1:])], dim=1)
+
+
 def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
     """(B, T, N) zeros for the first iteration's fed-back visibility, or None
     for a model that is not given it."""
@@ -138,6 +160,7 @@ def regress_loss(
     visible: Optional[torch.Tensor] = None,
     vis_weight: float = 0.0,
     param: str = "position",
+    carry: bool = False,
     vel_weight: float = 0.0,
     acc_weight: float = 0.0,
     pairs: Optional[torch.Tensor] = None,
@@ -167,6 +190,8 @@ def regress_loss(
               With no `visible`, a model built with `vis_feedback` still
               computes its visibility, to feed it back, but nothing scores it.
     param:    what the network's output means, see the top of this file.
+    carry:    restart the frames past a moving horizon from its guess
+              between iterations (`_carry`).
     vel_weight: also score each frame-to-frame change of the guess against the
               truth's, weighted this against the position loss, at every
               iteration. Part of the returned loss.
@@ -214,6 +239,8 @@ def regress_loss(
         total = total + loss
         vis_total = vis_total + vis_loss
         g = _pin(g, known_x0)
+        if carry:
+            g = _carry(g.detach(), i, iters)
 
     if backward is None:
         total = total + vis_weight * vis_total
@@ -229,6 +256,7 @@ def refine(
     known_x0: Optional[torch.Tensor] = None,
     visibility: bool = False,
     param: str = "position",
+    carry: bool = False,
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -238,8 +266,8 @@ def refine(
     baseline.
 
     `visibility` also returns the visibility logits (B, T, N) of the last
-    iteration, the one the training weighs most. `param` is as in
-    `regress_loss`, and must be what the model was trained with.
+    iteration, the one the training weighs most. `param` and `carry` are as
+    in `regress_loss`, and must be what the model was trained with.
     """
     B, N, _ = anchor.shape
     g = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
@@ -253,4 +281,6 @@ def refine(
         if prev is not None:
             prev = logits
         g = _pin(g + _integrate(out, param), known_x0)
+        if carry:
+            g = _carry(g, i, iters)
     return (g, logits) if visibility else g
