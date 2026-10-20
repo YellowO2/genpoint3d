@@ -58,8 +58,9 @@ CONFIGS = [
     ["--method", "regress", "--param", "acceleration"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--causal", "0",
      "--vis-feedback", "1", "--param", "acceleration"],
-    # Each token also given how far its guess moved since the frame before.
-    ["--method", "regress", "--param", "velocity", "--vel-input", "1"],
+    # Each token also given its guess's motion and pixel, Fourier-encoded.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--motion-waves", "1",
+     "--causal", "0"],
     # Each point told where the points that move with it say it is.
     ["--method", "regress", "--param", "velocity", "--buddies", "1", "--buddy-bias", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--vis-loss", "1",

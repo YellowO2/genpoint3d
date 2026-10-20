@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.train.model.Buddies import Buddies
-from genpoint3d.train.model.FineFinder import FineFinder
+from genpoint3d.train.model.FineFinder import FineFinder, _posenc
 from genpoint3d.train.model.MatchHead import MatchHead
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.model.tools.layers import (
@@ -83,7 +83,7 @@ class PointDiT(nn.Module):
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
-        vel_input: bool = False,
+        motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
     ) -> None:
@@ -132,12 +132,16 @@ class PointDiT(nn.Module):
 
         # [path encoder] representing the current diffused path for the video
         self.token_proj = nn.Linear(3, dim, bias=False)
-        # [velocity in] with `vel_input` each token is also given how far its
-        # guess moved since the frame before, 0 at frame 0, in clip-length time
-        # units like `regress._integrate`. The time attention could take that
-        # difference itself; Learning to Simulate found that handing it in
-        # matters. From near zero, so the model starts as it would without.
-        self.vel_proj = zero_init(nn.Linear(3, dim, bias=False)) if vel_input else None
+        # [motion in] with `motion_waves` each token is also given, Fourier-
+        # encoded, how its guess moved from the frame before and to the frame
+        # after, and where the guess is in the image: TAPIP3D's updater input
+        # (`point_tracker_3d.py`, posenc 2^-2 .. 2^13), the motion a tracker
+        # reads to keep a point moving the way it moves. Positions are scene-
+        # normalised, about unit spread, the scale that encoding is built for.
+        # Zeros, so the model starts as it is without.
+        self.motion_waves = motion_waves
+        if motion_waves:
+            self.motion_proj = zero_init(nn.Linear(6 * 33 + 2 * 33, dim, bias=False), almost=False)
         
         # [feature adapter] trainable, unlike VisualEncoder.py which is cached frozen.
         # Always on when there are features: the patch position is added to
@@ -750,9 +754,21 @@ class PointDiT(nn.Module):
 
         # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
-        if self.vel_proj is not None:
-            v = torch.cat([torch.zeros_like(x[:, :1]), x.diff(dim=1)], dim=1) * max(T - 1, 1)
-            h = h + self.vel_proj(v)
+        if self.motion_waves:
+            if fine_proj is None:
+                raise ValueError("motion_waves places the guess in the image, which needs fine_proj")
+            with torch.autocast(device_type=dev.type, enabled=False):
+                step = pos.diff(dim=1)
+                fwd = torch.cat([-step, torch.zeros_like(pos[:, :1])], dim=1)
+                bwd = torch.cat([torch.zeros_like(pos[:, :1]), step], dim=1)
+                uv_now, _ = project(pos, fine_proj.float())
+                # The pixel needs the frame's camera, which a frame with no
+                # image does not give, like every other image input here.
+                seen = _posenc(uv_now)
+                if point_mask is not None:
+                    seen = seen * point_mask[..., None]
+                motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
+            h = h + self.motion_proj(motion.to(h.dtype))
         if match is not None:
             # Added, not folded into `cond`: conditioning only rescales
             # channels (AdaRMSNorm), and a displacement has to be copied.

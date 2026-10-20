@@ -233,9 +233,11 @@ class Settings(argparse.Namespace):
                             "every two points the truth shows on one moving "
                             "rigid object, in every frame, hidden ones too, "
                             "weighted W against the position loss. 0 leaves it out.")
-        p.add_argument("--vel-input", type=int, default=0, choices=[0, 1],
-                       help="also give each token how far its guess moved since "
-                            "the frame before.")
+        p.add_argument("--motion-waves", type=int, default=0, choices=[0, 1],
+                       help="--fine only: also give each token, Fourier-encoded, "
+                            "how its guess moved from the frame before and to the "
+                            "frame after, and where it is in the image "
+                            "(TAPIP3D's updater input).")
         p.add_argument("--buddies", type=int, default=0, choices=[0, 1],
                        help="give each point where the points that have kept "
                             "their distance to it say it is: carried by their "
@@ -310,6 +312,10 @@ class Settings(argparse.Namespace):
             p.error("--fine-xyz adds to the relative finder: it needs --fine 1")
         if (settings.vel_loss or settings.acc_loss or settings.rigid_loss) and settings.method != "regress":
             p.error("--vel-loss, --acc-loss and --rigid-loss are only built for --method regress")
+        if settings.motion_waves and not settings.fine:
+            p.error("--motion-waves places the guess in the image through the finder's camera: needs --fine 1")
+        if settings.motion_waves and settings.causal:
+            p.error("--motion-waves reads the step to the next frame: needs --causal 0")
         if settings.carry and settings.method != "regress":
             p.error("--carry restarts frames between refinement iterations: regress only")
         if settings.fine_neigh and (not settings.fine_xyz or settings.fine_waves):
