@@ -73,7 +73,7 @@ class FineFinder(nn.Module):
 
     def __init__(self, levels: int = 4, radius: int = 3, feat_dim: int = 128,
                  hidden: int = 256, width: int = 64, chunk: int = 2,
-                 xyz: bool = False, waves: int = 0) -> None:
+                 xyz: bool = False, waves: int = 0, neigh: int = 0) -> None:
         super().__init__()
         self.levels, self.radius, self.chunk = levels, radius, chunk
         self.out_dim = levels * width
@@ -107,6 +107,17 @@ class FineFinder(nn.Module):
             self.register_buffer("freqs", 2.0 ** torch.arange(-1, waves - 1, dtype=torch.float32),
                                  persistent=False)
             self.wave_in = nn.Parameter(torch.zeros(hidden, k * 3 * 2 * waves))
+        # With `neigh` = K, TAPIP3D's lookup replaces the 7x7 window (see
+        # `_Neighbours`). Built last, so the weights above draw what they draw
+        # without it; `corr_mlp` is then unused but kept, so the module has one
+        # shape whatever the lookup.
+        self.neigh = neigh
+        if neigh:
+            if not xyz:
+                raise ValueError("the 3D neighbourhood needs each cell's 3D position (xyz)")
+            if waves:
+                raise ValueError("the 3D neighbourhood encodes its own offsets; waves are the window's")
+            self.neighbours = nn.ModuleList(_Neighbours(feat_dim, width) for _ in range(levels))
 
     # ---------------------------------------------------------------- the CNN
     def _features(self, frames: torch.Tensor) -> torch.Tensor:
@@ -200,7 +211,8 @@ class FineFinder(nn.Module):
         return torch.cat(out, dim=-1)
 
     def forward(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor,
-                xyz: torch.Tensor | None = None, pos: torch.Tensor | None = None) -> torch.Tensor:
+                xyz: torch.Tensor | None = None, pos: torch.Tensor | None = None,
+                pos0: torch.Tensor | None = None) -> torch.Tensor:
         """
         fmap  (B, T, C, h, w)  from `encode`
         uv    (B, T, N, 2)     the current guess in each frame, [0, 1] across, fp32
@@ -208,19 +220,131 @@ class FineFinder(nn.Module):
         xyz   (B, T, 3, h, w)  each cell's 3D position, in the model's own
                                units (the finder with `xyz` only)
         pos   (B, T, N, 3)     the current guess in 3D, in the same units
+        pos0  (B, N, 3)        the query point in 3D, likewise (`neigh` only)
 
         returns (B, T, N, out_dim)
         """
         if self.xyz != (xyz is not None):
             raise ValueError("a finder built with xyz reads each cell's 3D position, "
                              "and only that one does")
+        if bool(self.neigh) != (pos0 is not None):
+            raise ValueError("pos0 is given exactly to a finder built with neigh")
         out = []
         for i in range(0, fmap.shape[0], self.chunk):
             cut = slice(i, i + self.chunk)
-            part = (fmap[cut], uv[cut], uv0[cut],
-                    None if xyz is None else xyz[cut], None if pos is None else pos[cut])
-            if torch.is_grad_enabled():
-                out.append(checkpoint(self._correlate, *part, use_reentrant=False))
+            if self.neigh:
+                fn, part = self._neighbourhoods, (fmap[cut], uv0[cut], xyz[cut], pos[cut], pos0[cut])
             else:
-                out.append(self._correlate(*part))
+                fn = self._correlate
+                part = (fmap[cut], uv[cut], uv0[cut],
+                        None if xyz is None else xyz[cut], None if pos is None else pos[cut])
+            if torch.is_grad_enabled():
+                out.append(checkpoint(fn, *part, use_reentrant=False))
+            else:
+                out.append(fn(*part))
         return torch.cat(out)
+
+    # ---------------------------------------------- the 3D neighbourhood
+    def _neighbourhoods(self, fmap: torch.Tensor, uv0: torch.Tensor, xyz: torch.Tensor,
+                        pos: torch.Tensor, pos0: torch.Tensor) -> torch.Tensor:
+        """TAPIP3D's lookup (`knn_feature_4d_optimized.py`): at each level, the
+        K cells nearest the current guess IN 3D, against the K cells nearest
+        the query point in frame 0 plus the query's own feature, compared by
+        `_Neighbours`. A 7x7 window on the image straddles depth edges -- a
+        point on a ball's rim takes in the wall behind it; the cells nearest
+        in 3D stay on the ball."""
+        b, T, C, h, w = fmap.shape
+        N = pos.shape[2]
+        size = uv0.new_tensor([w, h])
+        q = (uv0 * size - 0.5 / STRIDE)                                    # (b, N, 2) level-0 cells
+        xyz, pos, pos0 = xyz.float(), pos.float(), pos0.float()
+        out = []
+        for lvl in range(self.levels):
+            s = 2 ** lvl
+            f = F.avg_pool2d(fmap.flatten(0, 1), s, stride=s) if lvl else fmap.flatten(0, 1)
+            hl, wl = f.shape[-2:]
+            # The cells' positions are picked, not averaged: an average of a
+            # rim cell and the wall behind it is a point in mid-air.
+            x = F.interpolate(xyz.flatten(0, 1), size=(hl, wl), mode="nearest-exact")
+            f = f.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, C)      # (b, T, P, C)
+            x = x.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, 3)      # (b, T, P, 3)
+            k = min(self.neigh, hl * wl)
+            with torch.no_grad():
+                near = torch.cdist(pos, x).topk(k, dim=-1, largest=False).indices      # (b, T, N, k)
+                near0 = torch.cdist(pos0[:, None], x[:, :1]).topk(k, dim=-1, largest=False).indices[:, 0]
+            pick = lambda t, i: t.gather(-2, i.flatten(-2)[..., None].expand(*i.shape[:-2], -1, t.shape[-1])
+                                         ).unflatten(-2, i.shape[-2:])
+            cur_f, cur_x = pick(f, near), pick(x, near)                     # (b, T, N, k, .)
+            sup_f, sup_x = pick(f[:, 0], near0), pick(x[:, 0], near0)      # (b, N, k, .)
+            # The query's own feature, sampled where it is, leads the support.
+            at = (q - (s - 1) / 2) / s
+            grid = 2 * at / at.new_tensor([wl - 1, hl - 1]) - 1
+            own = F.grid_sample(f[:, 0].transpose(1, 2).reshape(b, C, hl, wl).float(),
+                                grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
+            sup_f = torch.cat([own[:, :, None].to(sup_f.dtype), sup_f], dim=2)
+            sup_off = torch.cat([torch.zeros_like(sup_x[:, :, :1]), sup_x - pos0[:, :, None]], dim=2)
+            cur_off = cur_x - pos[:, :, :, None]
+            out.append(self.neighbours[lvl](sup_f, sup_off, cur_f, cur_off))
+        return torch.cat(out, dim=-1)
+
+
+def _posenc(x: torch.Tensor, lo: int = -2, hi: int = 14) -> torch.Tensor:
+    """x and its sin and cos at 2^lo .. 2^(hi-1) per unit: TAPIP3D's `posenc`."""
+    scales = 2.0 ** torch.arange(lo, hi, device=x.device, dtype=x.dtype)
+    xb = (x[..., None, :] * scales[:, None]).flatten(-2)
+    return torch.cat([x, torch.sin(torch.cat([xb, xb + 0.5 * torch.pi], dim=-1))], dim=-1)
+
+
+class _CrossBlock(nn.Module):
+    """x reads `context`, then a feed-forward: TAPIP3D's `CrossAttnBlock`."""
+
+    def __init__(self, dim: int, heads: int = 1, mlp_ratio: float = 1.0) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.norm_ctx = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        hid = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(nn.Linear(dim, hid), nn.GELU(approximate="tanh"), nn.Linear(hid, dim))
+
+    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
+        c = self.norm_ctx(ctx)
+        x = x + self.attn(self.norm1(x), c, c, need_weights=False)[0]
+        return x + self.mlp(self.norm2(x))
+
+
+class _Neighbours(nn.Module):
+    """One level of the 3D lookup: the query's neighbourhood and the guess's,
+    each cell its feature plus its Fourier-encoded 3D offset from the centre,
+    read against each other both ways and summed into one vector by two
+    learned output tokens (TAPIP3D's `NeighborTransformer`, its sizes: 128
+    wide, one head, a 3-layer offset MLP)."""
+
+    def __init__(self, feat_dim: int, dim: int) -> None:
+        super().__init__()
+        self.in_norm = nn.LayerNorm(feat_dim)
+        self.feat = nn.Linear(feat_dim, dim) if feat_dim != dim else nn.Identity()
+        enc = 3 * (1 + 2 * 16)
+        self.offset = nn.Sequential(nn.Linear(enc, 128), nn.GELU(), nn.Linear(128, 128), nn.GELU(),
+                                    nn.Linear(128, dim), nn.LayerNorm(dim), nn.GELU())
+        self.x_reads_y = _CrossBlock(dim)
+        self.y_reads_x = _CrossBlock(dim)
+        self.token_x = nn.Parameter(torch.randn(1, 1, dim))
+        self.token_y = nn.Parameter(torch.randn(1, 1, dim))
+        self.pool_x = nn.MultiheadAttention(dim, 1, batch_first=True)
+        self.pool_y = nn.MultiheadAttention(dim, 1, batch_first=True)
+
+    def forward(self, sup_f, sup_off, cur_f, cur_off) -> torch.Tensor:
+        """sup_* (b, N, K+1, .) around the query in frame 0; cur_* (b, T, N, K, .)
+        around the guess -> (b, T, N, dim)."""
+        b, T, N, K, _ = cur_f.shape
+        x = self.feat(self.in_norm(sup_f)) + self.offset(_posenc(sup_off))     # (b, N, K+1, D)
+        y = self.feat(self.in_norm(cur_f)) + self.offset(_posenc(cur_off))     # (b, T, N, K, D)
+        x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)               # (bTN, K+1, D)
+        y = y.flatten(0, 2)                                                    # (bTN, K, D)
+        nx, ny = self.x_reads_y(x, y), self.y_reads_x(y, x)
+        tx = self.token_x.expand(nx.shape[0], -1, -1)
+        ty = self.token_y.expand(ny.shape[0], -1, -1)
+        out = (self.pool_x(tx, nx, nx, need_weights=False)[0]
+               + self.pool_y(ty, ny, ny, need_weights=False)[0])               # (bTN, 1, D)
+        return out[:, 0].reshape(b, T, N, -1)

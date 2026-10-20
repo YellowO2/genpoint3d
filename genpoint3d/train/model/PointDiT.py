@@ -79,6 +79,7 @@ class PointDiT(nn.Module):
         fine_radius: int = 3,
         fine_waves: int = 0,
         fine_width: int = 64,
+        fine_neigh: int = 0,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -303,7 +304,7 @@ class PointDiT(nn.Module):
         if fine_xyz and not fine:
             raise ValueError("fine_xyz adds to the relative finder, which needs fine")
         self.fine = (FineFinder(fine_levels, fine_radius, width=fine_width, xyz=fine_xyz,
-                                waves=fine_waves) if fine else None)
+                                waves=fine_waves, neigh=fine_neigh) if fine else None)
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
@@ -614,9 +615,15 @@ class PointDiT(nn.Module):
                 uv, _ = project(pos, proj)
                 uv0, _ = project(anchor.float()[:, None], proj[:, :1])
                 # Offsets in the units of the model's own target, which is
-                # what a difference of two positions turns into there.
-                places = (() if fine_xyz is None
-                          else (fine_xyz.float() / self.traj_scale, pos / self.traj_scale))
+                # what a difference of two positions turns into there. The 3D
+                # neighbourhood reads them scene-normalised instead, about
+                # unit spread, the scale TAPIP3D's encoding is built for.
+                if fine_xyz is None:
+                    places = ()
+                elif self.fine.neigh:
+                    places = (fine_xyz.float(), pos, anchor.float())
+                else:
+                    places = (fine_xyz.float() / self.traj_scale, pos / self.traj_scale)
             fine = self.fine(fine_map, uv, uv0[:, 0], *places)
             if point_mask is not None:
                 fine = fine * point_mask[..., None]

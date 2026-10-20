@@ -69,6 +69,9 @@ CONFIGS = [
      "--fine-width", "128"],
     # Later frames restart from a horizon's guess between iterations.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--carry", "1"],
+    # TAPIP3D's lookup: the cells nearest in 3D, compared by attention.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
+     "--carry", "1", "--causal", "0"],
 ]
 
 
