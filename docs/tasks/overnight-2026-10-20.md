@@ -90,3 +90,40 @@ So the next question is why visible moving points are imprecise. Queued:
   buddies, GNS-style, from the same pair numbers.
 - `--rigid-loss W`: the gap between two points of one moving rigid object must
   match the truth in every frame.
+
+## 2026-10-21: the gradient clip was the CNN's handicap
+
+Fast setup (24 grid, CNN, 2,500 steps, accum 1, run33's other settings),
+visible moving points on val. fx0 is the reference for this batch.
+
+| Run | What | Step 1000 | Step 2500 | 1 px (2500) | 16 px (2500) |
+|---|---|---|---|---|---|
+| fx0 | reference | 0.505 | 0.575 | 0.25 | 0.88 |
+| fx1 | + Fourier-encoded window offsets (`--fine-waves 10`) | 0.582 | 0.643 | 0.36 | 0.89 |
+| fx3 | fx1 + 128 numbers per level | 0.584 | cancelled | | |
+| fx4 | fx1 + carry-forward (`--carry 1`) | 0.575 | cancelled | | |
+| fx5 | CNN only, carry, two-way time, clip 1 | 0.300 | cancelled | | |
+| fx6 | fx5 with TAPIP3D's 3D neighbourhood (`--fine-neigh 32`) | 0.282 | cancelled | | |
+| fx7 | fx5 with `--clip 10` | 0.454 | 0.566 | 0.26 | 0.85 |
+| fx8 | fx1 with `--clip 10` | 0.599 | running | | |
+
+1. Writing each window cell's 3D offset as sin and cos at many scales (the
+   "ruler", Fourier features) lifts precision most at 1 px.
+2. Our precision falls off through the clip (fx0: 0.70 / 0.48 / 0.42 by third;
+   TAPIP3D 0.97 / 0.90 / 0.87). Restarting later frames from an earlier
+   frame's guess does not help with DINOv3 on.
+3. The CNN-only model barely tracked with any lookup. The cause was the
+   gradient clip: the gradient norm is 4 to 9 (now logged every 100 steps),
+   so `--clip 1.0` shrank every step 4 to 9 times. TAPIP3D clips at 10. At
+   clip 10 CNN-only goes from 0.300 to 0.454 at step 1000, and ends at 0.566.
+   Every run before this one used clip 1.0, run33 included.
+4. Checks that ruled things out (`scripts/check_fine_inputs.py`): the window
+   sits on the true point in every frame (camera bookkeeping is right), and on
+   a shifted synthetic frame the match peaks at the true shift. The raw CNN
+   match does fade over the clip: with the window on the true point, the
+   template centre matches the true cell 53% / 37% / 26% of the time by third.
+5. The 20-clip memorisation test reaches 0.943 moving APD (0.80 within 1 px):
+   the design can output pixel-precise tracks on clips it has seen.
+
+Queued: fx9, fx7 + TAPIP3D's Fourier-encoded motion and pixel input
+(`--motion-waves 1`).
