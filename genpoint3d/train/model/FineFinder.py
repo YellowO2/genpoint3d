@@ -73,7 +73,7 @@ class FineFinder(nn.Module):
 
     def __init__(self, levels: int = 4, radius: int = 3, feat_dim: int = 128,
                  hidden: int = 256, width: int = 64, chunk: int = 2,
-                 xyz: bool = False) -> None:
+                 xyz: bool = False, waves: int = 0) -> None:
         super().__init__()
         self.levels, self.radius, self.chunk = levels, radius, chunk
         self.out_dim = levels * width
@@ -95,6 +95,18 @@ class FineFinder(nn.Module):
         self.xyz = xyz
         if xyz:
             self.xyz_in = nn.Parameter(torch.zeros(hidden, k * 3))
+        # With `waves`, each offset is also written as sin and cos at `waves`
+        # frequencies, doubling from 1/2 per unit: a ruler with many hands,
+        # TAPIP3D's encoding of each neighbour's offset (2^-2 to 2^14 there).
+        # A raw offset tells 0.013 from 0.015 by its third decimal; a fast
+        # hand turns that into a large change. Zeros, like `xyz_in`.
+        self.waves = waves
+        if waves:
+            if not xyz:
+                raise ValueError("waves encode the window's 3D offsets, which need xyz")
+            self.register_buffer("freqs", 2.0 ** torch.arange(-1, waves - 1, dtype=torch.float32),
+                                 persistent=False)
+            self.wave_in = nn.Parameter(torch.zeros(hidden, k * 3 * 2 * waves))
 
     # ---------------------------------------------------------------- the CNN
     def _features(self, frames: torch.Tensor) -> torch.Tensor:
@@ -164,6 +176,10 @@ class FineFinder(nn.Module):
         if places is None:
             return self.corr_mlp(table)
         first = self.corr_mlp[0](table) + F.linear(places, self.xyz_in)
+        if self.waves:
+            phase = 2 * torch.pi * places[..., None] * self.freqs           # (..., K*3, W)
+            first = first + F.linear(torch.cat([phase.sin(), phase.cos()], -1).flatten(-2),
+                                     self.wave_in)
         return self.corr_mlp[1:](first)
 
     def _correlate(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor,

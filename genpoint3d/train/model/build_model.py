@@ -48,6 +48,8 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     fine_levels=a("fine_levels", 4),
                     fine_radius=a("fine_radius", 3),
                     fine_xyz=bool(a("fine_xyz", 0)),
+                    fine_waves=a("fine_waves", 0),
+                    fine_width=a("fine_width", 64),
                     # Absent means a checkpoint from before the head existed.
                     visibility=a("vis_loss", 0.0) > 0,
                     vis_feedback=bool(a("vis_feedback", 0)),

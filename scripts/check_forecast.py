@@ -64,6 +64,9 @@ CONFIGS = [
     ["--method", "regress", "--param", "velocity", "--buddies", "1", "--buddy-bias", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--vis-loss", "1",
      "--vis-feedback", "1", "--param", "velocity", "--buddies", "1"],
+    # A finer ruler for the finder's window offsets, and more room per level.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-waves", "10",
+     "--fine-width", "128"],
 ]
 
 
