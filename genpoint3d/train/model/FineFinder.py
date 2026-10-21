@@ -76,6 +76,8 @@ class FineFinder(nn.Module):
                  xyz: bool = False, waves: int = 0, neigh: int = 0) -> None:
         super().__init__()
         self.levels, self.radius, self.chunk = levels, radius, chunk
+        # TAPIP3D's comparison keeps the features' own width, 128 a level.
+        width = feat_dim if neigh else width
         self.out_dim = levels * width
         self.fnet = BasicEncoder(feat_dim)
         k = (2 * radius + 1) ** 2
@@ -108,7 +110,7 @@ class FineFinder(nn.Module):
                                  persistent=False)
             self.wave_in = nn.Parameter(torch.zeros(hidden, k * 3 * 2 * waves))
         # With `neigh` = K, TAPIP3D's lookup replaces the 7x7 window (see
-        # `_Neighbours`). Built last, so the weights above draw what they draw
+        # `_neighbourhoods`). Built last, so the weights above draw what they draw
         # without it; `corr_mlp` is then unused but kept, so the module has one
         # shape whatever the lookup.
         self.neigh = neigh
@@ -117,7 +119,11 @@ class FineFinder(nn.Module):
                 raise ValueError("the 3D neighbourhood needs each cell's 3D position (xyz)")
             if waves:
                 raise ValueError("the 3D neighbourhood encodes its own offsets; waves are the window's")
-            self.neighbours = nn.ModuleList(_Neighbours(feat_dim, width) for _ in range(levels))
+            # TAPIP3D's names and shapes (`corr_processor.*` in its checkpoint),
+            # so its trained weights load as they are.
+            self.in_norm = nn.LayerNorm(feat_dim)
+            self.posenc_mlps = nn.ModuleList(_posenc_mlp(width) for _ in range(levels))
+            self.transformers = nn.ModuleList(_NeighborTransformer(width) for _ in range(levels))
 
     # ---------------------------------------------------------------- the CNN
     def _features(self, frames: torch.Tensor) -> torch.Tensor:
@@ -250,14 +256,23 @@ class FineFinder(nn.Module):
         """TAPIP3D's lookup (`knn_feature_4d_optimized.py`): at each level, the
         K cells nearest the current guess IN 3D, against the K cells nearest
         the query point in frame 0 plus the query's own feature, compared by
-        `_Neighbours`. A 7x7 window on the image straddles depth edges -- a
+        `_NeighborTransformer`. A 7x7 window on the image straddles depth edges -- a
         point on a ball's rim takes in the wall behind it; the cells nearest
         in 3D stay on the ball."""
         b, T, C, h, w = fmap.shape
         N = pos.shape[2]
         size = uv0.new_tensor([w, h])
         q = (uv0 * size - 0.5 / STRIDE)                                    # (b, N, 2) level-0 cells
+        # Each clip's point cloud brought to unit spread, as TAPIP3D does
+        # (`norm_mode: isotropic`): the scale its offset encoding is built for.
+        # From frame 0's alone, which every clip sees; TAPIP3D uses the whole
+        # window, which a forecast would leak through.
         xyz, pos, pos0 = xyz.float(), pos.float(), pos0.float()
+        mean = xyz[:, 0].mean(dim=(2, 3))                                   # (b, 3)
+        std = (xyz[:, 0] - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
+        xyz = (xyz - mean[:, None, :, None, None]) / std[:, None, None, None, None]
+        pos = (pos - mean[:, None, None]) / std[:, None, None, None]
+        pos0 = (pos0 - mean[:, None]) / std[:, None, None]
         out = []
         for lvl in range(self.levels):
             s = 2 ** lvl
@@ -282,9 +297,15 @@ class FineFinder(nn.Module):
             own = F.grid_sample(f[:, 0].transpose(1, 2).reshape(b, C, hl, wl).float(),
                                 grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
             sup_f = torch.cat([own[:, :, None].to(sup_f.dtype), sup_f], dim=2)
+            # Normalised after the sampling and the pooling, as TAPIP3D has it.
+            sup_f, cur_f = self.in_norm(sup_f), self.in_norm(cur_f)
             sup_off = torch.cat([torch.zeros_like(sup_x[:, :, :1]), sup_x - pos0[:, :, None]], dim=2)
             cur_off = cur_x - pos[:, :, :, None]
-            out.append(self.neighbours[lvl](sup_f, sup_off, cur_f, cur_off))
+            enc = self.posenc_mlps[lvl]
+            x = sup_f + enc(_posenc(sup_off))                                # (b, N, k+1, D)
+            y = cur_f + enc(_posenc(cur_off))                                # (b, T, N, k, D)
+            x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)
+            out.append(self.transformers[lvl](x, y.flatten(0, 2)).reshape(b, T, N, -1))
         return torch.cat(out, dim=-1)
 
 
@@ -295,56 +316,73 @@ def _posenc(x: torch.Tensor, lo: int = -2, hi: int = 14) -> torch.Tensor:
     return torch.cat([x, torch.sin(torch.cat([xb, xb + 0.5 * torch.pi], dim=-1))], dim=-1)
 
 
-class _CrossBlock(nn.Module):
+def _posenc_mlp(dim: int) -> nn.Sequential:
+    """TAPIP3D's `build_mlp(99, dim, 128, 3, last_act=GELU, output_norm=LayerNorm)`,
+    layer for layer, so its indices match the checkpoint's."""
+    return nn.Sequential(nn.LayerNorm(99), nn.Linear(99, 128), nn.GELU(), nn.Linear(128, 128),
+                         nn.GELU(), nn.Linear(128, dim), nn.GELU(), nn.LayerNorm(dim))
+
+
+class _Attention(nn.Module):
+    """TAPIP3D's `Attention`: q from x, k and v from the context, one SDPA."""
+
+    def __init__(self, dim: int, heads: int = 1, head_dim: int = 128, qkv_bias: bool = False) -> None:
+        super().__init__()
+        self.heads, self.head_dim = heads, head_dim
+        self.to_q = nn.Linear(dim, heads * head_dim, bias=qkv_bias)
+        self.to_kv = nn.Linear(dim, 2 * heads * head_dim, bias=qkv_bias)
+        self.to_out = nn.Linear(heads * head_dim, dim)
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        B, N1, _ = x.shape
+        split = lambda t: t.reshape(B, t.shape[1], self.heads, self.head_dim).transpose(1, 2)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
+        out = F.scaled_dot_product_attention(split(self.to_q(x)), split(k), split(v))
+        return self.to_out(out.transpose(1, 2).reshape(B, N1, -1))
+
+
+class _Mlp(nn.Module):
+    def __init__(self, dim: int, hidden: int) -> None:
+        super().__init__()
+        self.fc1, self.act, self.fc2 = nn.Linear(dim, hidden), nn.GELU(approximate="tanh"), nn.Linear(hidden, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
+
+
+class _CrossAttnBlock(nn.Module):
     """x reads `context`, then a feed-forward: TAPIP3D's `CrossAttnBlock`."""
 
-    def __init__(self, dim: int, heads: int = 1, mlp_ratio: float = 1.0) -> None:
+    def __init__(self, dim: int, mlp_ratio: float = 1.0) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-        self.norm_ctx = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.norm_context = nn.LayerNorm(dim)
+        self.cross_attn = _Attention(dim, qkv_bias=True)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-        hid = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(nn.Linear(dim, hid), nn.GELU(approximate="tanh"), nn.Linear(hid, dim))
+        self.mlp = _Mlp(dim, int(dim * mlp_ratio))
 
-    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        c = self.norm_ctx(ctx)
-        x = x + self.attn(self.norm1(x), c, c, need_weights=False)[0]
+    def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        x = x + self.cross_attn(self.norm1(x), self.norm_context(context))
         return x + self.mlp(self.norm2(x))
 
 
-class _Neighbours(nn.Module):
-    """One level of the 3D lookup: the query's neighbourhood and the guess's,
-    each cell its feature plus its Fourier-encoded 3D offset from the centre,
-    read against each other both ways and summed into one vector by two
-    learned output tokens (TAPIP3D's `NeighborTransformer`, its sizes: 128
-    wide, one head, a 3-layer offset MLP)."""
+class _NeighborTransformer(nn.Module):
+    """One level's comparison, TAPIP3D's `NeighborTransformer` (128 wide, one
+    head): the query's neighbourhood and the guess's read each other, and two
+    learned output tokens sum each side into one vector."""
 
-    def __init__(self, feat_dim: int, dim: int) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
-        self.in_norm = nn.LayerNorm(feat_dim)
-        self.feat = nn.Linear(feat_dim, dim) if feat_dim != dim else nn.Identity()
-        enc = 3 * (1 + 2 * 16)
-        self.offset = nn.Sequential(nn.Linear(enc, 128), nn.GELU(), nn.Linear(128, 128), nn.GELU(),
-                                    nn.Linear(128, dim), nn.LayerNorm(dim), nn.GELU())
-        self.x_reads_y = _CrossBlock(dim)
-        self.y_reads_x = _CrossBlock(dim)
-        self.token_x = nn.Parameter(torch.randn(1, 1, dim))
-        self.token_y = nn.Parameter(torch.randn(1, 1, dim))
-        self.pool_x = nn.MultiheadAttention(dim, 1, batch_first=True)
-        self.pool_y = nn.MultiheadAttention(dim, 1, batch_first=True)
+        self.output_token_1 = nn.Parameter(torch.randn(1, dim))
+        self.output_token_2 = nn.Parameter(torch.randn(1, dim))
+        self.xblock1_2 = _CrossAttnBlock(dim)
+        self.xblock2_1 = _CrossAttnBlock(dim)
+        self.aggr1 = _Attention(dim)
+        self.aggr2 = _Attention(dim)
 
-    def forward(self, sup_f, sup_off, cur_f, cur_off) -> torch.Tensor:
-        """sup_* (b, N, K+1, .) around the query in frame 0; cur_* (b, T, N, K, .)
-        around the guess -> (b, T, N, dim)."""
-        b, T, N, K, _ = cur_f.shape
-        x = self.feat(self.in_norm(sup_f)) + self.offset(_posenc(sup_off))     # (b, N, K+1, D)
-        y = self.feat(self.in_norm(cur_f)) + self.offset(_posenc(cur_off))     # (b, T, N, K, D)
-        x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)               # (bTN, K+1, D)
-        y = y.flatten(0, 2)                                                    # (bTN, K, D)
-        nx, ny = self.x_reads_y(x, y), self.y_reads_x(y, x)
-        tx = self.token_x.expand(nx.shape[0], -1, -1)
-        ty = self.token_y.expand(ny.shape[0], -1, -1)
-        out = (self.pool_x(tx, nx, nx, need_weights=False)[0]
-               + self.pool_y(ty, ny, ny, need_weights=False)[0])               # (bTN, 1, D)
-        return out[:, 0].reshape(b, T, N, -1)
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """x (M, K+1, D) around the query, y (M, K, D) around the guess -> (M, D)."""
+        new_x, new_y = self.xblock1_2(x, y), self.xblock2_1(y, x)
+        t1 = self.output_token_1[None].expand(x.shape[0], -1, -1)
+        t2 = self.output_token_2[None].expand(x.shape[0], -1, -1)
+        return (self.aggr1(t1, new_x) + self.aggr2(t2, new_y))[:, 0]
