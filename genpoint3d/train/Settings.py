@@ -267,6 +267,11 @@ class Settings(argparse.Namespace):
                             "in 3D against the K nearest the query, compared by "
                             "attention (FineFinder._Neighbours). TAPIP3D uses 32; "
                             "0 keeps the window.")
+        p.add_argument("--virtual", type=int, default=0, metavar="M",
+                       help="--dino 0 only: points meet through M learned virtual "
+                            "tracks in each frame instead of attending to each "
+                            "other directly (TAPIP3D uses 64). 0 keeps direct "
+                            "spatial attention.")
         p.add_argument("--hidden-loss", type=float, default=1.0, metavar="W",
                        help="the method's loss also counts the frames where a "
                             "point is hidden (occluded or out of the frame), "
@@ -318,6 +323,8 @@ class Settings(argparse.Namespace):
             p.error("--motion-waves places the guess in the image through the finder's camera: needs --fine 1")
         if settings.motion_waves and settings.causal:
             p.error("--motion-waves reads the step to the next frame: needs --causal 0")
+        if settings.virtual and settings.dino:
+            p.error("--virtual is built for the CNN-only model: --dino 0")
         if settings.carry and settings.method != "regress":
             p.error("--carry restarts frames between refinement iterations: regress only")
         if settings.fine_neigh and (not settings.fine_xyz or settings.fine_waves):

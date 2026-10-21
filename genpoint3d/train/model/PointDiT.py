@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.train.model.Buddies import Buddies
-from genpoint3d.train.model.FineFinder import FineFinder, _posenc
+from genpoint3d.train.model.FineFinder import FineFinder, _CrossAttnBlock, _posenc
 from genpoint3d.train.model.MatchHead import MatchHead
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.model.tools.layers import (
@@ -86,6 +86,7 @@ class PointDiT(nn.Module):
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
+        virtual: int = 0,
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -346,6 +347,25 @@ class PointDiT(nn.Module):
         self.buddies = Buddies(num_heads, depth, bias=buddy_bias) if buddies else None
         if buddies:
             self.buddy_tok = zero_init(nn.Linear(4, dim, bias=False), almost=False)
+
+        # [virtual tracks] with `virtual` = M, M learned tokens per frame join
+        # the points: they go through the temporal blocks like a point, and in
+        # each frame the points no longer attend to each other but meet
+        # through them -- the tokens read the points, read each other, and the
+        # points read the tokens back (CoTracker's virtual tracks, TAPIP3D's
+        # `EfficientUpdateFormer`, 64 of them). Group chats that can learn to
+        # hold an object's motion, for its hidden points to read. Built last.
+        self.virtual = virtual
+        if virtual:
+            if cross_attn or buddies:
+                raise ValueError("virtual tracks are built for the CNN-only model: no "
+                                 "DINOv3 cross-attention, no buddies")
+            hd = dim // num_heads
+            self.virtual_tok = nn.Parameter(torch.randn(1, 1, virtual, dim))
+            self.virtual_cond = nn.Parameter(torch.zeros(1, 1, virtual, cond_dim))
+            self.v_reads_p = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
+            self.v_reads_v = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
+            self.p_reads_v = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -798,26 +818,41 @@ class PointDiT(nn.Module):
         # so neighbours in time looked no more related than distant frames.
         t_pos = (torch.linspace(-1, 1, T, device=dev, dtype=dt) if self.time_norm
                  else torch.arange(T, device=dev, dtype=dt))
-        t_pos = t_pos[None, :, None].expand(B * N, T, 1)
+        if self.virtual:
+            M = self.virtual
+            h = torch.cat([h, self.virtual_tok.to(h.dtype).expand(B, T, M, -1)], dim=2)
+            cv = self.cond_mlp(self.time_emb(k[..., None])[:, :, None] + self.virtual_cond)
+            cond = torch.cat([cond, cv.to(cond.dtype).expand(B, T, M, -1)], dim=2)
+        Nt = h.shape[2]                                               # points and virtual tokens
+        t_pos = t_pos[None, :, None].expand(B * Nt, T, 1)
         theta_time = self.time_rope(t_pos)                             # (B*N, H, T, d)
         theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
         causal = (torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]
                   if self.causal else None)
 
         # --- [4] blocks ---
+        seen_blocks = []
         cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth
         for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
                                                   cross_blocks, biases):
             # each point's own timeline; a frame may only see its own past
-            ht = h.permute(0, 2, 1, 3).reshape(B * N, T, -1)
-            ct = cond.permute(0, 2, 1, 3).reshape(B * N, T, -1)
+            ht = h.permute(0, 2, 1, 3).reshape(B * Nt, T, -1)
+            ct = cond.permute(0, 2, 1, 3).reshape(B * Nt, T, -1)
             h = temporal(ht, ct, theta=theta_time, attn_mask=causal)
-            h = h.view(B, N, T, -1).permute(0, 2, 1, 3)
+            h = h.view(B, Nt, T, -1).permute(0, 2, 1, 3)
 
             # all points within one frame
-            hs = h.reshape(B * T, N, -1)
-            cs = cond.reshape(B * T, N, -1)
-            h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
+            hs = h.reshape(B * T, Nt, -1)
+            cs = cond.reshape(B * T, Nt, -1)
+            if self.virtual:
+                i = len(seen_blocks); seen_blocks.append(i)
+                p, v = hs[:, :N], hs[:, N:]
+                v = self.v_reads_p[i](v, p)
+                v = self.v_reads_v[i](v, v)
+                p = self.p_reads_v[i](p, v)
+                h = torch.cat([p, v], dim=1)
+            else:
+                h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
 
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:
@@ -833,7 +868,8 @@ class PointDiT(nn.Module):
                                   dist2=dist2, corr=corr, noise=noise)
                     seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
                 h = seen
-            h = h.view(B, T, N, -1)
+            h = h.view(B, T, Nt, -1)
+        h = h[:, :, :N]                                               # the virtual tokens go no further
 
         # --- [5] head ---
         h = self.out_norm(h)

@@ -353,11 +353,11 @@ class _Mlp(nn.Module):
 class _CrossAttnBlock(nn.Module):
     """x reads `context`, then a feed-forward: TAPIP3D's `CrossAttnBlock`."""
 
-    def __init__(self, dim: int, mlp_ratio: float = 1.0) -> None:
+    def __init__(self, dim: int, mlp_ratio: float = 1.0, heads: int = 1, head_dim: int = 128) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.norm_context = nn.LayerNorm(dim)
-        self.cross_attn = _Attention(dim, qkv_bias=True)
+        self.cross_attn = _Attention(dim, heads, head_dim, qkv_bias=True)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.mlp = _Mlp(dim, int(dim * mlp_ratio))
 
