@@ -65,10 +65,12 @@ class Settings(argparse.Namespace):
         # 5e-4 is what both references use on Kubric -- CoTracker3's
         # launch_training_kubric_offline.sh and genpt's train_tracker_tapvid_kubric.
         p.add_argument("--lr", type=float, default=5e-4)
-        p.add_argument("--clip", type=float, default=1.0,
-                       help="gradient-norm clip. 1.0 is tight for this model; a "
-                            "clip that bites every step caps how fast the weights "
-                            "can move and shows up as underfitting. 0 disables it.")
+        p.add_argument("--clip", type=float, default=10.0,
+                       help="gradient-norm clip. 10 is TAPIP3D's. The norm is 4 to 9 "
+                            "for most of a run (logged every 100 steps), so 1.0, the "
+                            "default until 2026-10-21, shrank every step 4 to 9 times: "
+                            "CNN-only went from 0.30 to 0.45 moving APD at step 1000 "
+                            "when it was lifted. 0 disables it.")
         # A FRACTION, not a step count. 500 fixed steps was 20% of a 2500-step run
         # and 2.5% of a 20000-step one -- the same flag meaning two different
         # things. CoTracker3 uses OneCycleLR with pct_start=0.05.
