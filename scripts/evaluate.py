@@ -32,7 +32,7 @@ from genpoint3d.train.score.main import score
 from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
 from genpoint3d.train.tools.flow import sample as flow_sample
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 
@@ -41,7 +41,9 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                   anchor_frame0: bool = False, scaling: str = "median",
                   method: str = "flow", refine_iters: int = 4,
                   param: str = "position", carry: bool = False) -> list[float]:
-    """APD for each frame index separately: APD3D over every visible point.
+    """APD for each frame index separately: APD3D over every visible point
+    that moves (more than 4 px), with no rescale -- the points the tracking
+    is about, and where it falls off through the clip.
 
     The model is handed frame 0's true position as `anchor`, but still has to
     generate frame 0 from noise like every other frame -- nothing pins it. If
@@ -77,12 +79,14 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
 
         if vals is None:
             vals = [[] for _ in range(traj.shape[1])]
+        moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4
+        seen = vis.bool() & moving[:, None]
         for t in range(traj.shape[1]):
             # One frame at a time, so each score is that frame's alone.
             m = tapvid3d_metrics(
-                pred_m[:, t : t + 1], gt_m[:, t : t + 1], vis[:, t : t + 1],
+                pred_m[:, t : t + 1], gt_m[:, t : t + 1], seen[:, t : t + 1],
                 b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
-                scaling=scaling, per_clip=True,
+                scaling="none", per_clip=True,
             )
             vals[t].append(m["average_pts_within_thresh"].cpu())
     model.train()
