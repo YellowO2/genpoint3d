@@ -73,7 +73,7 @@ SAMPLES=${SAMPLES:-}
 ABLATE=${ABLATE:-}
 [ -n "$ABLATE" ] && AB="--ablate $ABLATE" || AB=""
 # SUPPORT=16 also tracks a 16x16 grid of helper points (CNN-only models).
-[ -n "$SUPPORT" ] && SP="--support $SUPPORT" || SP=""
+[ -n "${SUPPORT:-}" ] && SP="--support $SUPPORT" || SP=""
 # SPLITS=val scores only the validation clips.
 SPLITS=${SPLITS:-train val}
 # Per job, not shared: split_dir.py clears the directory before relinking, so
