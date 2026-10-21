@@ -201,6 +201,10 @@ def main() -> int:
                    help="flow with --eval-cutoff: also score the oracle best of"
                         " K forecasts (_fut_bestK). Regress is deterministic"
                         " and ignores this")
+    p.add_argument("--support", type=int, default=0, metavar="S",
+                   help="regress, CNN-only models: also track an S x S grid of "
+                        "helper points over frame 0 and score the queries only "
+                        "(TAPIP3D's test-time support grid uses 16)")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -271,7 +275,8 @@ def main() -> int:
                             space=args.space, oracle_axis=args.oracle_axis,
                             scaling=args.scaling, min_motion_px=args.min_motion_px,
                             method=method, refine_iters=refine_iters, param=param, carry=carry,
-                            cutoff=args.eval_cutoff, samples=args.samples)
+                            cutoff=args.eval_cutoff, samples=args.samples,
+                            support=args.support)
     m = score(model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

@@ -23,3 +23,4 @@ class ScoreSettings:
     cutoff: int = 0               # frames from here on get no image; 0 = none
     samples: int = 1              # flow with a cutoff: best of this many forecasts
     hide_hidden: bool = False     # blank each point's image where it is truly hidden
+    support: int = 0              # regress: an S x S grid of helper points tracked alongside

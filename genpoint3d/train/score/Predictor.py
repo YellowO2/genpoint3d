@@ -62,9 +62,12 @@ class Predictor:
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                     loss_type=j.loss_type, iters=j.refine_iters,
                                     param=j.param, carry=j.carry, **cond)
-                pred = refine(model, anchor, num_frames=traj.shape[1], iters=j.refine_iters,
-                              known_x0=kx0, visibility=seen, param=j.param,
-                              carry=j.carry, **cond)
+                if j.support:
+                    pred = _with_support(model, anchor, traj.shape[1], kx0, seen, j, cond)
+                else:
+                    pred = refine(model, anchor, num_frames=traj.shape[1], iters=j.refine_iters,
+                                  known_x0=kx0, visibility=seen, param=j.param,
+                                  carry=j.carry, **cond)
             else:
                 l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                           loss_type=j.loss_type, **cond)
@@ -81,3 +84,35 @@ class Predictor:
 
     def done(self) -> None:
         self.model.train()
+
+
+def _with_support(model, anchor, num_frames, kx0, seen, j: ScoreSettings, cond: dict):
+    """Refine the queries together with a `j.support` x `j.support` grid of
+    helper points over frame 0, then keep the queries' tracks only.
+
+    TAPIP3D's test-time support grid (16 x 16, `inference_utils.py`): points
+    seen almost everywhere, so a query's neighbours in the spatial attention
+    always include visible points showing how its surroundings move. Each
+    helper starts where frame 0's depth puts the centre of its grid cell. Only
+    for a model that reads no DINOv3: a helper would need a DINOv3 id card,
+    which only the cached query points have.
+    """
+    if cond.get("id_card") is not None or cond.get("context") is not None:
+        raise ValueError("support points are built for a model without DINOv3 (--dino 0)")
+    if cond.get("fine_xyz") is None:
+        raise ValueError("support points start from frame 0's depth: a finder with --fine-xyz 1")
+    S, B = j.support, anchor.shape[0]
+    centre = (torch.arange(S, device=anchor.device, dtype=torch.float32) + 0.5) / S
+    gy, gx = torch.meshgrid(centre, centre, indexing="ij")
+    grid = torch.stack([gx, gy], -1).reshape(1, S * S, 1, 2).expand(B, -1, -1, -1) * 2 - 1
+    helpers = torch.nn.functional.grid_sample(cond["fine_xyz"][:, 0].float(), grid,
+                                              align_corners=False)[..., 0].transpose(1, 2)
+    all_anchor = torch.cat([anchor, helpers.to(anchor.dtype)], dim=1)
+    all_kx0 = None if kx0 is None else torch.cat([kx0, torch.zeros_like(helpers).to(kx0.dtype)], 1)
+    vm = cond.get("visual_mask")
+    if vm is not None and vm.dim() == 3:
+        raise ValueError("support points take a per-frame visual mask, not a per-point one")
+    out = refine(model, all_anchor, num_frames=num_frames, iters=j.refine_iters, known_x0=all_kx0,
+                 visibility=seen, param=j.param, carry=j.carry, **cond)
+    N = anchor.shape[1]
+    return (out[0][:, :, :N], out[1][:, :, :N]) if seen else out[:, :, :N]
