@@ -32,7 +32,8 @@ from genpoint3d.train.score.main import score
 from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
 from genpoint3d.train.tools.flow import sample as flow_sample
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import (HIDDEN_KEYS, clip_mean, error_and_motion, motion_px,
+                                            motion_table, tapvid3d_metrics)
 from genpoint3d.train.tools.regress import refine
 
 
@@ -57,7 +58,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     a frame is left out of that frame.
     """
     model.eval()
-    vals, within = None, {}
+    vals, within, errs, disps = None, {}, [], []
     gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
     for batch in loader:
         b = to_device(batch, device, amp)
@@ -96,6 +97,8 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             uv0, _ = project(anchor.float()[:, None], cond["fine_proj"][:, :1].float())
             corner = torch.nn.functional.grid_sample(lmin[:, None], 2 * uv0 - 1,
                                                      align_corners=False)[:, 0, 0]   # (B, N)
+        e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
+        errs.append(e); disps.append(d)
         motion = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"])
         moving = motion > 4
         still_3d = (gt_m - gt_m[:, :1]).norm(dim=-1).amax(1) < 1e-3
@@ -154,6 +157,8 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     model.train()
     # Whether a falling score is points drifting off by a few pixels (16 px
     # holds while 1 px falls) or points being lost (16 px falls too).
+    print("\n    every seen point after frame 0: error against how far it has moved")
+    print(motion_table(torch.cat(errs), torch.cat(disps)))
     if ("plain", 1, 1) in within:
         print("\n    seen moving points within 1 / 4 / 16 px, by frame: plain half | corner-like half")
         for t in range(len(vals)):

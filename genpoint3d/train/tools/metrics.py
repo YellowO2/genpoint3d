@@ -251,3 +251,35 @@ def clip_mean(values: list[torch.Tensor]) -> float:
     """Mean over clips of per-clip values gathered across batches, skipping the
     NaN of a clip that had nothing to score. NaN if no clip had anything."""
     return torch.cat(values).nanmean().item()
+
+
+def error_and_motion(pred: torch.Tensor, gt: torch.Tensor, visible: torch.Tensor,
+                     intrinsics: torch.Tensor, extrinsics: torch.Tensor):
+    """For every visible (point, frame) after frame 0: the error and how far the
+    point has moved since frame 0, both in the metric's own pixels (metres
+    divided by depth / focal, at the point's own depth). Flat (M,) tensors, for
+    `motion_table`."""
+    gt_cam = _to_camera_t(gt, extrinsics)
+    focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
+    mult = (gt_cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
+    err = (pred - gt).norm(dim=-1) / mult
+    disp = (gt - gt[:, :1]).norm(dim=-1) / mult
+    keep = visible.bool().clone()
+    keep[:, 0] = False
+    return err[keep].float().cpu(), disp[keep].float().cpu()
+
+
+def motion_table(err: torch.Tensor, disp: torch.Tensor) -> str:
+    """Error against distance moved, binned: does the error grow in
+    proportion to the motion (a steady error/moved), or level off?"""
+    edges = (0, 1, 4, 8, 16, 32, 64, 128, float("inf"))
+    rows = [f"    {'moved (px)':>12} {'n':>8} {'median err':>11} {'err/moved':>10} {'<1px':>6} {'<4px':>6}"]
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (disp >= lo) & (disp < hi)
+        if m.sum() < 20:
+            continue
+        e, d = err[m], disp[m]
+        ratio = (e / d.clamp_min(1e-6)).median() if lo > 0 else float("nan")
+        rows.append(f"    {f'{lo:g}-{hi:g}':>12} {int(m.sum()):>8} {e.median():>11.2f} {ratio:>10.3f}"
+                    f" {(e < 1).float().mean():>6.3f} {(e < 4).float().mean():>6.3f}")
+    return "\n".join(rows)

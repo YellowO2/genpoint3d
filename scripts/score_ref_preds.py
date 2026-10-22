@@ -37,8 +37,9 @@ import torch
 
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.track_scores import _hidden_scores
-from genpoint3d.train.tools.metrics import (HIDDEN_KEYS, THRESHOLDS, clip_mean, motion_px,
-                                            resize_intrinsics, tapvid3d_metrics)
+from genpoint3d.train.tools.metrics import (HIDDEN_KEYS, THRESHOLDS, clip_mean, error_and_motion,
+                                            motion_px, motion_table, resize_intrinsics,
+                                            tapvid3d_metrics)
 
 
 def main() -> int:
@@ -55,7 +56,7 @@ def main() -> int:
     # The hidden scores read only the cutoff and the rescale from these.
     judging = ScoreSettings(device=torch.device("cpu"), scaling="median")
 
-    vals = {}
+    vals, errs, disps = {}, [], []
     for path in preds:
         r = torch.load(path, weights_only=False)
         c = torch.load(clip_dir / path.name, weights_only=False)
@@ -95,6 +96,8 @@ def main() -> int:
             add(f"{name}/static", score(gt[:, :1].expand_as(gt))["average_pts_within_thresh"])
         for k, v in _hidden_scores(pred, gt, vis, moving, b, judging).items():
             add(k, v)
+        e, d = error_and_motion(pred, gt, vis, K256, E)
+        errs.append(e); disps.append(d)
 
     m = {k: clip_mean(v) for k, v in vals.items()}
     n_moving = int((~torch.cat(vals["moving/average_pts_within_thresh"]).isnan()).sum())
@@ -112,6 +115,8 @@ def main() -> int:
               + f"{m[f'{name}/average_jaccard']:>8.3f}{m[f'{name}/occlusion_accuracy']:>8.3f}")
         jac = [m[f"{name}/jaccard_{t}"] for t in THRESHOLDS]
         print(f"{'  Jaccard':10}" + "".join(f"{x:>8.3f}" for x in jac) + "\n")
+    print("--- every seen point after frame 0: error against how far it has moved ---")
+    print(motion_table(torch.cat(errs), torch.cat(disps)) + "\n")
     print("--- hidden on every frame (all points, protocol rescale / moving, no rescale) ---")
     for k in HIDDEN_KEYS:
         print(f"  {k:<30} {m[k]:.3f}")
