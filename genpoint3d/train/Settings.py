@@ -276,6 +276,10 @@ class Settings(argparse.Namespace):
                        help="what turns the finder's comparison into corrections: our "
                             "PointDiT blocks, or TAPIP3D's updater (TapUpdater.py; needs "
                             "--dino 0 --fine-neigh K --causal 0).")
+        p.add_argument("--aug", type=int, default=0, choices=[0, 1],
+                       help="recolour and sometimes blur each training clip, a little "
+                            "differently each frame (tools/augment.py); tracks, depth "
+                            "and cameras unchanged.")
         p.add_argument("--hidden-loss", type=float, default=1.0, metavar="W",
                        help="the method's loss also counts the frames where a "
                             "point is hidden (occluded or out of the frame), "

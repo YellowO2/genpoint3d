@@ -8,6 +8,7 @@ from genpoint3d.train.tools.batch import (
     apd_weight, fine_inputs, hidden_weight, known_frame0, match_targets, random_cutoff,
     rigid_pairs, to_device, visual_mask,
 )
+from genpoint3d.train.tools.augment import augment_frames
 from genpoint3d.train.tools.flow import flow_matching_loss
 from genpoint3d.train.tools.matching import match_ce
 from genpoint3d.train.tools.regress import regress_loss
@@ -36,6 +37,10 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     seen = {}
     if settings.vis_loss:
         seen = dict(visible=visible_target(vis, vm), vis_weight=settings.vis_loss)
+    # A new look for the clip, before the CNN reads it (and re-reads it in
+    # the replay below): the same frames for both.
+    if settings.aug and b["frames"] is not None:
+        b["frames"] = augment_frames(b["frames"])
     # Before any backward pass of the step, and shared by all of them.
     fine = fine_inputs(model, b, amp, grad=True)
     match = 0.0
