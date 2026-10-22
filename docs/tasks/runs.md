@@ -1,0 +1,29 @@
+# Run tracker
+
+Fast setup unless noted: 24-frame Kubric clips, 128 points, 2,500 steps,
+batch 8. Score: APD on visible moving points (val), higher is better.
+TAPIP3D's released model scores 0.926 on the same points.
+
+## Current thread: what does our tracker lack against TAPIP3D?
+
+| Run | What it is | Step 500 | Best / end | Verdict |
+|---|---|---|---|---|
+| fx1 | DINOv3 + CNN, Fourier ruler on window offsets | 0.505 | 0.643 | ruler helps |
+| fx7 | CNN only, gradient clip 10 (was 1) | 0.315 | 0.566 | clip was a handbrake |
+| fx8 | fx1 + clip 10 | 0.528 | 0.653 | small gain |
+| fx9 | fx7 + Fourier motion and pixel input | 0.346 | 0.592 | motion input helps |
+| fyC | CNN only, TAPIP3D's 3D-neighbourhood matching with its trained weights, our transformer | 0.693 | 0.733 (1500) | current best |
+| fyD | fyC + 64 virtual tracks | 0.694 | | no gain |
+| fyE | fyC + 256 points per clip | 0.697 | | no gain |
+| fyF | fyC with TAPIP3D's updater (transformer) | 0.698 | | no gain |
+| fyG | fyC + visibility loss and feedback | 0.686 | | no gain |
+| fyH | fyC + colour and blur augmentation | 0.695 | | no gain |
+| tap_short | TAPIP3D's own code, unchanged, on our train clips at our budget | running | | sanity check |
+
+## Diagnosis on fyC (scoring only)
+
+- Precision on moving points falls every frame (0.97 at frame 1 to 0.55 at
+  frame 23, APD); points that do not move stay near perfect.
+- No undershoot: the predicted motion is 98-100% of the true motion.
+- Plain and corner-like points drift about the same.
+- 6 refinement rounds instead of 4: +0.008. A 16x16 support grid at test: no change.
