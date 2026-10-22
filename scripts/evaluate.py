@@ -79,7 +79,9 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
 
         if vals is None:
             vals = [[] for _ in range(traj.shape[1])]
-        moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4
+        motion = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"])
+        moving = motion > 4
+        still_3d = (gt_m - gt_m[:, :1]).norm(dim=-1).amax(1) < 1e-3
         seen = vis.bool() & moving[:, None]
         for t in range(traj.shape[1]):
             # One frame at a time, so each score is that frame's alone.
@@ -100,13 +102,25 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             )
             for th in (1, 4, 16):
                 within.setdefault(("still", t, th), []).append(ms[f"pts_within_{th}"].cpu())
+            # And the points that truly do not move: the same 3D position in
+            # every frame (to a millimetre) and under half a pixel on screen.
+            frozen = vis.bool() & (still_3d & (motion < 0.5))[:, None]
+            mf = tapvid3d_metrics(
+                pred_m[:, t : t + 1], gt_m[:, t : t + 1], frozen[:, t : t + 1],
+                b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
+                scaling="none", per_clip=True,
+            )
+            for th in (1, 4, 16):
+                within.setdefault(("frozen", t, th), []).append(mf[f"pts_within_{th}"].cpu())
     model.train()
     # Whether a falling score is points drifting off by a few pixels (16 px
     # holds while 1 px falls) or points being lost (16 px falls too).
-    print("\n    seen points within 1 / 4 / 16 px, by frame: moving | barely moving (< 4 px)")
+    print("\n    seen points within 1 / 4 / 16 px, by frame: moving | barely moving (< 4 px)"
+          " | not moving at all")
     for t in range(len(vals)):
         print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[(t, th)]):.3f}" for th in (1, 4, 16))
-              + "   |  " + "  ".join(f"{clip_mean(within[('still', t, th)]):.3f}" for th in (1, 4, 16)))
+              + "   |  " + "  ".join(f"{clip_mean(within[('still', t, th)]):.3f}" for th in (1, 4, 16))
+              + "   |  " + "  ".join(f"{clip_mean(within[('frozen', t, th)]):.3f}" for th in (1, 4, 16)))
     return [clip_mean(v) for v in vals]
 
 
