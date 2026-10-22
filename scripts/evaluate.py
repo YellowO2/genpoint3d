@@ -93,6 +93,16 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             vals[t].append(m["average_pts_within_thresh"].cpu())
             for th in (1, 4, 16):
                 within.setdefault((t, th), []).append(m[f"pts_within_{th}"].cpu())
+            # How much of the true motion the prediction covers: its length
+            # against the truth's, and its part along the truth's direction.
+            # Under 1 is a prediction that stops short.
+            d_gt = (gt_m[:, t] - gt_m[:, 0])[seen[:, t]]
+            d_pr = (pred_m[:, t] - gt_m[:, 0])[seen[:, t]]
+            if len(d_gt):
+                n2 = d_gt.norm(dim=-1).sum().clamp_min(1e-9)
+                within.setdefault(("len", t), []).append(float(d_pr.norm(dim=-1).sum() / n2))
+                along = (d_pr * d_gt).sum(-1) / d_gt.norm(dim=-1).clamp_min(1e-9)
+                within.setdefault(("along", t), []).append(float(along.sum() / n2))
             # The same for the points that barely move on screen.
             still = vis.bool() & ~moving[:, None]
             ms = tapvid3d_metrics(
@@ -115,6 +125,11 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     model.train()
     # Whether a falling score is points drifting off by a few pixels (16 px
     # holds while 1 px falls) or points being lost (16 px falls too).
+    print("\n    seen moving points: predicted motion / true motion, by frame (length, along the truth)")
+    for t in range(1, len(vals)):
+        ls, al = within.get(("len", t), []), within.get(("along", t), [])
+        if ls:
+            print(f"    frame {t:2d}  {sum(ls) / len(ls):.3f}  {sum(al) / len(al):.3f}")
     print("\n    seen points within 1 / 4 / 16 px, by frame: moving | barely moving (< 4 px)"
           " | not moving at all")
     for t in range(len(vals)):
