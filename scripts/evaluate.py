@@ -212,6 +212,9 @@ def main() -> int:
                    help="flow with --eval-cutoff: also score the oracle best of"
                         " K forecasts (_fut_bestK). Regress is deterministic"
                         " and ignores this")
+    p.add_argument("--fine-weights", default=None,
+                   help="diagnostic: after loading the checkpoint, put these weights "
+                        "into its finder (a file --fine-init takes)")
     p.add_argument("--support", type=int, default=0, metavar="S",
                    help="regress, CNN-only models: also track an S x S grid of "
                         "helper points over frame 0 and score the queries only "
@@ -251,6 +254,18 @@ def main() -> int:
     model = build_model(Settings(**targs), feat_dim, has_feats).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
+    if args.fine_weights:
+        # A diagnostic: the trained model with its finder put back to other
+        # weights (e.g. TAPIP3D's own), everything else as trained.
+        sd = torch.load(args.fine_weights, map_location="cpu")
+        before = {k: v.clone() for k, v in model.fine.state_dict().items() if k in sd}
+        missing, unexpected = model.fine.load_state_dict(sd, strict=False)
+        if unexpected:
+            raise ValueError(f"{args.fine_weights} does not fit this finder: {unexpected}")
+        drift = sum((before[k].float() - sd[k].float().to(before[k].device)).norm() ** 2 for k in before) ** 0.5
+        size = sum(sd[k].float().norm() ** 2 for k in before) ** 0.5
+        print(f"finder weights replaced from {args.fine_weights}: the trained ones had moved "
+              f"{drift:.2f} from these (their size {size:.2f})", flush=True)
 
     loader = DataLoader(
         # resample=False: a test score must not change between runs.
