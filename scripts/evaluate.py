@@ -79,6 +79,23 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
 
         if vals is None:
             vals = [[] for _ in range(traj.shape[1])]
+        # How well each query's spot in frame 0 can be pinned down: the
+        # Shi-Tomasi score, the smaller eigenvalue of the image gradients'
+        # structure tensor over a 9 x 9 patch. High at a corner or a
+        # pattern; low on a plain surface and along a plain edge, where many
+        # nearby spots look alike (the aperture problem).
+        corner = None
+        if b["frames"] is not None and "fine_proj" in cond:
+            g = b["frames"][:, 0].float().mean(-1)                          # (B, H, W)
+            ix = torch.nn.functional.pad(g[:, :, 1:] - g[:, :, :-1], (0, 1))
+            iy = torch.nn.functional.pad(g[:, 1:] - g[:, :-1], (0, 0, 0, 1))
+            box = lambda a: torch.nn.functional.avg_pool2d(a[:, None], 9, 1, 4)[:, 0]
+            sxx, syy, sxy = box(ix * ix), box(iy * iy), box(ix * iy)
+            lmin = (sxx + syy) / 2 - (((sxx - syy) / 2) ** 2 + sxy ** 2).sqrt()
+            from genpoint3d.train.tools.camera import project
+            uv0, _ = project(anchor.float()[:, None], cond["fine_proj"][:, :1].float())
+            corner = torch.nn.functional.grid_sample(lmin[:, None], 2 * uv0 - 1,
+                                                     align_corners=False)[:, 0, 0]   # (B, N)
         motion = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"])
         moving = motion > 4
         still_3d = (gt_m - gt_m[:, :1]).norm(dim=-1).amax(1) < 1e-3
@@ -93,6 +110,18 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             vals[t].append(m["average_pts_within_thresh"].cpu())
             for th in (1, 4, 16):
                 within.setdefault((t, th), []).append(m[f"pts_within_{th}"].cpu())
+            # Moving points split at this batch's median corner score.
+            if corner is not None:
+                c = corner.masked_fill(~moving, float("nan"))
+                med = c.nanmedian(dim=1, keepdim=True).values
+                for part, keep in (("plain", c < med), ("corner", c >= med)):
+                    mk = tapvid3d_metrics(
+                        pred_m[:, t : t + 1], gt_m[:, t : t + 1], seen[:, t : t + 1] & keep[:, None],
+                        b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
+                        scaling="none", per_clip=True,
+                    )
+                    for th in (1, 4, 16):
+                        within.setdefault((part, t, th), []).append(mk[f"pts_within_{th}"].cpu())
             # How much of the true motion the prediction covers: its length
             # against the truth's, and its part along the truth's direction.
             # Under 1 is a prediction that stops short.
@@ -125,6 +154,11 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     model.train()
     # Whether a falling score is points drifting off by a few pixels (16 px
     # holds while 1 px falls) or points being lost (16 px falls too).
+    if ("plain", 1, 1) in within:
+        print("\n    seen moving points within 1 / 4 / 16 px, by frame: plain half | corner-like half")
+        for t in range(len(vals)):
+            print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[('plain', t, th)]):.3f}" for th in (1, 4, 16))
+                  + "   |  " + "  ".join(f"{clip_mean(within[('corner', t, th)]):.3f}" for th in (1, 4, 16)))
     print("\n    seen moving points: predicted motion / true motion, by frame (length, along the truth)")
     for t in range(1, len(vals)):
         ls, al = within.get(("len", t), []), within.get(("along", t), [])
