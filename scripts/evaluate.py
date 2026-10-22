@@ -57,7 +57,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     a frame is left out of that frame.
     """
     model.eval()
-    vals = None
+    vals, within = None, {}
     gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
     for batch in loader:
         b = to_device(batch, device, amp)
@@ -89,7 +89,14 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                 scaling="none", per_clip=True,
             )
             vals[t].append(m["average_pts_within_thresh"].cpu())
+            for th in (1, 4, 16):
+                within.setdefault((t, th), []).append(m[f"pts_within_{th}"].cpu())
     model.train()
+    # Whether a falling score is points drifting off by a few pixels (16 px
+    # holds while 1 px falls) or points being lost (16 px falls too).
+    print("\n    seen moving points within 1 / 4 / 16 px, by frame")
+    for t in range(len(vals)):
+        print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[(t, th)]):.3f}" for th in (1, 4, 16)))
     return [clip_mean(v) for v in vals]
 
 
