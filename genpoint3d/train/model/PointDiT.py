@@ -23,6 +23,7 @@ from torch import nn
 
 from genpoint3d.train.model.Buddies import Buddies
 from genpoint3d.train.model.FineFinder import FineFinder, _CrossAttnBlock, _posenc
+from genpoint3d.train.model.TapUpdater import TapUpdater
 from genpoint3d.train.model.MatchHead import MatchHead
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.model.tools.layers import (
@@ -87,6 +88,7 @@ class PointDiT(nn.Module):
         buddies: bool = False,
         buddy_bias: bool = False,
         virtual: int = 0,
+        updater: str = "pointdit",
     ) -> None:
         super().__init__()
         # The conditioning width has no reason to differ from the model width,
@@ -366,6 +368,15 @@ class PointDiT(nn.Module):
             self.v_reads_p = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
             self.v_reads_v = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
             self.p_reads_v = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
+
+        # [TAPIP3D's updater] with updater="tapip3d" the finder's comparison
+        # goes to TAPIP3D's own updater (`TapUpdater.py`) and none of the
+        # blocks above are used: the test of whether ours is the gap.
+        self.tap = None
+        if updater == "tapip3d":
+            if not (fine and self.fine.neigh) or cross_attn:
+                raise ValueError("TAPIP3D's updater reads the 3D-neighbourhood finder, with no DINOv3")
+            self.tap = TapUpdater(self.fine.out_dim)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -651,6 +662,9 @@ class PointDiT(nn.Module):
             fine = self.fine(fine_map, uv, uv0[:, 0], *places)
             if point_mask is not None:
                 fine = fine * point_mask[..., None]
+            if self.tap is not None:
+                step, logits = self.tap(fine, pos, uv, vis_prev, point_mask)
+                return (step, logits) if visibility else step
 
         # --- [correlation] template vs every patch, on the RAW features ---
         # Read before the adapter overwrites `context`. The model previously had

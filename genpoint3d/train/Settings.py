@@ -272,6 +272,10 @@ class Settings(argparse.Namespace):
                             "tracks in each frame instead of attending to each "
                             "other directly (TAPIP3D uses 64). 0 keeps direct "
                             "spatial attention.")
+        p.add_argument("--updater", default="pointdit", choices=["pointdit", "tapip3d"],
+                       help="what turns the finder's comparison into corrections: our "
+                            "PointDiT blocks, or TAPIP3D's updater (TapUpdater.py; needs "
+                            "--dino 0 --fine-neigh K --causal 0).")
         p.add_argument("--hidden-loss", type=float, default=1.0, metavar="W",
                        help="the method's loss also counts the frames where a "
                             "point is hidden (occluded or out of the frame), "
@@ -323,6 +327,8 @@ class Settings(argparse.Namespace):
             p.error("--motion-waves places the guess in the image through the finder's camera: needs --fine 1")
         if settings.motion_waves and settings.causal:
             p.error("--motion-waves reads the step to the next frame: needs --causal 0")
+        if settings.updater == "tapip3d" and (settings.dino or not settings.fine_neigh or settings.causal):
+            p.error("--updater tapip3d needs --dino 0, --fine-neigh K and --causal 0")
         if settings.virtual and settings.dino:
             p.error("--virtual is built for the CNN-only model: --dino 0")
         if settings.carry and settings.method != "regress":
