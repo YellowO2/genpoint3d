@@ -91,12 +91,22 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             vals[t].append(m["average_pts_within_thresh"].cpu())
             for th in (1, 4, 16):
                 within.setdefault((t, th), []).append(m[f"pts_within_{th}"].cpu())
+            # The same for the points that barely move on screen.
+            still = vis.bool() & ~moving[:, None]
+            ms = tapvid3d_metrics(
+                pred_m[:, t : t + 1], gt_m[:, t : t + 1], still[:, t : t + 1],
+                b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
+                scaling="none", per_clip=True,
+            )
+            for th in (1, 4, 16):
+                within.setdefault(("still", t, th), []).append(ms[f"pts_within_{th}"].cpu())
     model.train()
     # Whether a falling score is points drifting off by a few pixels (16 px
     # holds while 1 px falls) or points being lost (16 px falls too).
-    print("\n    seen moving points within 1 / 4 / 16 px, by frame")
+    print("\n    seen points within 1 / 4 / 16 px, by frame: moving | barely moving (< 4 px)")
     for t in range(len(vals)):
-        print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[(t, th)]):.3f}" for th in (1, 4, 16)))
+        print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[(t, th)]):.3f}" for th in (1, 4, 16))
+              + "   |  " + "  ".join(f"{clip_mean(within[('still', t, th)]):.3f}" for th in (1, 4, 16)))
     return [clip_mean(v) for v in vals]
 
 
