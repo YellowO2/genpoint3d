@@ -895,19 +895,19 @@ class PointDiT(nn.Module):
 
 
 def _example():
-    """DINOv3 and the CNN side by side, built small enough to run on a laptop,
-    and one batch of inputs, for visual-code's model view: the whole-frame
-    match and cross-attention on DINOv3, the 2D window finder on the CNN (fx8)."""
-    model = PointDiT(displacement=True, legacy_lookup=False, cross_attn=True, feat_dim=1024,
+    """DINOv3 and the CNN side by side (fx8), at a training clip's sizes, for
+    visual-code's model view: 24 frames, 128 points, DINOv3 ViT-S/16 at 384 px
+    (24 x 24 patches, 384 wide) and the CNN at 4 px cells (96 x 96)."""
+    model = PointDiT(displacement=True, legacy_lookup=False, cross_attn=True, feat_dim=384,
                      correlate=True, corr_mode="cosine", match_learn=True, costvol=False, causal=False,
                      fine=True, fine_xyz=True, fine_waves=10)
-    B, T, N, P, h, w = 1, 8, 16, 64, 32, 32
+    B, T, N, P, h, w = 1, 24, 128, 24 * 24, 96, 96
     proj = torch.zeros(B, T, 3, 4)
     proj[..., 0, 0] = proj[..., 1, 1] = 0.5
     proj[..., 0, 3] = proj[..., 1, 3] = 0.5
     proj[..., 2, 2] = 1.0
     proj[..., 2, 3] = 3.0
     inputs = (torch.zeros(B, T, N, 3), torch.ones(B), torch.randn(B, N, 3) * 0.2,
-              torch.randn(B, T, P, 1024), None, torch.randn(B, N, 1024), torch.randn(B, T, P, 3) * 0.2,
+              torch.randn(B, T, P, 384), None, torch.randn(B, N, 384), torch.randn(B, T, P, 3) * 0.2,
               torch.randn(B, T, 128, h, w), proj, torch.randn(B, T, 3, h, w) * 0.2)
     return model, inputs
