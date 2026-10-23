@@ -892,3 +892,21 @@ class PointDiT(nn.Module):
         if not self.visibility:
             raise ValueError("this model was built without the visibility head")
         return self.out(h), F.linear(h, self.vis_weight[None], self.vis_bias[None])[..., 0]
+
+
+def _example():
+    """The current main model, built small enough to run on a laptop, and one
+    batch of inputs, for visual-code's model view: CNN only, TAPIP3D's 3D
+    neighbourhood finder, the Fourier motion input, two-way time (fyC)."""
+    model = PointDiT(displacement=True, legacy_lookup=False, cross_attn=False, causal=False,
+                     fine=True, fine_xyz=True, fine_neigh=32, motion_waves=True)
+    B, T, N, h, w = 1, 8, 16, 32, 32
+    proj = torch.zeros(B, T, 3, 4)
+    proj[..., 0, 0] = proj[..., 1, 1] = 0.5
+    proj[..., 0, 3] = proj[..., 1, 3] = 0.5
+    proj[..., 2, 2] = 1.0
+    proj[..., 2, 3] = 3.0
+    inputs = (torch.zeros(B, T, N, 3), torch.ones(B), torch.randn(B, N, 3) * 0.2,
+              None, None, None, None,
+              torch.randn(B, T, 128, h, w), proj, torch.randn(B, T, 3, h, w) * 0.2)
+    return model, inputs
