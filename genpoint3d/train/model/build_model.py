@@ -32,6 +32,7 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     # projections; their parameters are what the file holds.
                     locality_mode=a("locality_mode", "legacy"),
                     locality_wide=a("locality_wide", 8.0),
+                    cross_window=a("cross_window", 0),
                     corr_mode=a("corr_mode", "legacy"),
                     # Absent means a checkpoint from before the flag existed,
                     # and every one of those was causal.

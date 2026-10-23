@@ -66,6 +66,7 @@ class PointDiT(nn.Module):
         correlate: bool = True,
         locality_mode: str = "sched",
         locality_wide: float = 8.0,
+        cross_window: int = 0,
         corr_mode: str = "cosine",
         causal: bool = True,
         costvol: bool = True,
@@ -109,6 +110,12 @@ class PointDiT(nn.Module):
         # as they were trained.
         self.time_norm = time_norm
         self.locality = locality and cross_attn
+        # [window] each point's cross-attention reads only the `cross_window`
+        # patches nearest its current guess, in 3D: the CNN's window, for
+        # DINOv3. 0 reads the whole frame.
+        if cross_window and not cross_attn:
+            raise ValueError("cross_window narrows the cross-attention, which needs cross_attn")
+        self.cross_window = cross_window
         self.correlate = correlate and cross_attn
         # "legacy" on either is the prior / the matching as every run up to
         # run14 had them (docs/issues.md B1, B2), only so those checkpoints
@@ -588,7 +595,7 @@ class PointDiT(nn.Module):
         with torch.autocast(device_type=dev.type, enabled=False):
             pos = self._lookup_pos(x.float(), anchor.float())
             if context is not None and patch_xyz is not None and (
-                    self.locality or self.costvol):
+                    self.locality or self.costvol or self.cross_window):
                 patch_xyz = patch_xyz.float()
                 # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
                 # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
@@ -604,6 +611,13 @@ class PointDiT(nn.Module):
                     # point far from every patch still sees its closest ones.
                     near2 = dist2 / self._patch_spacing(patch_xyz).pow(2)[..., None, None]
                     near2 = near2 - near2.amin(dim=-1, keepdim=True)
+
+        # [window] as an attention bias: 0 on the nearest patches, off elsewhere.
+        window = None
+        if self.cross_window:
+            d = dist2.reshape(B * T, N, -1)
+            near = d.topk(self.cross_window, dim=-1, largest=False).indices
+            window = torch.full_like(d, -CrossBlock.FAR).scatter(-1, near, 0.0)
 
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
@@ -871,7 +885,7 @@ class PointDiT(nn.Module):
             # [4c] each point queries its own frame's feature map (or the null)
             if cross is not None:
                 frame_ctx = context.reshape(B * T, -1, self.dim)
-                seen = cross(h, cs, frame_ctx, dist2=dist2, corr=corr, noise=noise)
+                seen = cross(h, cs, frame_ctx, dist2=dist2, corr=corr, noise=noise, window=window)
                 if visual_mask is not None and visual_mask.dim() == 3:
                     # A point blanked in a frame its neighbours still see reads
                     # exactly what a fully blanked frame would give it: the
@@ -879,7 +893,7 @@ class PointDiT(nn.Module):
                     # zeroed above. Each point's cross-attention is its own, so
                     # picking between the two per point leaks nothing.
                     blank = cross(h, cs, self.null_ctx.to(frame_ctx.dtype).expand_as(frame_ctx),
-                                  dist2=dist2, corr=corr, noise=noise)
+                                  dist2=dist2, corr=corr, noise=noise, window=window)
                     seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
                 h = seen
             h = h.view(B, T, Nt, -1)

@@ -123,6 +123,10 @@ class Settings(argparse.Namespace):
                             "narrowing to one as the sample gets clean. legacy: a "
                             "strength of 1.3 in scene units squared, which at real "
                             "patch spacing is flat, as every run up to run14 had it.")
+        p.add_argument("--cross-window", type=int, default=0,
+                       help="each point's cross-attention reads only this many "
+                            "DINOv3 patches, the nearest its current guess in 3D; "
+                            "0 reads the whole frame")
         p.add_argument("--locality-wide", type=float, default=8.0,
                        help="sched only: the prior's starting width at pure noise, "
                             "in patch spacings. 8 is a third of a 24x24 frame. "

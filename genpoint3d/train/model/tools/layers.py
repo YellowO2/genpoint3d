@@ -299,13 +299,14 @@ class CrossBlock(nn.Module):
         # the full range of this block's own QK-normalised logits.
         self.corr_log_scale = log_param(10.0) if correlate and corr_mode == "cosine" else None
 
-    def forward(self, x, cond, context, dist2=None, corr=None, noise=None):
+    def forward(self, x, cond, context, dist2=None, corr=None, noise=None, window=None):
         """`dist2` (B, N, P): squared distance from each point's current position
         estimate to each patch -- in patch spacings, measured from the nearest
         patch (see `PointDiT.forward`), or in the shared normalised space for
         the legacy prior. `corr` (B, N, P): how well each patch matches the
         point's query template. `noise` (B, 1, 1): 1 - k, how far each frame's
-        sample is from clean; only the "sched" prior reads it.
+        sample is from clean; only the "sched" prior reads it. `window` (B, N, P):
+        0 on the patches a point may read, -FAR on the rest.
 
         Added to the attention logits as a Gaussian log-prior, which turns the
         search "which of 576 patches is mine?" into the arithmetic "which are
@@ -334,6 +335,8 @@ class CrossBlock(nn.Module):
             term = (corr * self.corr_w)[:, None].to(context.dtype)
         if term is not None:
             bias = term if bias is None else bias + term
+        if window is not None:
+            bias = window[:, None] if bias is None else bias + window[:, None]
         if bias is not None:
             # Summed in fp32 and cast once, here: bf16 rounds each term to 8
             # bits, and near the point the two are the same size.
