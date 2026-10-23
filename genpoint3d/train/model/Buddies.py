@@ -1,4 +1,4 @@
-"""Which points move together, and where each point would be if it moved with them.
+"""Where each point would be if it moved with the points that move with it.
 
 Every Kubric object is rigid, and a hidden point is still on its object. Carried
 by the rotation and shift that move its object's VISIBLE points from frame 0 to

@@ -1,4 +1,6 @@
-"""TAPIP3D's updater, in place of PointDiT's blocks, to tell whether ours is the gap.
+"""TAPIP3D's updater, in place of PointDiT's blocks.
+
+To tell whether ours is the gap.
 
 TAPIP3D (`point_tracker_3d.py`, `efficient_updateformer.py`, config
 `efficient_updateformer_64track`): every (point, frame) token is
