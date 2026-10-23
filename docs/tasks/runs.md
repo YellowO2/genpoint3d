@@ -18,7 +18,9 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fyF | fyC with TAPIP3D's updater (transformer) | 0.698 | | no gain |
 | fyG | fyC + visibility loss and feedback | 0.686 | | no gain |
 | fyH | fyC + colour and blur augmentation | 0.695 | | no gain |
-| tap_short | TAPIP3D's own code, unchanged, on our train clips at our budget | running | | sanity check |
+| tap_short | TAPIP3D's own code, unchanged, on our train clips at our budget (stopped at step ~2400) | 0.137 | 0.546 | worse than ours at equal budget: its 0.926 is long training |
+| fyI | fyC + DINOv3 (cross-attention and whole-frame match) | queued | | |
+| fyJ | fyC + velocity output, velocity loss, rigidity loss, hidden frames in the loss | queued | | |
 
 ## Diagnosis on fyC (scoring only)
 
@@ -27,3 +29,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 - No undershoot: the predicted motion is 98-100% of the true motion.
 - Plain and corner-like points drift about the same.
 - 6 refinement rounds instead of 4: +0.008. A 16x16 support grid at test: no change.
+- Error against distance moved: ours grows in proportion (about 3-4% of the
+  distance past 16 px); TAPIP3D released barely grows (0.6% at 128+ px);
+  TAPIP3D at our budget is proportional too (7-8%). Snapping onto the exact
+  point comes with long training.
