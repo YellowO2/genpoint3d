@@ -20,7 +20,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fyH | fyC + colour and blur augmentation | 0.695 | | no gain |
 | tap_short | TAPIP3D's own code, unchanged, on our train clips at our budget (stopped at step ~2400) | 0.137 | 0.546 | worse than ours at equal budget: its 0.926 is long training |
 | fyI | fyC + DINOv3 (cross-attention and whole-frame match) | 0.699 | 0.723 (1000) | no gain, cancelled |
-| fyJ | fyC + velocity output, velocity loss, rigidity loss, hidden frames in the loss | queued | | |
+| fyJ | fyC + velocity output, velocity loss, rigidity loss, hidden frames in the loss | 0.666 (hidden moving 0.231 vs 0.156) | | visible down, hidden up |
 
 ## Diagnosis on fyC (scoring only)
 
