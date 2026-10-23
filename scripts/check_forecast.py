@@ -73,6 +73,12 @@ CONFIGS = [
     # TAPIP3D's lookup: the cells nearest in 3D, compared by attention.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
      "--carry", "1", "--causal", "0"],
+    # Tracked in windows that share frames, each reading frame 0 as its template;
+    # the cross-attention narrowed to the patches nearest each guess.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
+     "--window", "4", "--overlap", "2", "--causal", "0", "--motion-waves", "1"],
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--window", "4",
+     "--overlap", "2", "--cross-window", "9"],
 ]
 
 

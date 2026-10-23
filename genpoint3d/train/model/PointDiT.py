@@ -630,11 +630,15 @@ class PointDiT(nn.Module):
                     near2 = near2 - near2.amin(dim=-1, keepdim=True)
 
         # [window] as an attention bias: 0 on the nearest patches, off elsewhere.
+        # A point with no image in a frame reads every patch there, as without
+        # the window: which patches are nearest comes from that frame's depth.
         window = None
         if self.cross_window:
             d = dist2.reshape(B * T, N, -1)
             near = d.topk(self.cross_window, dim=-1, largest=False).indices
             window = torch.full_like(d, -CrossBlock.FAR).scatter(-1, near, 0.0)
+            if point_mask is not None:
+                window = window * point_mask.reshape(B * T, -1, 1)
 
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
