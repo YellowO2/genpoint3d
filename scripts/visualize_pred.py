@@ -118,7 +118,8 @@ def main() -> int:
         pred = refine(model, anchor, num_frames=traj.shape[1],
                       iters=targs.get("refine_iters", 4), known_x0=kx0,
                       param=targs.get("param", "position"),
-                      carry=bool(targs.get("carry", 0)), **cond)
+                      carry=bool(targs.get("carry", 0)), window=targs.get("window", 0),
+                      overlap=targs.get("overlap", 0), **cond)
     else:
         pred = flow_sample(model, anchor, num_frames=traj.shape[1],
                            steps=args.sample_steps, known_x0=kx0, **cond)

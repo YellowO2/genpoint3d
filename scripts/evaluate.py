@@ -41,7 +41,8 @@ from genpoint3d.train.tools.regress import refine
 def per_frame_apd(model, loader, device, steps: int, amp: bool,
                   anchor_frame0: bool = False, scaling: str = "median",
                   method: str = "flow", refine_iters: int = 4,
-                  param: str = "position", carry: bool = False) -> list[float]:
+                  param: str = "position", carry: bool = False, window: int = 0,
+                  overlap: int = 0) -> list[float]:
     """APD for each frame index separately: APD3D over every visible point
     that moves (more than 4 px), with no rescale -- the points the tracking
     is about, and where it falls off through the clip.
@@ -72,7 +73,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             if method == "regress":
                 pred = refine(model, anchor, num_frames=traj.shape[1],
                               iters=refine_iters, known_x0=kx0, param=param,
-                              carry=carry, **cond)
+                              carry=carry, window=window, overlap=overlap, **cond)
             else:
                 pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                                    generator=gen, known_x0=kx0, **cond)
@@ -324,6 +325,7 @@ def main() -> int:
     # Absent means a checkpoint from before corrections could mean a speed.
     param = targs.get("param", "position")
     carry = bool(targs.get("carry", 0))
+    window, overlap = targs.get("window", 0), targs.get("overlap", 0)
     print(f"{len(clips)} test clips | {device} | amp {'bf16' if amp else 'off'}"
           f" | points {points} | "
           + (f"{refine_iters} refinement iterations" if method == "regress"
@@ -372,13 +374,14 @@ def main() -> int:
 
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
                               anchor_frame0, args.scaling, method,
-                              refine_iters, param, carry) if args.per_frame else None
+                              refine_iters, param, carry, window, overlap) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
     judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
                             anchor_frame0=anchor_frame0, loss_type=loss_type,
                             space=args.space, oracle_axis=args.oracle_axis,
                             scaling=args.scaling, min_motion_px=args.min_motion_px,
                             method=method, refine_iters=refine_iters, param=param, carry=carry,
+                            window=window, overlap=overlap,
                             cutoff=args.eval_cutoff, samples=args.samples,
                             support=args.support)
     m = score(model, loader, judging, split="test")

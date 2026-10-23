@@ -265,6 +265,13 @@ class Settings(argparse.Namespace):
                             "restart from the horizon's guess, so each frame's "
                             "window starts near where the point last was "
                             "(`regress._carry`).")
+        p.add_argument("--window", type=int, default=0, metavar="W",
+                       help="regress only: track W frames at a time, each window "
+                            "starting --overlap frames before the last one ends, "
+                            "as TAPIP3D does; 0 tracks the whole clip at once "
+                            "(`regress._windows`).")
+        p.add_argument("--overlap", type=int, default=4, metavar="F",
+                       help="frames each window shares with the one before it.")
         p.add_argument("--fine-neigh", type=int, default=0, metavar="K",
                        help="--fine-xyz only: replace the finder's 7x7 window "
                             "with TAPIP3D's lookup, the K cells nearest the guess "
@@ -341,6 +348,9 @@ class Settings(argparse.Namespace):
             p.error("--virtual is built for the CNN-only model: --dino 0")
         if settings.carry and settings.method != "regress":
             p.error("--carry restarts frames between refinement iterations: regress only")
+        if settings.window and (settings.method != "regress" or settings.carry
+                                or not 0 < settings.overlap < settings.window):
+            p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
         if settings.fine_neigh and (not settings.fine_xyz or settings.fine_waves):
             p.error("--fine-neigh needs --fine-xyz, and encodes its own offsets (no --fine-waves)")
         if settings.fine_waves and not settings.fine_xyz:

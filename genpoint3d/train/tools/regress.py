@@ -32,6 +32,12 @@ it is added to the guess:
     acceleration  a change to how fast the speed changes from that frame on:
                   a correction at frame t changes the speed of every later frame
 
+A clip longer than the network should see at once is tracked in windows:
+`window` frames at a time, each window starting `overlap` frames before the
+one before it ends, as TAPIP3D does. Its frames past the last window start
+where the point last was, and the frames it shares were settled by that
+window. Every window still reads the clip's frame 0 as its template.
+
 So an output of zero at a frame the network cannot see keeps the guess there
 moving the way it already moves, rather than holding it in place. Either way
 the correction is summed into a displacement first, so the guess, the loss
@@ -95,6 +101,34 @@ def _carry(g: torch.Tensor, i: int, iters: int) -> torch.Tensor:
     if h >= T - 1:
         return g
     return torch.cat([g[:, :h + 1], g[:, h:h + 1].expand_as(g[:, h + 1:])], dim=1)
+
+
+def _windows(T: int, window: int, overlap: int) -> list[tuple[int, int]]:
+    """(start, end) of each window over `T` frames. The last one ends at the
+    clip's end, so it may share more than `overlap` frames. A `window` of 0, or
+    one as long as the clip, is the whole clip."""
+    if not window or window >= T:
+        return [(0, T)]
+    out, start = [], 0
+    while True:
+        start = min(start, T - window)
+        out.append((start, start + window))
+        if start + window >= T:
+            return out
+        start += window - overlap
+
+
+def _cut(t: Optional[torch.Tensor], start: int, end: int) -> Optional[torch.Tensor]:
+    """A (B, T, ...) tensor's frames `start` to `end`, or None."""
+    return None if t is None else t[:, start:end]
+
+
+def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
+    """The frames from `done` to `end`, which no window has settled yet, start
+    where the point was in the last one that has."""
+    if done == 0 or done >= end:
+        return g
+    return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
 
 
 def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
@@ -165,6 +199,8 @@ def regress_loss(
     acc_weight: float = 0.0,
     pairs: Optional[torch.Tensor] = None,
     rigid_weight: float = 0.0,
+    window: int = 0,
+    overlap: int = 0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -200,47 +236,65 @@ def regress_loss(
     pairs, rigid_weight: (B, N, N) the pairs of points on one rigid object
               (`batch.rigid_pairs`), and the weight of the loss that keeps
               the gap between them true, at every iteration.
+    window, overlap: track in windows of this many frames, sharing `overlap`
+              (top of this file); 0 tracks the whole clip at once. Each
+              window is scored on its own frames, and the windows' losses are
+              averaged.
 
     Frame 0 is scored before it is pinned again: the network is asked for a
     zero correction there, as the flow loss asks for a zero velocity. With a
     velocity or an acceleration its correction there is zero by construction.
     """
-    B = x1.shape[0]
+    if window and carry:
+        raise ValueError("windows and carry both restart the later frames: use one")
+    B, T = x1.shape[:2]
     w = [gamma ** (iters - 1 - i) for i in range(iters)]
     w = [v / sum(w) for v in w]
+    spans = _windows(T, window, overlap)
+    share = 1 / len(spans)
 
-    g = _pin(torch.zeros_like(x1), known_x0)
-    prev = _no_logits(model, x1)
+    whole = _pin(torch.zeros_like(x1), known_x0)
     total = vis_total = x1.new_zeros(())
-    for i in range(iters):
-        k = _clock(i, iters, B, x1.device)
-        vis_loss = x1.new_zeros(())
-        if visible is None and prev is None:
-            step = model(g.detach(), k, anchor, **cond)
-        else:
-            step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **cond)
-            if visible is not None:
-                vis_loss = w[i] * visibility_error(logits, visible)
-            if prev is not None:
-                prev = logits.detach()
-        g = g.detach() + _integrate(step, param)
-        loss = w[i] * masked_error(g, x1, mask, weight, loss_type)
-        if vel_weight:
-            loss = loss + w[i] * vel_weight * _motion_error(g, x1, mask, weight, loss_type, 1)
-        if acc_weight:
-            loss = loss + w[i] * acc_weight * _motion_error(g, x1, mask, weight, loss_type, 2)
-        if rigid_weight:
-            loss = loss + w[i] * rigid_weight * _rigid_error(g, x1, pairs, loss_type)
-        if backward is not None:
-            # Out of autocast, where the training loop's own backward runs.
-            with torch.autocast(device_type=x1.device.type, enabled=False):
-                ((loss + vis_weight * vis_loss) * backward).backward()
-            loss, vis_loss = loss.detach(), vis_loss.detach()
-        total = total + loss
-        vis_total = vis_total + vis_loss
-        g = _pin(g, known_x0)
-        if carry:
-            g = _carry(g.detach(), i, iters)
+    done = 0
+    for start, end in spans:
+        whole = _reach(whole, done, end)
+        g, x1_w = whole[:, start:end], x1[:, start:end]
+        mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
+        kx0 = known_x0 if start == 0 else None
+        at = {} if len(spans) == 1 else {"frames": (start, end)}
+        prev = _no_logits(model, x1_w)
+        for i in range(iters):
+            k = _clock(i, iters, B, x1.device)
+            vis_loss = x1.new_zeros(())
+            if visible_w is None and prev is None:
+                step = model(g.detach(), k, anchor, **at, **cond)
+            else:
+                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **cond)
+                if visible_w is not None:
+                    vis_loss = share * w[i] * visibility_error(logits, visible_w)
+                if prev is not None:
+                    prev = logits.detach()
+            g = g.detach() + _integrate(step, param)
+            loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
+            if vel_weight:
+                loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
+            if acc_weight:
+                loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
+            if rigid_weight:
+                loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs, loss_type)
+            loss = share * loss
+            if backward is not None:
+                # Out of autocast, where the training loop's own backward runs.
+                with torch.autocast(device_type=x1.device.type, enabled=False):
+                    ((loss + vis_weight * vis_loss) * backward).backward()
+                loss, vis_loss = loss.detach(), vis_loss.detach()
+            total = total + loss
+            vis_total = vis_total + vis_loss
+            g = _pin(g, kx0)
+            if carry:
+                g = _carry(g.detach(), i, iters)
+        whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
+        done = end
 
     if backward is None:
         total = total + vis_weight * vis_total
@@ -257,6 +311,8 @@ def refine(
     visibility: bool = False,
     param: str = "position",
     carry: bool = False,
+    window: int = 0,
+    overlap: int = 0,
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -266,21 +322,36 @@ def refine(
     baseline.
 
     `visibility` also returns the visibility logits (B, T, N) of the last
-    iteration, the one the training weighs most. `param` and `carry` are as
-    in `regress_loss`, and must be what the model was trained with.
+    iteration, the one the training weighs most; in windows, of the last
+    window that covers each frame. `param`, `carry`, `window` and `overlap`
+    are as in `regress_loss`, and must be what the model was trained with.
     """
+    if window and carry:
+        raise ValueError("windows and carry both restart the later frames: use one")
     B, N, _ = anchor.shape
-    g = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
-    prev = _no_logits(model, g)
-    logits = None
-    for i in range(iters):
-        out = model(g, _clock(i, iters, B, anchor.device), anchor,
-                    visibility=visibility or prev is not None, vis_prev=prev, **cond)
-        if visibility or prev is not None:
-            out, logits = out
-        if prev is not None:
-            prev = logits
-        g = _pin(g + _integrate(out, param), known_x0)
-        if carry:
-            g = _carry(g, i, iters)
-    return (g, logits) if visibility else g
+    spans = _windows(num_frames, window, overlap)
+    whole = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
+    seen = whole.new_zeros(B, num_frames, N) if visibility else None
+    done = 0
+    for start, end in spans:
+        whole = _reach(whole, done, end)
+        g = whole[:, start:end]
+        kx0 = known_x0 if start == 0 else None
+        at = {} if len(spans) == 1 else {"frames": (start, end)}
+        prev = _no_logits(model, g)
+        logits = None
+        for i in range(iters):
+            out = model(g, _clock(i, iters, B, anchor.device), anchor,
+                        visibility=visibility or prev is not None, vis_prev=prev, **at, **cond)
+            if visibility or prev is not None:
+                out, logits = out
+            if prev is not None:
+                prev = logits
+            g = _pin(g + _integrate(out, param), kx0)
+            if carry:
+                g = _carry(g, i, iters)
+        whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
+        if visibility:
+            seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
+        done = end
+    return (whole, seen) if visibility else whole

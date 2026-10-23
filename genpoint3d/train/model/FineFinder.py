@@ -199,13 +199,14 @@ class FineFinder(nn.Module):
                                      self.wave_in)
         return self.corr_mlp[1:](first)
 
-    def _correlate(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor,
-                   xyz: torch.Tensor | None, pos: torch.Tensor | None) -> torch.Tensor:
+    def _correlate(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
+                   uv0: torch.Tensor, xyz: torch.Tensor | None,
+                   pos: torch.Tensor | None) -> torch.Tensor:
         b, T, C, h, w = fmap.shape
         N = uv.shape[2]
         size = uv.new_tensor([w, h])
         # See the module docstring for the eighth of a cell.
-        sup = self._windows(fmap[:, 0], uv0 * size - 0.5 / STRIDE)
+        sup = self._windows(fmap0, uv0 * size - 0.5 / STRIDE)
         cell = (uv * size - 0.5 / STRIDE).flatten(0, 1)
         win = self._windows(fmap.flatten(0, 1), cell)
         places = (self._places(xyz, pos, cell) if xyz is not None
@@ -216,15 +217,19 @@ class FineFinder(nn.Module):
             out.append(self._read(cost.flatten(3), p))
         return torch.cat(out, dim=-1)
 
-    def forward(self, fmap: torch.Tensor, uv: torch.Tensor, uv0: torch.Tensor,
-                xyz: torch.Tensor | None = None, pos: torch.Tensor | None = None,
+    def forward(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
+                uv0: torch.Tensor, xyz: torch.Tensor | None = None,
+                xyz0: torch.Tensor | None = None, pos: torch.Tensor | None = None,
                 pos0: torch.Tensor | None = None) -> torch.Tensor:
         """
-        fmap  (B, T, C, h, w)  from `encode`
+        fmap  (B, T, C, h, w)  from `encode`, the frames being tracked
+        fmap0 (B, C, h, w)     the clip's frame 0, where the query is: the
+                               template, whichever frames `fmap` holds
         uv    (B, T, N, 2)     the current guess in each frame, [0, 1] across, fp32
         uv0   (B, N, 2)        the query point in frame 0, likewise
         xyz   (B, T, 3, h, w)  each cell's 3D position, in the model's own
                                units (the finder with `xyz` only)
+        xyz0  (B, 3, h, w)     the same for frame 0
         pos   (B, T, N, 3)     the current guess in 3D, in the same units
         pos0  (B, N, 3)        the query point in 3D, likewise (`neigh` only)
 
@@ -239,10 +244,11 @@ class FineFinder(nn.Module):
         for i in range(0, fmap.shape[0], self.chunk):
             cut = slice(i, i + self.chunk)
             if self.neigh:
-                fn, part = self._neighbourhoods, (fmap[cut], uv0[cut], xyz[cut], pos[cut], pos0[cut])
+                fn = self._neighbourhoods
+                part = (fmap[cut], fmap0[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut])
             else:
                 fn = self._correlate
-                part = (fmap[cut], uv[cut], uv0[cut],
+                part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut],
                         None if xyz is None else xyz[cut], None if pos is None else pos[cut])
             if torch.is_grad_enabled():
                 out.append(checkpoint(fn, *part, use_reentrant=False))
@@ -251,8 +257,9 @@ class FineFinder(nn.Module):
         return torch.cat(out)
 
     # ---------------------------------------------- the 3D neighbourhood
-    def _neighbourhoods(self, fmap: torch.Tensor, uv0: torch.Tensor, xyz: torch.Tensor,
-                        pos: torch.Tensor, pos0: torch.Tensor) -> torch.Tensor:
+    def _neighbourhoods(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv0: torch.Tensor,
+                        xyz: torch.Tensor, xyz0: torch.Tensor, pos: torch.Tensor,
+                        pos0: torch.Tensor) -> torch.Tensor:
         """TAPIP3D's lookup (`knn_feature_4d_optimized.py`): at each level, the
         K cells nearest the current guess IN 3D, against the K cells nearest
         the query point in frame 0 plus the query's own feature, compared by
@@ -267,34 +274,39 @@ class FineFinder(nn.Module):
         # (`norm_mode: isotropic`): the scale its offset encoding is built for.
         # From frame 0's alone, which every clip sees; TAPIP3D uses the whole
         # window, which a forecast would leak through.
-        xyz, pos, pos0 = xyz.float(), pos.float(), pos0.float()
-        mean = xyz[:, 0].mean(dim=(2, 3))                                   # (b, 3)
-        std = (xyz[:, 0] - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
+        xyz, xyz0, pos, pos0 = xyz.float(), xyz0.float(), pos.float(), pos0.float()
+        mean = xyz0.mean(dim=(2, 3))                                        # (b, 3)
+        std = (xyz0 - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
         xyz = (xyz - mean[:, None, :, None, None]) / std[:, None, None, None, None]
+        xyz0 = (xyz0 - mean[:, :, None, None]) / std[:, None, None, None]
         pos = (pos - mean[:, None, None]) / std[:, None, None, None]
         pos0 = (pos0 - mean[:, None]) / std[:, None, None]
         out = []
         for lvl in range(self.levels):
             s = 2 ** lvl
-            f = F.avg_pool2d(fmap.flatten(0, 1), s, stride=s) if lvl else fmap.flatten(0, 1)
+            pool = lambda t: F.avg_pool2d(t, s, stride=s) if lvl else t
+            f, f0 = pool(fmap.flatten(0, 1)), pool(fmap0)
             hl, wl = f.shape[-2:]
             # The cells' positions are picked, not averaged: an average of a
             # rim cell and the wall behind it is a point in mid-air.
-            x = F.interpolate(xyz.flatten(0, 1), size=(hl, wl), mode="nearest-exact")
+            pick_xyz = lambda t: F.interpolate(t, size=(hl, wl), mode="nearest-exact")
+            x, x0 = pick_xyz(xyz.flatten(0, 1)), pick_xyz(xyz0)
             f = f.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, C)      # (b, T, P, C)
             x = x.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, 3)      # (b, T, P, 3)
+            f0_cells = f0.flatten(2).transpose(1, 2)                        # (b, P, C)
+            x0 = x0.flatten(2).transpose(1, 2)                              # (b, P, 3)
             k = min(self.neigh, hl * wl)
             with torch.no_grad():
                 near = torch.cdist(pos, x).topk(k, dim=-1, largest=False).indices      # (b, T, N, k)
-                near0 = torch.cdist(pos0[:, None], x[:, :1]).topk(k, dim=-1, largest=False).indices[:, 0]
+                near0 = torch.cdist(pos0, x0).topk(k, dim=-1, largest=False).indices
             pick = lambda t, i: t.gather(-2, i.flatten(-2)[..., None].expand(*i.shape[:-2], -1, t.shape[-1])
                                          ).unflatten(-2, i.shape[-2:])
             cur_f, cur_x = pick(f, near), pick(x, near)                     # (b, T, N, k, .)
-            sup_f, sup_x = pick(f[:, 0], near0), pick(x[:, 0], near0)      # (b, N, k, .)
+            sup_f, sup_x = pick(f0_cells, near0), pick(x0, near0)          # (b, N, k, .)
             # The query's own feature, sampled where it is, leads the support.
             at = (q - (s - 1) / 2) / s
             grid = 2 * at / at.new_tensor([wl - 1, hl - 1]) - 1
-            own = F.grid_sample(f[:, 0].transpose(1, 2).reshape(b, C, hl, wl).float(),
+            own = F.grid_sample(f0.float(),
                                 grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
             sup_f = torch.cat([own[:, :, None].to(sup_f.dtype), sup_f], dim=2)
             # Normalised after the sampling and the pooling, as TAPIP3D has it.

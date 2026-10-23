@@ -61,13 +61,14 @@ class Predictor:
             if j.method == "regress":
                 l, _ = regress_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                     loss_type=j.loss_type, iters=j.refine_iters,
-                                    param=j.param, carry=j.carry, **cond)
+                                    param=j.param, carry=j.carry, window=j.window,
+                                    overlap=j.overlap, **cond)
                 if j.support:
                     pred = _with_support(model, anchor, traj.shape[1], kx0, seen, j, cond)
                 else:
                     pred = refine(model, anchor, num_frames=traj.shape[1], iters=j.refine_iters,
                                   known_x0=kx0, visibility=seen, param=j.param,
-                                  carry=j.carry, **cond)
+                                  carry=j.carry, window=j.window, overlap=j.overlap, **cond)
             else:
                 l, _ = flow_matching_loss(model, traj, anchor, mask=vis, known_x0=kx0,
                                           loss_type=j.loss_type, **cond)
@@ -113,6 +114,7 @@ def _with_support(model, anchor, num_frames, kx0, seen, j: ScoreSettings, cond: 
     if vm is not None and vm.dim() == 3:
         raise ValueError("support points take a per-frame visual mask, not a per-point one")
     out = refine(model, all_anchor, num_frames=num_frames, iters=j.refine_iters, known_x0=all_kx0,
-                 visibility=seen, param=j.param, carry=j.carry, **cond)
+                 visibility=seen, param=j.param, carry=j.carry, window=j.window,
+                 overlap=j.overlap, **cond)
     N = anchor.shape[1]
     return (out[0][:, :, :N], out[1][:, :, :N]) if seen else out[:, :, :N]

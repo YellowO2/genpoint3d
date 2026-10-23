@@ -530,6 +530,7 @@ class PointDiT(nn.Module):
         fine_xyz: torch.Tensor | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
+        frames: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         x:           (B, T, N, 3)    noisy trajectory, in model units
@@ -562,6 +563,11 @@ class PointDiT(nn.Module):
                                      iteration gave, 0 before the first.
                                      Required by a model built with
                                      `vis_feedback`, refused by any other.
+        frames:      (start, end)    the clip's frames `x` covers, one window
+                                     of a longer clip; the visual arguments
+                                     are still the whole clip's, and its
+                                     frame 0, where the query is, stays the
+                                     template. None: `x` covers every frame.
 
         returns      (B, T, N, 3)    predicted velocity
 
@@ -569,6 +575,17 @@ class PointDiT(nn.Module):
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
+        # The query's frame, taken before a window cuts it away.
+        query_map = None if fine_map is None else fine_map[:, 0]
+        query_proj = None if fine_proj is None else fine_proj[:, :1]
+        query_xyz = None if fine_xyz is None else fine_xyz[:, 0]
+        if frames is not None:
+            if self.costvol:
+                raise ValueError("the cost volume's support is read in the frames it is given")
+            cut = slice(*frames)
+            context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz = (
+                None if t is None else t[:, cut]
+                for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz))
         # Every image reading below is per point once it has been looked up
         # (the match, the cost volume, the finder, the distances), so a mask
         # per point blanks it exactly. The feature map itself is shared by a
@@ -662,18 +679,19 @@ class PointDiT(nn.Module):
             with torch.autocast(device_type=dev.type, enabled=False):
                 proj = fine_proj.float()
                 uv, _ = project(pos, proj)
-                uv0, _ = project(anchor.float()[:, None], proj[:, :1])
+                uv0, _ = project(anchor.float()[:, None], query_proj.float())
                 # Offsets in the units of the model's own target, which is
                 # what a difference of two positions turns into there. The 3D
                 # neighbourhood reads them scene-normalised instead, about
                 # unit spread, the scale TAPIP3D's encoding is built for.
                 if fine_xyz is None:
-                    places = ()
+                    places = {}
                 elif self.fine.neigh:
-                    places = (fine_xyz.float(), pos, anchor.float())
+                    places = dict(xyz=fine_xyz.float(), xyz0=query_xyz.float(), pos=pos,
+                                  pos0=anchor.float())
                 else:
-                    places = (fine_xyz.float() / self.traj_scale, pos / self.traj_scale)
-            fine = self.fine(fine_map, uv, uv0[:, 0], *places)
+                    places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale)
+            fine = self.fine(fine_map, query_map, uv, uv0[:, 0], **places)
             if point_mask is not None:
                 fine = fine * point_mask[..., None]
             if self.tap is not None:

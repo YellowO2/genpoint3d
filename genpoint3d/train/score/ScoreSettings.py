@@ -14,6 +14,8 @@ class ScoreSettings:
     refine_iters: int = 4         # regress: corrections to the first guess
     param: str = "position"       # regress: what a correction means, as trained
     carry: bool = False           # regress: frames past a moving horizon restart from it
+    window: int = 0               # regress: frames tracked at a time, 0 = the whole clip
+    overlap: int = 0              # regress: frames each window shares with the one before
     anchor_frame0: bool = False   # hold frame 0 at its known position
     loss_type: str = "l2"         # the objective val_loss is measured by
     space: str = "3d"             # "2d" scores the projections in pixels
