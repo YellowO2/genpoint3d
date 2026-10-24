@@ -198,6 +198,39 @@ MolmoMotion, Learning to Simulate.
     motion, aligned pointmaps" from monocular video), NOT predicted by the
     trajectory model. Same pattern as MolmoMotion.
 
+### Checked 2026-10-24 as forecasting references for our Kubric numbers
+
+None reports per-point 3D forecasts on physics scenes like Kubric, and none
+could be run on our clips as it stands. Worth reading later for methods.
+
+- MolmoMotion (Jun 2026, arXiv 2606.18558): released. Needs a text
+  instruction, 3 history frames, exactly 8 points per call, 4B parameters
+  (Molmo2-4B). PointMotionBench, 2 s at 15 fps, best variant: HOT3D ADE 0.109 m /
+  PWT 44.4%, WorldTrack 0.143 m / 44.5%, DAVIS 1.227 m / 15.3% (PWT = share
+  within 1/2/5/10/20 cm). Our attempt to run it on Kubric is set up
+  (`scripts/molmo_export.py`, `scripts/molmo_predict.py`) but stopped on a
+  PyTorch build newer than NSCC's GPU driver.
+- MotionForesight (Jul 2026, arXiv 2607.16192): one RGB video (7 frames) plus
+  estimated depth, no text, 15 frames ahead; a LoRA on a frozen Wan 2.1 video
+  model through TrackCraft3R. SSv2 held-out: ADE 4.47 cm, FDE 6.23 cm, 76%
+  within 5 cm. Code and weights not released when checked.
+- Point4Cast (CVPR 2026, Jun; MERL): one streaming video -> 3D point maps and
+  cameras for past, present and future, plus point tracks. Forecasts surfaces,
+  scored by Chamfer accuracy / completion (no point identity) and scene-flow
+  EPE, 1 and 10 frames ahead on PointOdyssey and TAPVid-3D (zero-shot).
+  Trained on Kubric, PointOdyssey, Stereo4D. Only a code stub in the
+  supplementary. Paper: https://www.merl.com/publications/docs/TR2026-077.pdf
+- RigidFormer (May 2026, arXiv 2605.09196): learned rigid dynamics from
+  object point clouds on Kubric MOVi-A/B/Sphere; MOVi-B, 100 frames: 0.161 m
+  translation, 15.3 degrees rotation RMSE. Starts from the full true state
+  (whole objects), not video. Code "upon publication". FIGNet and HopNet are
+  its mesh-based predecessors on the same data.
+- Video-Point Model / VP-WorldBench (Oct 2026, arXiv 2610.28594): several
+  posed cameras plus text, forecasts video and 3D tracks; robot and traffic
+  scenes in Unreal Engine 5. Scores tracks with APD (their delta-3D avg), 16
+  frames seen, 64 forecast: 50.05 on simulated robot clips (Cosmos 39.03).
+  Benchmark on Hugging Face (rooty2020/VP-WorldBench).
+
 ## 2D motion forecasting (camera handled by preprocessing, not the model)
 - **Forecasting Motion in the Wild** — Thakkar, Ginosar, Walker, Malik, Carreira,
   Doersch. ECCV 2026.
