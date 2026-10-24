@@ -1,0 +1,35 @@
+#!/bin/bash
+# MolmoMotion as a forecasting reference on our val clips (scripts/molmo_export.py).
+#
+#   qsub -v CKPT=outputs/fyO_joint_long/best.pt scripts/molmo_reference.pbs
+#
+#PBS -N molmo_ref
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64gb
+#PBS -l walltime=02:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/molmo_ref.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+
+CKPT=${CKPT:-outputs/fyO_joint_long/best.pt}
+WORK=$ROOT/molmo
+CLIPS=${CLIPS:-50}
+
+source $ROOT/venvs/fyp/bin/activate
+python scripts/molmo_export.py export --ckpt $CKPT --cache $ROOT/cache/kubric_ctr \
+  --frames-cache $ROOT/cache/kubric_frames384 --clips $CLIPS --out $WORK/in
+deactivate
+
+source $ROOT/venvs/molmo/bin/activate
+python scripts/molmo_predict.py --model $ROOT/weights/MolmoMotion-4B-H3-F30 --in $WORK/in --out $WORK/pred
+deactivate
+
+source $ROOT/venvs/fyp/bin/activate
+python scripts/molmo_export.py score --in $WORK/in --pred $WORK/pred
