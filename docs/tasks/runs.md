@@ -68,3 +68,20 @@ points; median px / share within 1 px):
 More looks stall at about 2 px: a reader on the 49 x 49 tables gets the motion
 roughly, not to the pixel. TAPIP3D's CNN reads worse through tables than
 CoTracker3's, so its features suit its own 3D matcher, not this one.
+
+## Does forecast training help tracking? (standard scoring, every frame seen, 100 val clips)
+
+| Model (step 1,500) | All points | Moving hidden |
+|---|---|---|
+| fyJ, physics, tracking only | 0.871 | 0.316 |
+| fyM, physics, tracking and forecasting together (windows) | 0.881 | 0.303 |
+
+No: hidden points do not improve. fyM's higher hidden numbers before were
+scored with frames 12-23 blank.
+
+## Drift on the long joint model (fyO, step 5,000; scoring only, PER_FRAME)
+
+Still proportional to how far a point has moved, but about half of fyC's:
+error / distance moved 2.6% at 16-32 px, 1.8% past 64 px (fyC 3-4%, TAPIP3D
+released 0.6%). Moving points within 4 px fall from 0.997 at frame 1 to 0.70
+at frame 23 (fyC 0.55); predicted motion is 99% of the true motion, no undershoot.
