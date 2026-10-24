@@ -13,6 +13,9 @@ Per point, in each frame:
            its last few positions in the point's own colour. Off the image, a
            small arrow at the border points the way it went.
 
+Beside it, on black, every point of the clip the same way without the video
+(`--panel-points`), so the whole cloud's motion shows.
+
 Writes `<out>/<clip>.mp4` and `<out>/<clip>.png`, a contact sheet of 6 frames.
 
 Run:  python scripts/render_tracks.py --ckpt outputs/run33/best.pt \\
@@ -136,10 +139,31 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
     return img
 
 
+def draw_points(t: int, gt: tuple, pr: tuple, vis: np.ndarray) -> np.ndarray:
+    """Every point at frame t on black, SIZE x SIZE BGR: the truth green
+    (faded while hidden), the prediction red, a faint line between them."""
+    img = np.zeros((SIZE, SIZE, 3), np.uint8)
+    (gp, gz), (pp, pz) = gt, pr
+    at = lambda xy: tuple(np.round(xy).astype(int))
+    for n in range(gp.shape[1]):
+        if inside(gp[t, n], gz[t, n]) and inside(pp[t, n], pz[t, n]):
+            cv2.line(img, at(gp[t, n]), at(pp[t, n]), (90, 90, 90), 1, cv2.LINE_AA)
+    for n in range(gp.shape[1]):
+        if inside(gp[t, n], gz[t, n]):
+            cv2.circle(img, at(gp[t, n]), 3, GREEN if vis[t, n] else (0, 90, 0), -1, cv2.LINE_AA)
+    for n in range(gp.shape[1]):
+        if inside(pp[t, n], pz[t, n]):
+            cv2.circle(img, at(pp[t, n]), 3, RED, -1, cv2.LINE_AA)
+    cv2.putText(img, f"all {gp.shape[1]} points", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                WHITE, 1, cv2.LINE_AA)
+    return img
+
+
 def write_video(frames: list[np.ndarray], path: Path) -> str:
     """H.264 if this OpenCV build has it, else MPEG-4 part 2. Returns which."""
+    height, width = frames[0].shape[:2]
     for code in ("avc1", "mp4v"):
-        w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*code), FPS, (SIZE, SIZE))
+        w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*code), FPS, (width, height))
         if w.isOpened():
             for f in frames:
                 w.write(f)
@@ -159,6 +183,8 @@ def main() -> int:
                    help="these clips by name instead of the val split")
     p.add_argument("--points", type=int, default=32,
                    help="query points drawn, the most moving first")
+    p.add_argument("--panel-points", type=int, default=0,
+                   help="also draw this many points on black beside the video; 0 none")
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="forecast: frames C on get no image, as in evaluate.py")
     p.add_argument("--sample-steps", type=int, default=50)
@@ -238,6 +264,12 @@ def main() -> int:
             cols = colours(len(pick))
             frames = [draw_frame(rgb[t], t, gt, pr, v, cols, args.eval_cutoff)
                       for t in range(rgb.shape[0])]
+            if args.panel_points:
+                every = moving_px[i].argsort(descending=True)[: args.panel_points]
+                gt_all, pr_all = pixels(gt_m[i][:, every], one), pixels(pr_m[i][:, every], one)
+                v_all = vis[i][:, every].cpu().numpy()
+                frames = [np.hstack([f, draw_points(t, gt_all, pr_all, v_all)])
+                          for t, f in enumerate(frames)]
             codec = write_video(frames, out / f"{name}.mp4")
             at = np.linspace(0, len(frames) - 1, SHEET).round().astype(int)
             cv2.imwrite(str(out / f"{name}.png"), np.hstack([frames[t] for t in at]))
