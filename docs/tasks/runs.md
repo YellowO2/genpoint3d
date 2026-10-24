@@ -41,3 +41,18 @@ val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, 
   distance past 16 px); TAPIP3D released barely grows (0.6% at 128+ px);
   TAPIP3D at our budget is proportional too (7-8%). Snapping onto the exact
   point comes with long training.
+
+## Reader probe (scoring only, `scripts/probe_reader.py`)
+
+CoTracker3's CNN frozen; only a small reader trained (3,000 steps) to read the
+four levels of 49 x 49 tables and say how far the true point is from a guess
+pushed off by up to 16 px. One read, no refinement rounds. Val, 96k visible
+moving point-frames:
+
+| | Median | Mean | <1 px | <2 px | <4 px | <8 px |
+|---|---|---|---|---|---|---|
+| Stay at the guess | 12.7 px | 12.2 px | 0.003 | 0.012 | 0.050 | 0.198 |
+| Reader | 2.4 px | 4.2 px | 0.239 | 0.449 | 0.656 | 0.833 |
+
+The tables hold the motion, and the reader learns most of it within 500 steps
+(train error 4.6 px at step 500, 3.7 px at 3,000).
