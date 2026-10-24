@@ -10,8 +10,8 @@ answer is Kubric's own track. Visible moving points, frames 1 on.
                        them badly is a training problem, not a feature one
   reader error large   the tables themselves are too vague to read
 
-Scored on the val clips against "stay at the guess", in pixels of the
-frame the CNN sees.
+Scored on the val clips the way the tracker uses it, four reads, each from
+the last one's guess, in pixels of the frame the CNN sees.
 
   python scripts/probe_reader.py --cache <cache> --frames-cache <frames> \\
       --fine 1 --fine-init <weights.pt> --dino 0 [--push 16] [--probe-steps 3000]
@@ -58,35 +58,41 @@ finder = model.fine
 LEVELS, K = finder.levels, (2 * finder.radius + 1) ** 2
 
 
-def samples(batch, generator):
-    """Tables, the push and the true offset for one batch's visible moving
-    points in a few random frames: (S, LEVELS, K*K), (S, 2) px, (S, 2) px."""
+def points(batch, generator):
+    """The frozen maps and the visible moving points of a few random frames
+    per clip: frame 0's map, frame t's maps (B, F, C, h, w), the query in
+    frame 0 (B, N, 2), the truth in frame t (B, F, N, 2) in [0, 1], which
+    ones count (B, F, N), and the frame's width in pixels."""
     b = to_device(batch, dev)
     with torch.no_grad():
         fine = fine_inputs(model, b)
         fmap, proj = fine["fine_map"].float(), fine["fine_proj"].float()
         B, T, C, h, w = fmap.shape
-        W = b["frames"].shape[3]
         pos = model._lookup_pos(b["traj"].float(), b["anchor"].float())
         uv, _ = project(pos, proj)                                             # (B, T, N, 2)
         moving = motion_px(to_metres(b["traj"], b), b["visibility"], b["intrinsics_256"],
                            b["extrinsics"]) > 4
         t = torch.stack([torch.randperm(T - 1, generator=generator)[:FRAMES_PER_CLIP] + 1
                          for _ in range(B)]).to(dev)                           # (B, F)
-        uv_t = uv.gather(1, t[..., None, None].expand(-1, -1, *uv.shape[2:]))  # (B, F, N, 2)
+        uv_t = uv.gather(1, t[..., None, None].expand(-1, -1, *uv.shape[2:]))
         keep = b["visibility"].gather(1, t[..., None].expand(-1, -1, uv.shape[2])) & moving[:, None]
         keep &= ((uv_t > 0) & (uv_t < 1)).all(-1)
-        push = (torch.rand(uv_t.shape, generator=generator).to(dev) * 2 - 1) * PUSH   # px
-        guess = uv_t + push / W
-        size = uv.new_tensor([w, h])
         f_t = fmap.gather(1, t[..., None, None, None].expand(-1, -1, C, h, w))
-        tables = []
-        for sup, win in zip(finder._windows(fmap[:, 0], uv[:, 0] * size - 0.5 / STRIDE),
+    return fmap[:, 0], f_t, uv[:, 0], uv_t, keep, b["frames"].shape[3]
+
+
+def tables_at(f0, f_t, uv0, guess):
+    """(B, F, N, LEVELS, K*K): the four levels of tables, the template at the
+    query in frame 0, the search window at `guess` in frame t."""
+    B, F_, C, h, w = f_t.shape
+    size = uv0.new_tensor([w, h])
+    out = []
+    with torch.no_grad():
+        for sup, win in zip(finder._windows(f0, uv0 * size - 0.5 / STRIDE),
                             finder._windows(f_t.flatten(0, 1), (guess * size - 0.5 / STRIDE).flatten(0, 1))):
-            win = win.reshape(B, t.shape[1], -1, K, C)
-            tables.append(torch.einsum("bnsc,bfnkc->bfnsk", sup, win).flatten(3) * C ** -0.5)
-        tables = torch.stack(tables, dim=3)                                    # (B, F, N, L, K*K)
-    return tables[keep], push[keep], -push[keep]
+            win = win.reshape(B, F_, -1, K, C)
+            out.append(torch.einsum("bnsc,bfnkc->bfnsk", sup, win).flatten(3) * C ** -0.5)
+    return torch.stack(out, dim=3)
 
 
 class Reader(nn.Module):
@@ -110,8 +116,10 @@ sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=3e-4, total_steps=STEPS)
 gen = torch.Generator().manual_seed(0)
 print(f"frozen CNN from {settings.fine_init} | push up to {PUSH:g} px | {STEPS} reader steps", flush=True)
 for step, batch in enumerate(loaders.micro_batches(STEPS), 1):
-    x, _, y = samples(batch, gen)
-    loss = (reader(x) - y).norm(dim=-1).mean()
+    f0, f_t, uv0, uv_t, keep, W = points(batch, gen)
+    push = (torch.rand(uv_t.shape, generator=gen).to(dev) * 2 - 1) * PUSH          # px
+    x = tables_at(f0, f_t, uv0, uv_t + push / W)[keep]
+    loss = (reader(x) + push[keep]).norm(dim=-1).mean()
     opt.zero_grad()
     loss.backward()
     opt.step()
@@ -119,17 +127,26 @@ for step, batch in enumerate(loaders.micro_batches(STEPS), 1):
     if step % 250 == 0:
         print(f"  step {step:5d}  train error {loss.item():.2f} px", flush=True)
 
-err, stay = [], []
+# Scored the way the tracker uses it: from a guess pushed off, read, move the
+# window to the new guess, read again.
+LOOKS = 4
+errs = [[] for _ in range(LOOKS + 1)]
 reader.eval()
 gen = torch.Generator().manual_seed(1)
 with torch.no_grad():
     for batch in loaders.val:
-        x, push, y = samples(batch, gen)
-        err.append((reader(x) - y).norm(dim=-1))
-        stay.append(push.norm(dim=-1))
-err, stay = torch.cat(err), torch.cat(stay)
-row = lambda e: (f"median {e.median():.2f} px  mean {e.mean():.2f} px  "
+        f0, f_t, uv0, uv_t, keep, W = points(batch, gen)
+        push = (torch.rand(uv_t.shape, generator=gen).to(dev) * 2 - 1) * PUSH
+        guess = uv_t + push / W
+        errs[0].append(((guess - uv_t) * W).norm(dim=-1)[keep])
+        for look in range(1, LOOKS + 1):
+            tab = tables_at(f0, f_t, uv0, guess)
+            guess = guess + reader(tab.flatten(0, 2)).view(*guess.shape) / W
+            errs[look].append(((guess - uv_t) * W).norm(dim=-1)[keep])
+row = lambda e: (f"median {e.median():5.2f} px  mean {e.mean():5.2f} px  "
                  + "  ".join(f"<{k}px {(e < k).float().mean():.3f}" for k in (1, 2, 4, 8)))
-print(f"\nval, {len(err)} visible moving point-frames")
-print("  stay at the guess  ", row(stay))
-print("  reader             ", row(err))
+errs = [torch.cat(e) for e in errs]
+print(f"\nval, {len(errs[0])} visible moving point-frames, guess pushed up to {PUSH:g} px")
+print("  start (stay)   ", row(errs[0]))
+for look in range(1, LOOKS + 1):
+    print(f"  after look {look}   ", row(errs[look]))
