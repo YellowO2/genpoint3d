@@ -16,6 +16,10 @@ Per point, in each frame:
 Beside it, on black, every point of the clip the same way without the video
 (`--panel-points`), so the whole cloud's motion shows.
 
+With `--forecast-from C` the truth is left out: RED is the model tracking
+with every frame seen, and from frame C on GREEN is the same model
+forecasting with the frames from C blank, a line from each to its red twin.
+
 Writes `<out>/<clip>.mp4` and `<out>/<clip>.png`, a contact sheet of 6 frames.
 
 Run:  python scripts/render_tracks.py --ckpt outputs/run33/best.pt \\
@@ -25,6 +29,7 @@ Run:  python scripts/render_tracks.py --ckpt outputs/run33/best.pt \\
 
 import argparse
 import colorsys
+import dataclasses
 from pathlib import Path
 
 import cv2
@@ -87,7 +92,7 @@ def border_arrow(img, p: np.ndarray, colour) -> None:
 
 
 def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
-               cols: list, cutoff: int) -> np.ndarray:
+               cols: list, cutoff: int, first: int = 0, look=(GREEN, RED)) -> np.ndarray:
     """One frame: rgb (R, R, 3) uint8, gt and pr each (pixels (T, N, 2),
     depth (T, N)), vis (T, N) bool. Returns SIZE x SIZE BGR.
 
@@ -103,6 +108,11 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
     N = gp.shape[1]
     at = lambda xy: tuple(np.round(xy).astype(int))
     on = lambda xy, z: inside(xy / k, z)
+    # `first`: the prediction is drawn from that frame on, and the trails
+    # follow the first set instead.
+    show = t >= first
+    tp, tz = (gp, gz) if first else (pp, pz)
+    g_col, p_col = look
     # The trails first, oldest faintest, so the dots sit on top of them.
     for age in range(TRAIL - 1, 0, -1):
         s = t - age
@@ -110,50 +120,54 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
             continue
         layer = img.copy()
         for n in range(N):
-            a, b = pp[s, n], pp[s + 1, n]
-            if on(a, pz[s, n]) and on(b, pz[s + 1, n]):
+            a, b = tp[s, n], tp[s + 1, n]
+            if on(a, tz[s, n]) and on(b, tz[s + 1, n]):
                 cv2.line(layer, at(a), at(b), cols[n], 2, cv2.LINE_AA)
         alpha = 0.7 * (1.0 - age / TRAIL)
         img = cv2.addWeighted(layer, alpha, img, 1 - alpha, 0)
     links, hidden = img.copy(), img.copy()
     for n in range(N):
-        if on(gp[t, n], gz[t, n]) and on(pp[t, n], pz[t, n]):
+        if show and on(gp[t, n], gz[t, n]) and on(pp[t, n], pz[t, n]):
             cv2.line(links, at(gp[t, n]), at(pp[t, n]), WHITE, 1, cv2.LINE_AA)
     img = cv2.addWeighted(links, 0.5, img, 0.5, 0)
     for n in range(N):
         if on(gp[t, n], gz[t, n]):
-            cv2.circle(hidden if not vis[t, n] else img, at(gp[t, n]), 6, GREEN, -1, cv2.LINE_AA)
+            cv2.circle(hidden if not vis[t, n] else img, at(gp[t, n]), 6, g_col, -1, cv2.LINE_AA)
     # Hidden truth at 40%: the point is still there, just not seen.
     mask = (hidden != img).any(-1)
     img[mask] = cv2.addWeighted(hidden, 0.4, img, 0.6, 0)[mask]
     for n in range(N):
-        if on(pp[t, n], pz[t, n]):
-            cv2.circle(img, at(pp[t, n]), 6, RED, -1, cv2.LINE_AA)
+        if show and on(pp[t, n], pz[t, n]):
+            cv2.circle(img, at(pp[t, n]), 6, p_col, -1, cv2.LINE_AA)
     img = cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     for n in range(N):
-        if not on(pp[t, n], pz[t, n]) and pz[t, n] > 0:
-            border_arrow(img, pp[t, n] / k, RED)
+        if show and not on(pp[t, n], pz[t, n]) and pz[t, n] > 0:
+            border_arrow(img, pp[t, n] / k, p_col)
     label = f"{t}" + ("" if not cutoff else ("" if t < cutoff else "  forecast"))
     cv2.putText(img, label, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(img, label, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, WHITE, 1, cv2.LINE_AA)
     return img
 
 
-def draw_points(t: int, gt: tuple, pr: tuple, vis: np.ndarray) -> np.ndarray:
-    """Every point at frame t on black, SIZE x SIZE BGR: the truth green
-    (faded while hidden), the prediction red, a faint line between them."""
+def draw_points(t: int, gt: tuple, pr: tuple, vis: np.ndarray, first: int = 0,
+                look=(GREEN, RED)) -> np.ndarray:
+    """Every point at frame t on black, SIZE x SIZE BGR: the first set
+    (faded while hidden), the second from frame `first` on, a faint line
+    between them. By default the truth green and the prediction red."""
     img = np.zeros((SIZE, SIZE, 3), np.uint8)
+    show, (g_col, p_col) = t >= first, look
+    faded = tuple(c * 2 // 5 for c in g_col)
     (gp, gz), (pp, pz) = gt, pr
     at = lambda xy: tuple(np.round(xy).astype(int))
     for n in range(gp.shape[1]):
-        if inside(gp[t, n], gz[t, n]) and inside(pp[t, n], pz[t, n]):
+        if show and inside(gp[t, n], gz[t, n]) and inside(pp[t, n], pz[t, n]):
             cv2.line(img, at(gp[t, n]), at(pp[t, n]), (90, 90, 90), 1, cv2.LINE_AA)
     for n in range(gp.shape[1]):
         if inside(gp[t, n], gz[t, n]):
-            cv2.circle(img, at(gp[t, n]), 3, GREEN if vis[t, n] else (0, 90, 0), -1, cv2.LINE_AA)
+            cv2.circle(img, at(gp[t, n]), 3, g_col if vis[t, n] else faded, -1, cv2.LINE_AA)
     for n in range(gp.shape[1]):
-        if inside(pp[t, n], pz[t, n]):
-            cv2.circle(img, at(pp[t, n]), 3, RED, -1, cv2.LINE_AA)
+        if show and inside(pp[t, n], pz[t, n]):
+            cv2.circle(img, at(pp[t, n]), 3, p_col, -1, cv2.LINE_AA)
     cv2.putText(img, f"all {gp.shape[1]} points", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 WHITE, 1, cv2.LINE_AA)
     return img
@@ -185,6 +199,8 @@ def main() -> int:
                    help="query points drawn, the most moving first")
     p.add_argument("--panel-points", type=int, default=0,
                    help="also draw this many points on black beside the video; 0 none")
+    p.add_argument("--forecast-from", type=int, default=0, metavar="C",
+                   help="draw tracking (red) against forecasting from frame C (green), no truth")
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="forecast: frames C on get no image, as in evaluate.py")
     p.add_argument("--sample-steps", type=int, default=50)
@@ -229,6 +245,9 @@ def main() -> int:
                             carry=bool(targs.get("carry", 0)), window=targs.get("window", 0),
                             overlap=targs.get("overlap", 0), cutoff=args.eval_cutoff)
     predictor = Predictor(model, judging)
+    # The same model, the frames from C on blank: what it forecasts there.
+    forecaster = (Predictor(model, dataclasses.replace(judging, cutoff=args.forecast_from))
+                  if args.forecast_from else None)
     print(f"step {ckpt['step']} of {args.ckpt} | {device} | {method} | {len(clips)} clips"
           f" | drawing {args.points} of {targs['points']} points", flush=True)
 
@@ -240,6 +259,7 @@ def main() -> int:
         # Predictor directly is not, and would keep every activation.
         with torch.no_grad():
             pred = predictor(batch)
+            ahead = forecaster(batch) if forecaster else None
         b = pred.batch
         gt_m = to_metres(b["traj"], b)
         pr_m = gt_m if args.draw_truth_as_pred else to_metres(pred.tracks.float(), b)
@@ -262,13 +282,20 @@ def main() -> int:
             v = vis[i][:, pick].cpu().numpy()
             rgb = np.load(Path(args.frames_cache) / f"{name}.npy")
             cols = colours(len(pick))
-            frames = [draw_frame(rgb[t], t, gt, pr, v, cols, args.eval_cutoff)
+            # Tracking against forecasting: the first set is the tracking, red,
+            # the second the forecast, green from frame C on.
+            how = dict(first=args.forecast_from, look=(RED, GREEN)) if ahead else {}
+            fc_m = to_metres(ahead.tracks.float(), b) if ahead else None
+            if ahead:
+                gt, pr = pr, pixels(fc_m[i][:, pick], one)
+            frames = [draw_frame(rgb[t], t, gt, pr, v, cols, args.eval_cutoff or args.forecast_from, **how)
                       for t in range(rgb.shape[0])]
             if args.panel_points:
                 every = moving_px[i].argsort(descending=True)[: args.panel_points]
-                gt_all, pr_all = pixels(gt_m[i][:, every], one), pixels(pr_m[i][:, every], one)
+                first_m, second_m = (pr_m, fc_m) if ahead else (gt_m, pr_m)
+                gt_all, pr_all = pixels(first_m[i][:, every], one), pixels(second_m[i][:, every], one)
                 v_all = vis[i][:, every].cpu().numpy()
-                frames = [np.hstack([f, draw_points(t, gt_all, pr_all, v_all)])
+                frames = [np.hstack([f, draw_points(t, gt_all, pr_all, v_all, **how)])
                           for t, f in enumerate(frames)]
             codec = write_video(frames, out / f"{name}.mp4")
             at = np.linspace(0, len(frames) - 1, SHEET).round().astype(int)
@@ -279,6 +306,8 @@ def main() -> int:
         if k >= len(clips):
             break
     predictor.done()
+    if forecaster:
+        forecaster.done()
     return 0
 
 
