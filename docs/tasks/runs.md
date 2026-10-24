@@ -56,3 +56,15 @@ moving point-frames:
 
 The tables hold the motion, and the reader learns most of it within 500 steps
 (train error 4.6 px at step 500, 3.7 px at 3,000).
+
+Four reads, each re-centred on the last one's guess (same reader, same val
+points; median px / share within 1 px):
+
+| CNN (frozen) | Start | Look 1 | Look 2 | Look 3 | Look 4 |
+|---|---|---|---|---|---|
+| CoTracker3 | 12.7 / 0.003 | 2.34 / 0.242 | 2.23 / 0.284 | 2.24 / 0.284 | 2.27 / 0.281 |
+| TAPIP3D | 12.7 / 0.003 | 4.10 / 0.077 | 3.60 / 0.109 | 3.68 / 0.110 | 3.79 / 0.102 |
+
+More looks stall at about 2 px: a reader on the 49 x 49 tables gets the motion
+roughly, not to the pixel. TAPIP3D's CNN reads worse through tables than
+CoTracker3's, so its features suit its own 3D matcher, not this one.
