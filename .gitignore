@@ -33,3 +33,6 @@ __pycache__/
 /references/*/repo/
 # Paper text is for local reading only; link to the source instead of redistributing it.
 /references/*/paper.txt
+
+# Weekly reports rendered from their Markdown (scripts/render_report.py).
+/docs/weekly_reports/*.html
