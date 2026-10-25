@@ -95,3 +95,20 @@ nothing (0.94, 0.92). Points the second window starts near (64-128 px moved,
 6.8 px off at the start) end further off (1.58) than ones that start 34 px
 off, so the final error follows how far a point has moved, not how far off
 its guess started. The matcher sees the point; it settles slightly off it.
+
+## Drift by how far the point turned (fyO, step 5,000; scoring only, PER_FRAME)
+
+At the same distance moved, error / moved by how far the point turned towards
+or away from the camera since frame 0 (from the rotation of its rigid
+companions; 98% of seen points have enough):
+
+| moved | 0-5 deg | 5-15 | 15-45 | 45+ |
+|---|---|---|---|---|
+| 32-64 px | 0.011 | 0.013 | 0.021 | 0.042 |
+| 64-128 px | 0.008 | 0.008 | 0.011 | 0.029 |
+| 128+ px | 0.008 | 0.007 | 0.008 | 0.026 |
+
+Points that move far without turning are 0.8% off (TAPIP3D released 0.6%
+over all points); turning 45+ deg makes it 3-4 times worse, and most points
+that move far have turned that much. Getting nearer or further changes
+nothing (0.013-0.022 at any depth change).
