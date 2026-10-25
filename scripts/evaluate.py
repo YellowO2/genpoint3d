@@ -59,7 +59,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     a frame is left out of that frame.
     """
     model.eval()
-    vals, within, errs, disps = None, {}, [], []
+    vals, within, errs, disps, by_round = None, {}, [], [], {}
     gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
     for batch in loader:
         b = to_device(batch, device, amp)
@@ -69,11 +69,12 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
         kx0 = known_frame0(b) if anchor_frame0 else None
         cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
                     **fine_inputs(model, b, amp))
+        rounds = []
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             if method == "regress":
                 pred = refine(model, anchor, num_frames=traj.shape[1],
                               iters=refine_iters, known_x0=kx0, param=param,
-                              carry=carry, window=window, overlap=overlap, **cond)
+                              carry=carry, window=window, overlap=overlap, rounds=rounds, **cond)
             else:
                 pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                                    generator=gen, known_x0=kx0, **cond)
@@ -100,6 +101,10 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                                                      align_corners=False)[:, 0, 0]   # (B, N)
         e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
         errs.append(e); disps.append(d)
+        for i, r in enumerate(rounds):
+            er, _ = error_and_motion(to_metres(r.float(), b), gt_m, vis,
+                                     b["intrinsics_256"], b["extrinsics"])
+            by_round.setdefault(i, []).append(er)
         motion = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"])
         moving = motion > 4
         still_3d = (gt_m - gt_m[:, :1]).norm(dim=-1).amax(1) < 1e-3
@@ -160,6 +165,12 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     # holds while 1 px falls) or points being lost (16 px falls too).
     print("\n    every seen point after frame 0: error against how far it has moved")
     print(motion_table(torch.cat(errs), torch.cat(disps)))
+    # Whether a point that has moved far is off from the start and the rounds
+    # cannot pull it in (the matcher never sees it), or the rounds get it close
+    # and stall (the matcher sees it and reads it imprecisely).
+    for i, er in by_round.items():
+        print(f"\n    the same, {'the starting guess' if i == 0 else f'after round {i}'}")
+        print(motion_table(torch.cat(er), torch.cat(disps)))
     if ("plain", 1, 1) in within:
         print("\n    seen moving points within 1 / 4 / 16 px, by frame: plain half | corner-like half")
         for t in range(len(vals)):

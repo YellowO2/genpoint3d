@@ -313,6 +313,7 @@ def refine(
     carry: bool = False,
     window: int = 0,
     overlap: int = 0,
+    rounds: Optional[list] = None,
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -325,6 +326,10 @@ def refine(
     iteration, the one the training weighs most; in windows, of the last
     window that covers each frame. `param`, `carry`, `window` and `overlap`
     are as in `regress_loss`, and must be what the model was trained with.
+
+    A `rounds` list is filled with the whole clip's guess before the first
+    correction and after each one, `iters + 1` (B, T, N, 3) tensors; in
+    windows, each frame from the last window that covers it.
     """
     if window and carry:
         raise ValueError("windows and carry both restart the later frames: use one")
@@ -340,6 +345,10 @@ def refine(
         at = {} if len(spans) == 1 else {"frames": (start, end)}
         prev = _no_logits(model, g)
         logits = None
+        if rounds is not None:
+            if not rounds:
+                rounds.extend(whole.clone() for _ in range(iters + 1))
+            rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
         for i in range(iters):
             out = model(g, _clock(i, iters, B, anchor.device), anchor,
                         visibility=visibility or prev is not None, vis_prev=prev, **at, **cond)
@@ -350,6 +359,8 @@ def refine(
             g = _pin(g + _integrate(out, param), kx0)
             if carry:
                 g = _carry(g, i, iters)
+            if rounds is not None:
+                rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
         whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
         if visibility:
             seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
