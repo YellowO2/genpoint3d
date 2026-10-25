@@ -102,8 +102,11 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                                                      align_corners=False)[:, 0, 0]   # (B, N)
         e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
         errs.append(e); disps.append(d)
-        a, s = appearance_change(gt_m, vis, b["extrinsics"])
-        turns.append(a); scales.append(s)
+        # The same (point, frame)s `error_and_motion` keeps.
+        a, s = appearance_change(gt_m, b["extrinsics"])
+        keep = vis.bool().clone()
+        keep[:, 0] = False
+        turns.append(a[keep].cpu()); scales.append(s[keep].float().cpu())
         for i, r in enumerate(rounds):
             er, _ = error_and_motion(to_metres(r.float(), b), gt_m, vis,
                                      b["intrinsics_256"], b["extrinsics"])

@@ -1,7 +1,8 @@
 #!/bin/bash
-# Can the score tables alone say how far a point moved? (scripts/probe_reader.py)
+# Does the matcher alone know where the point is? (scripts/probe_reader.py)
 #
-#   qsub -v FINE_INIT=weights/cotracker3_fnet.pt scripts/probe_reader.pbs
+#   qsub -v CKPT=outputs/fyO_joint_long/best.pt scripts/probe_reader.pbs
+#   qsub -v CKPT=outputs/fyO_joint_long/best.pt,FINE_WEIGHTS=weights/tapip3d_finder.pt scripts/probe_reader.pbs
 #
 #PBS -N probe_reader
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
@@ -21,6 +22,6 @@ module load python/3.11.7-gcc11
 module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
 
-python scripts/probe_reader.py --cache $ROOT/cache/kubric_ctr --frames-cache $ROOT/cache/kubric_frames384 \
-  --fine 1 --dino 0 --batch 8 --points 128 --fine-init $ROOT/${FINE_INIT:-weights/cotracker3_fnet.pt} \
-  --push ${PUSH:-16} --probe-steps ${STEPS:-3000}
+# FINE_WEIGHTS (relative to ~/scratch) puts other weights into the matcher.
+[ -n "${FINE_WEIGHTS:-}" ] && FW="--fine-weights $ROOT/$FINE_WEIGHTS" || FW=""
+python scripts/probe_reader.py --ckpt "$CKPT" $FW --push ${PUSH:-16} --steps ${STEPS:-3000}

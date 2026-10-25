@@ -269,13 +269,12 @@ def error_and_motion(pred: torch.Tensor, gt: torch.Tensor, visible: torch.Tensor
     return err[keep].float().cpu(), disp[keep].float().cpu()
 
 
-def appearance_change(gt: torch.Tensor, visible: torch.Tensor, extrinsics: torch.Tensor,
+def appearance_change(gt: torch.Tensor, extrinsics: torch.Tensor,
                       tol: float = 0.02, min_buddies: int = 4):
-    """For every visible (point, frame) after frame 0, as `error_and_motion`
-    picks them: how far the point has turned towards or away from the camera
-    since frame 0, in degrees, and how much nearer or further it is, as
-    |log(depth_t / depth_0)|. Flat (M,) tensors; the angle is NaN where it
-    cannot be told.
+    """For every (point, frame), (B, T, N): how far the point has turned
+    towards or away from the camera since frame 0, in degrees, and how much
+    nearer or further it is, as |log(depth_t / depth_0)|. The angle is NaN
+    where it cannot be told.
 
     The cache keeps no object ids, so the turn is the rotation that best maps
     the point's rigid companions -- points whose distance to it never strays
@@ -299,10 +298,7 @@ def appearance_change(gt: torch.Tensor, visible: torch.Tensor, extrinsics: torch
     angle = torch.rad2deg(torch.acos(cos))
     angle = angle.masked_fill((w.sum(-1) < min_buddies)[:, None], float("nan"))
     depth = cam[..., 2].abs().clamp_min(1e-6)
-    scale = (depth / depth[:, :1]).log().abs()
-    keep = visible.bool().clone()
-    keep[:, 0] = False
-    return angle[keep].cpu(), scale[keep].float().cpu()
+    return angle, (depth / depth[:, :1]).log().abs()
 
 
 def change_table(err: torch.Tensor, disp: torch.Tensor, change: torch.Tensor,
