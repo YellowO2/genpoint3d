@@ -269,6 +269,60 @@ def error_and_motion(pred: torch.Tensor, gt: torch.Tensor, visible: torch.Tensor
     return err[keep].float().cpu(), disp[keep].float().cpu()
 
 
+def appearance_change(gt: torch.Tensor, visible: torch.Tensor, extrinsics: torch.Tensor,
+                      tol: float = 0.02, min_buddies: int = 4):
+    """For every visible (point, frame) after frame 0, as `error_and_motion`
+    picks them: how far the point has turned towards or away from the camera
+    since frame 0, in degrees, and how much nearer or further it is, as
+    |log(depth_t / depth_0)|. Flat (M,) tensors; the angle is NaN where it
+    cannot be told.
+
+    The cache keeps no object ids, so the turn is the rotation that best maps
+    the point's rigid companions -- points whose distance to it never strays
+    more than `tol` metres -- from frame 0 onto frame t, both in the camera
+    looking at them. Still background points are companions of each other,
+    so a camera that turns turns them too. Fewer than `min_buddies`
+    companions gives NaN.
+    """
+    cam = _to_camera_t(gt, extrinsics)                                    # (B, T, N, 3)
+    d = (gt[:, :, :, None] - gt[:, :, None]).norm(dim=-1)
+    w = ((d - d[:, :1]).abs().amax(dim=1) < tol).float()                  # (B, N, N)
+    w = w * (1 - torch.eye(gt.shape[2], device=gt.device))
+    a = cam[:, :1, None] - cam[:, :1, :, None]                            # (B, 1, N, N, 3)
+    b = cam[:, :, None] - cam[:, :, :, None]                              # (B, T, N, N, 3)
+    H = torch.einsum("bnj,bsnjx,btnjy->btnxy", w, a, b).float()
+    U, _, Vh = torch.linalg.svd(H)
+    flip = torch.ones_like(U[..., 0])
+    flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
+    R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
+    cos = ((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1)
+    angle = torch.rad2deg(torch.acos(cos))
+    angle = angle.masked_fill((w.sum(-1) < min_buddies)[:, None], float("nan"))
+    depth = cam[..., 2].abs().clamp_min(1e-6)
+    scale = (depth / depth[:, :1]).log().abs()
+    keep = visible.bool().clone()
+    keep[:, 0] = False
+    return angle[keep].cpu(), scale[keep].float().cpu()
+
+
+def change_table(err: torch.Tensor, disp: torch.Tensor, change: torch.Tensor,
+                 edges: tuple, name: str) -> str:
+    """Error / distance moved for points that moved about as far, split by how
+    much they changed in another way: does that change, at a fixed distance,
+    make the error worse?"""
+    moved = ((16, 32), (32, 64), (64, 128), (128, float("inf")))
+    cuts = list(zip(edges[:-1], edges[1:]))
+    rows = [f"    {'moved (px)':>12} " + " ".join(f"{f'{name} {lo:g}-{hi:g}':>22}" for lo, hi in cuts)]
+    for mlo, mhi in moved:
+        cells = []
+        for lo, hi in cuts:
+            m = (disp >= mlo) & (disp < mhi) & (change >= lo) & (change < hi)
+            r = (err[m] / disp[m]).median().item() if m.sum() >= 20 else float("nan")
+            cells.append(f"{r:>12.3f} n={int(m.sum()):<7}")
+        rows.append(f"    {f'{mlo:g}-{mhi:g}':>12} " + " ".join(f"{c:>22}" for c in cells))
+    return "\n".join(rows)
+
+
 def motion_table(err: torch.Tensor, disp: torch.Tensor) -> str:
     """Error against distance moved, binned: does the error grow in
     proportion to the motion (a steady error/moved), or level off?"""

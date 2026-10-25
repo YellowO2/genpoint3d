@@ -32,8 +32,9 @@ from genpoint3d.train.score.main import score
 from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
 from genpoint3d.train.tools.flow import sample as flow_sample
 from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import (HIDDEN_KEYS, clip_mean, error_and_motion, motion_px,
-                                            motion_table, tapvid3d_metrics)
+from genpoint3d.train.tools.metrics import (HIDDEN_KEYS, appearance_change, change_table, clip_mean,
+                                            error_and_motion, motion_px, motion_table,
+                                            tapvid3d_metrics)
 from genpoint3d.train.tools.regress import refine
 
 
@@ -59,7 +60,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     a frame is left out of that frame.
     """
     model.eval()
-    vals, within, errs, disps, by_round = None, {}, [], [], {}
+    vals, within, errs, disps, by_round, turns, scales = None, {}, [], [], {}, [], []
     gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
     for batch in loader:
         b = to_device(batch, device, amp)
@@ -101,6 +102,8 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                                                      align_corners=False)[:, 0, 0]   # (B, N)
         e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
         errs.append(e); disps.append(d)
+        a, s = appearance_change(gt_m, vis, b["extrinsics"])
+        turns.append(a); scales.append(s)
         for i, r in enumerate(rounds):
             er, _ = error_and_motion(to_metres(r.float(), b), gt_m, vis,
                                      b["intrinsics_256"], b["extrinsics"])
@@ -171,6 +174,15 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
     for i, er in by_round.items():
         print(f"\n    the same, {'the starting guess' if i == 0 else f'after round {i}'}")
         print(motion_table(torch.cat(er), torch.cat(disps)))
+    # Whether a point that has turned or changed size since frame 0 no longer
+    # matches its frame-0 look: at a fixed distance moved, worse when it has.
+    err, disp, turn = torch.cat(errs), torch.cat(disps), torch.cat(turns)
+    known = ~turn.isnan()
+    print(f"\n    error / moved by how far the point turned since frame 0, degrees"
+          f" ({known.float().mean():.0%} of seen points have enough rigid companions to tell)")
+    print(change_table(err[known], disp[known], turn[known], (0, 5, 15, 45, 180), "turned"))
+    print("\n    error / moved by how much nearer or further it is, |log(depth / frame-0 depth)|")
+    print(change_table(err, disp, torch.cat(scales), (0, 0.05, 0.15, 0.4, 10), "depth"))
     if ("plain", 1, 1) in within:
         print("\n    seen moving points within 1 / 4 / 16 px, by frame: plain half | corner-like half")
         for t in range(len(vals)):
