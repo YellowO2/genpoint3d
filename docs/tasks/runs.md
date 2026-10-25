@@ -85,3 +85,13 @@ Still proportional to how far a point has moved, but about half of fyC's:
 error / distance moved 2.6% at 16-32 px, 1.8% past 64 px (fyC 3-4%, TAPIP3D
 released 0.6%). Moving points within 4 px fall from 0.997 at frame 1 to 0.70
 at frame 23 (fyC 0.55); predicted motion is 99% of the true motion, no undershoot.
+
+## Drift by refinement round (fyO, step 5,000; scoring only, PER_FRAME)
+
+Error against distance moved, before the first round and after each of the 4.
+Far points are found in round 1 (32-64 px moved: 33.6 px off at the start,
+2.5 px after round 1, 1.07 after round 2) and rounds 3 and 4 change almost
+nothing (0.94, 0.92). Points the second window starts near (64-128 px moved,
+6.8 px off at the start) end further off (1.58) than ones that start 34 px
+off, so the final error follows how far a point has moved, not how far off
+its guess started. The matcher sees the point; it settles slightly off it.
