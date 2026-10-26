@@ -112,3 +112,25 @@ Points that move far without turning are 0.8% off (TAPIP3D released 0.6%
 over all points); turning 45+ deg makes it 3-4 times worse, and most points
 that move far have turned that much. Getting nearer or further changes
 nothing (0.013-0.022 at any depth change).
+
+## Matcher probe (scoring only, `scripts/probe_reader.py`)
+
+fyO's 3D matcher frozen (and, apart, TAPIP3D's released matcher weights in the
+same model); only a small reader trained (3,000 steps) to say, from the
+matcher's output alone, how far the truth is from a guess pushed up to 16 px
+off on each axis, then four reads from its own guesses. Val, 96k visible
+moving point-frames. Median error after the fourth read, by how far the point
+turned since frame 0:
+
+| matcher | 0-5 deg | 5-15 | 15-45 | 45+ | all |
+|---|---|---|---|---|---|
+| fyO's | 0.54 px | 0.71 | 1.32 | 6.19 | 1.17 |
+| TAPIP3D released | 0.84 px | 1.07 | 2.04 | 7.67 | 1.74 |
+
+The matcher itself loses points that have turned: 79% within 1 px when the
+surface faces the camera as in frame 0, 5% after 45+ deg. Training it inside
+our model made it better, not worse, and TAPIP3D's own matcher fails the same
+way, so it is the frame-0 template, not our training. The whole fyO model is
+better on turned points than its matcher alone (64-128 px moved, 45+ deg:
+2.9% of the distance against 6.2%), so the rest of the model makes up part
+of it.
