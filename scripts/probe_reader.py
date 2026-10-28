@@ -15,12 +15,21 @@ Scored on the run's own val clips the way the tracker uses it, four reads,
 each from the last one's guess, in the metric's pixels, and split, at the
 same distance moved, by how far the point turned since frame 0.
 
+With --out, the matcher and its reader also track on their own: from the
+query in frame 0, each frame starting where the last one ended, four reads a
+frame, nothing else of the model. Drawn on the first --clips val clips, the
+truth green and the matcher red.
+
   python scripts/probe_reader.py --ckpt outputs/fyO_joint_long/best.pt \\
-      [--fine-weights weights/tapip3d_finder.pt] [--push 16] [--steps 3000]
+      [--fine-weights weights/tapip3d_finder.pt] [--push 16] [--steps 3000] \\
+      [--out renders/matcher --clips 6]
 """
 
 import argparse
+from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from torch import nn
 
@@ -32,6 +41,7 @@ from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres
 from genpoint3d.train.tools.camera import project
+from render_tracks import colours, draw_frame, pixels, write_video
 from genpoint3d.train.tools.metrics import (_to_camera_t, appearance_change, change_table, motion_px,
                                             motion_table)
 
@@ -40,6 +50,9 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--fine-weights", default="", help="put these weights into the matcher instead")
 p.add_argument("--push", type=float, default=16.0)
 p.add_argument("--steps", type=int, default=3000)
+p.add_argument("--out", default="", help="also track on its own and draw it here")
+p.add_argument("--clips", type=int, default=6)
+p.add_argument("--draw", type=int, default=32, help="points drawn, the most moving first")
 args = p.parse_args()
 FRAMES_PER_CLIP = 6
 LOOKS = 4
@@ -164,3 +177,56 @@ for lo, hi in ((0, 5), (5, 15), (15, 45), (45, 180)):
     if m.sum():
         print(f"    turned {lo:g}-{hi:g}  n={int(m.sum()):<7} median {errs[-1][m].median():.2f}"
               f"  <1px {(errs[-1][m] < 1).float().mean():.3f}")
+
+
+if not args.out:
+    raise SystemExit(0)
+out = Path(args.out)
+out.mkdir(parents=True, exist_ok=True)
+names = [c.stem for c in clips.val]
+k = 0
+with torch.no_grad():
+    for batch in loaders.val:
+        b = to_device(batch, dev)
+        fine = fine_inputs(model, b)
+        fmap, proj, xyz = fine["fine_map"].float(), fine["fine_proj"].float(), fine["fine_xyz"].float()
+        B, T = fmap.shape[:2]
+        pos = model._lookup_pos(b["traj"].float(), b["anchor"].float())
+        gt = to_metres(b["traj"].float(), b)
+        cam = _to_camera_t(gt, b["extrinsics"])
+        focal = (b["intrinsics_256"][..., 0, 0] * b["intrinsics_256"][..., 1, 1]).sqrt()
+        to_px = (cam[..., 2].abs() / focal[..., None] / b["norm_scale"].float()[:, None, None])[..., None]
+        uv0 = project(b["anchor"].float()[:, None], proj[:, :1])[0][:, 0]
+        track = [pos[:, 0]]
+        for t in range(1, T):
+            d = dict(fmap=fmap[:, t:t + 1], fmap0=fmap[:, 0], xyz=xyz[:, t:t + 1], xyz0=xyz[:, 0],
+                     proj=proj[:, t:t + 1], uv0=uv0, pos0=b["anchor"].float())
+            guess = track[-1][:, None]
+            for _ in range(LOOKS):
+                guess = guess + reader(read(d, guess)) * args.push * to_px[:, t:t + 1]
+            track.append(guess[:, 0])
+        track = torch.stack(track, dim=1)
+        err = ((track - pos) / to_px).norm(dim=-1)                              # metric px
+        pr_m = to_metres(model._target_units(track, b["anchor"].float()), b)
+        vis = b["visibility"].bool()
+        moving = motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"])
+        for i in range(B):
+            name = names[k]
+            k += 1
+            one = {key: b[key][i:i + 1] for key in ("intrinsics", "extrinsics", "hw")}
+            pick = moving[i].argsort(descending=True)[: args.draw]
+            g, r = pixels(gt[i][:, pick], one), pixels(pr_m[i][:, pick], one)
+            v = vis[i][:, pick].cpu().numpy()
+            rgb = np.load(clips.frames / f"{name}.npy")
+            cols = colours(len(pick))
+            frames = [draw_frame(rgb[t], t, g, r, v, cols, 0) for t in range(T)]
+            codec = write_video(frames, out / f"{name}.mp4")
+            at = np.linspace(0, T - 1, 6).round().astype(int)
+            cv2.imwrite(str(out / f"{name}.png"), np.hstack([frames[t] for t in at]))
+            e = err[i][:, pick][vis[i][:, pick]]
+            print(f"  {name}  drawn points, seen frames: median {e.median():.2f} px"
+                  f"  <4px {(e < 4).float().mean():.3f}  last frame median"
+                  f" {err[i, -1, pick][vis[i, -1, pick]].median():.2f} px -> {out / name}.mp4 [{codec}]",
+                  flush=True)
+        if k >= args.clips:
+            break

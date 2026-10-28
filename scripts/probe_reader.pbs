@@ -3,6 +3,7 @@
 #
 #   qsub -v CKPT=outputs/fyO_joint_long/best.pt scripts/probe_reader.pbs
 #   qsub -v CKPT=outputs/fyO_joint_long/best.pt,FINE_WEIGHTS=weights/tapip3d_finder.pt scripts/probe_reader.pbs
+#   qsub -v CKPT=outputs/fyO_joint_long/best.pt,OUT=renders/matcher scripts/probe_reader.pbs
 #
 #PBS -N probe_reader
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
@@ -24,4 +25,6 @@ source $ROOT/venvs/fyp/bin/activate
 
 # FINE_WEIGHTS (relative to ~/scratch) puts other weights into the matcher.
 [ -n "${FINE_WEIGHTS:-}" ] && FW="--fine-weights $ROOT/$FINE_WEIGHTS" || FW=""
-python scripts/probe_reader.py --ckpt "$CKPT" $FW --push ${PUSH:-16} --steps ${STEPS:-3000}
+# OUT (relative to ~/scratch) also tracks with the matcher alone and draws it.
+[ -n "${OUT:-}" ] && O="--out $ROOT/$OUT --clips ${CLIPS:-6}" || O=""
+python scripts/probe_reader.py --ckpt "$CKPT" $FW --push ${PUSH:-16} --steps ${STEPS:-3000} $O
