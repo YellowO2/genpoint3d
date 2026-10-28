@@ -20,10 +20,12 @@ def set_up_model(model: PointDiT, settings, hardware: Hardware) -> PointDiT:
             # must land, and only the window's readers, which the
             # neighbourhood does not use, may be left as they are.
             missing, unexpected = model.fine.load_state_dict(sd, strict=False)
-            unused = ("corr_mlp.", "xyz_in", "wave_in")
+            unused = ("corr_mlp.", "xyz_in", "wave_in", "prev_transformers.")
             if unexpected or [k for k in missing if not k.startswith(unused)]:
                 raise ValueError(f"{settings.fine_init} does not fit this finder: missing "
                                  f"{missing}, unexpected {unexpected}")
+            if model.fine.prev:
+                model.fine.copy_prev()
             log.info(f"fine CNN and its comparison initialised from {settings.fine_init}")
         else:
             # Strict: a file that is not this CNN should not half-load.

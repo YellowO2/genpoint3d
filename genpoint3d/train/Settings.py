@@ -278,6 +278,12 @@ class Settings(argparse.Namespace):
                             "in 3D against the K nearest the query, compared by "
                             "attention (FineFinder._Neighbours). TAPIP3D uses 32; "
                             "0 keeps the window.")
+        p.add_argument("--fine-prev", type=int, default=0, choices=[0, 1],
+                       help="--fine-neigh only: also compare the guess's neighbourhood "
+                            "against the one at the guess in the frame before, which a "
+                            "turning surface has changed less from than from frame 0 "
+                            "(FineFinder._before), started as a copy of the frame-0 "
+                            "comparison.")
         p.add_argument("--virtual", type=int, default=0, metavar="M",
                        help="--dino 0 only: points meet through M learned virtual "
                             "tracks in each frame instead of attending to each "
@@ -351,6 +357,8 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if settings.fine_prev and not settings.fine_neigh:
+            p.error("--fine-prev compares 3D neighbourhoods, which needs --fine-neigh")
         if settings.fine_neigh and (not settings.fine_xyz or settings.fine_waves):
             p.error("--fine-neigh needs --fine-xyz, and encodes its own offsets (no --fine-waves)")
         if settings.fine_waves and not settings.fine_xyz:

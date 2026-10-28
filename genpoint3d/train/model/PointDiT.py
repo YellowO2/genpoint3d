@@ -82,6 +82,7 @@ class PointDiT(nn.Module):
         fine_waves: int = 0,
         fine_width: int = 64,
         fine_neigh: int = 0,
+        fine_prev: bool = False,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -318,7 +319,7 @@ class PointDiT(nn.Module):
         if fine_xyz and not fine:
             raise ValueError("fine_xyz adds to the relative finder, which needs fine")
         self.fine = (FineFinder(fine_levels, fine_radius, width=fine_width, xyz=fine_xyz,
-                                waves=fine_waves, neigh=fine_neigh) if fine else None)
+                                waves=fine_waves, neigh=fine_neigh, prev=fine_prev) if fine else None)
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)

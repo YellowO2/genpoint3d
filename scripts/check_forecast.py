@@ -79,6 +79,9 @@ CONFIGS = [
      "--window", "4", "--overlap", "2", "--causal", "0", "--motion-waves", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--window", "4",
      "--overlap", "2", "--cross-window", "9"],
+    # Each frame also compared against the frame before it.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
+     "--fine-prev", "1", "--window", "4", "--overlap", "2", "--causal", "0"],
 ]
 
 
