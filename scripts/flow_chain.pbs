@@ -1,0 +1,30 @@
+#!/bin/bash
+# Points carried by optical flow alone, scored like a run (scripts/flow_chain.py).
+#
+#   qsub -v CACHE=fit_check/tuO/val scripts/flow_chain.pbs
+#
+# Paths are relative to ~/scratch. Prints the depth floor (true pixels) first,
+# then the chained flow.
+#
+#PBS -N flow_chain
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -l walltime=00:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/flow_chain.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+
+A="--cache $ROOT/${CACHE:?} --frames $ROOT/cache/kubric_frames384 --flow $ROOT/cache/kubric_flow384"
+python scripts/flow_chain.py $A --truth
+python scripts/flow_chain.py $A
+
+echo "=== FLOW CHAIN DONE ==="
