@@ -167,3 +167,12 @@ alone (true pixels) costs 0.6 px and leaves moving APD 0.83 at frame 23.
 Far worse than the model everywhere, turned points included (4 times worse
 turned than unturned, as fyO's 3.6). Flow chained on its own does not follow
 turned points better; the all-clips flow cache is held.
+
+Each point moved with its object instead (`--object`): every step, one rigid
+move per object fitted to its visible points' flow and depth (objects and
+visibility from the truth), applied to all its points. Moving APD frame 12 /
+23: 0.509 / 0.409 (own-pixel chain 0.411 / 0.340, fyO 0.739 / 0.679).
+Error / moved at 64-128 px: 0.017 turned 0-5 deg, 0.048 turned 45+ (chain
+0.023 / 0.095, fyO 0.008 / 0.029). Half the chain's error on turned points,
+still worse than the model everywhere: chained over 23 steps with nothing
+looking back at frame 0, the drift dominates.
