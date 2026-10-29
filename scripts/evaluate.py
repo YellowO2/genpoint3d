@@ -268,6 +268,8 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="best.pt or ckpt.pt from a run")
     p.add_argument("--cache", required=True, help="cache DIRECTORY to score")
+    p.add_argument("--flow-cache", default=None,
+                   help="optical flow of --cache's clips (scripts/cache_flow.py), for a --flow-patch run")
     p.add_argument("--frames-cache", default=None,
                    help="--fine checkpoints only: RGB frames of --cache's clips,"
                         " from scripts/cache_frames.py at the checkpoint's --fine-res")
@@ -387,6 +389,7 @@ def main() -> int:
                                                    depth=bool(targs.get("fine_xyz", 0)))
                             if targs.get("fine", 0) else None),
                     features=bool(targs.get("dino", 1)),
+                    flow=Path(args.flow_cache) if targs.get("flow_patch", 0) else None,
                     depth=bool(targs.get("fine_xyz", 0))),
         batch_size=args.batch, shuffle=False, num_workers=4,
     )

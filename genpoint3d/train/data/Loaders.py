@@ -1,5 +1,7 @@
 """Batches of a run's clips: an endless stream to train on, and val passes."""
 
+from pathlib import Path
+
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.data.ClipDataset import ClipDataset
@@ -15,7 +17,8 @@ class Loaders:
         # What every loader shares: how a clip is turned into a sample.
         how_data = dict(norm_mode=settings.norm_mode, target=settings.target,
                         fix_idcard=bool(settings.fix_idcard), frames=clips.frames,
-                        features=clips.has_feats, depth=bool(settings.fine_xyz))
+                        features=clips.has_feats, depth=bool(settings.fine_xyz),
+                        flow=Path(settings.flow_cache) if settings.flow_patch else None)
         self.train = DataLoader(
             ClipDataset(clips.train, settings.points, **how_data),
             batch_size=settings.batch, shuffle=True, num_workers=settings.workers,

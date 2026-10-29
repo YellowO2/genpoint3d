@@ -15,6 +15,9 @@ from genpoint3d.train.tools.metrics import resize_intrinsics
 # The name each clip's depth has beside its frames: `<clip>.depth.npy`, as
 # `scripts/cache_frames.py` writes it.
 DEPTH = ".depth.npy"
+# And each clip's optical flow, from `scripts/cache_flow.py`: `<clip>.flow.npy`
+# in a directory of its own.
+FLOW = ".flow.npy"
 
 
 class ClipDataset(Dataset):
@@ -34,7 +37,7 @@ class ClipDataset(Dataset):
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
                  norm_mode: str = "median", target: str = "absolute",
                  fix_idcard: bool = True, frames: Path | None = None,
-                 features: bool = True, depth: bool = False):
+                 features: bool = True, depth: bool = False, flow: Path | None = None):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         # The RGB frames, for the relative finder: a directory from
         # `scripts/cache_frames.py` (checked by `frames_dir`) holding one uint8 array per clip, named
@@ -45,6 +48,9 @@ class ClipDataset(Dataset):
         # And beside each clip's frames its depth at every CNN cell, for a
         # finder that reads where each cell is in 3D (`--fine-xyz`).
         self.depth = depth
+        # And a directory of each clip's optical flow between neighbouring
+        # frames, for `--flow-patch`.
+        self.flow = flow
         # Off serves no DINOv3 feature, ID card or patch position at all, for
         # a model that is to track from the CNN alone.
         self.features = features
@@ -138,6 +144,12 @@ class ClipDataset(Dataset):
         depth = torch.zeros(0)
         if self.depth:
             depth = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}{DEPTH}"))
+        flow = torch.zeros(0)
+        if self.flow is not None:
+            # The backward flow, frame t -> t-1, served at frame t: where
+            # what is at each cell now came from. Frame 0 has none: zeros.
+            back = torch.from_numpy(np.load(self.flow / f"{clip.seq_id}{FLOW}")[1])
+            flow = torch.cat([torch.zeros_like(back[:1]), back])
         norm = clip.norm(self.norm_mode, traj_scale=self.traj_scale)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis,
@@ -149,6 +161,9 @@ class ClipDataset(Dataset):
             "frames": frames,
             # (T, R / 4, R / 4) float32 z-depth in metres at each CNN cell.
             "depth": depth,
+            # (T, 2, R / 4, R / 4) float16: at frame t, how each CNN cell moved
+            # since frame t-1, as a fraction of the frame (0 at frame 0).
+            "flow": flow,
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
             # The benchmark's pixel thresholds are defined on a frame whose

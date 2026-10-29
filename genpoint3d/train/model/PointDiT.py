@@ -83,6 +83,7 @@ class PointDiT(nn.Module):
         fine_width: int = 64,
         fine_neigh: int = 0,
         fine_prev: bool = False,
+        flow_patch: int = 0,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -323,6 +324,20 @@ class PointDiT(nn.Module):
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
+        # [flow patch] the optical flow since the frame before at the
+        # (2R+1)^2 CNN cells around each guess, read like the finder's window:
+        # where the surface around the point moved, which a turn shows as a
+        # swirl across the patch. Zero at first, like the finder's own way in.
+        self.flow_patch = flow_patch
+        if flow_patch:
+            if not fine:
+                raise ValueError("the flow patch is read at the finder's guess, which needs fine")
+            k = (2 * flow_patch + 1) ** 2 * 2
+            r = torch.arange(-flow_patch, flow_patch + 1, dtype=torch.float32)
+            dy, dx = torch.meshgrid(r, r, indexing="ij")
+            self.register_buffer("flow_delta", torch.stack([dx, dy], -1).reshape(-1, 2), persistent=False)
+            self.flow_cond = zero_init(nn.Linear(k, cond_dim), almost=False)
+            self.flow_tok = zero_init(nn.Linear(k, dim, bias=False), almost=False)
 
         # [visibility head] one logit per (point, frame): can the model see the
         # point there? Not when it is occluded, out of the frame, or in a
@@ -437,6 +452,20 @@ class PointDiT(nn.Module):
         with torch.autocast(device_type=context.device.type, enabled=False):
             return self._cosine(context.float(), id_card.float())
 
+    def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
+        """flow (B, T, 2, h, w), uv (B, T, N, 2) the guess in [0, 1] ->
+        (B, T, N, (2R+1)^2 * 2): the flow at the cells around each guess, in
+        cells. Cell j is centred at `(j + 1/8) / w` (FineFinder's docstring);
+        outside the frame it reads 0."""
+        B, T, _, h, w = flow.shape
+        N = uv.shape[2]
+        cell = uv.float() * uv.new_tensor([w, h]) - 0.125
+        grid = cell[:, :, :, None] + self.flow_delta                              # (B, T, N, K, 2)
+        grid = 2 * grid / grid.new_tensor([w - 1, h - 1]) - 1
+        out = F.grid_sample(flow.flatten(0, 1).float(), grid.flatten(0, 1), align_corners=True)
+        out = out * out.new_tensor([w, h])[:, None, None]                        # fraction -> cells
+        return out.permute(0, 2, 3, 1).reshape(B, T, N, -1)
+
     def _lookup_pos(self, x: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
         """Where each point currently thinks it is, in `patch_xyz`'s space.
 
@@ -529,6 +558,7 @@ class PointDiT(nn.Module):
         fine_map: torch.Tensor | None = None,
         fine_proj: torch.Tensor | None = None,
         fine_xyz: torch.Tensor | None = None,
+        fine_flow: torch.Tensor | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
@@ -557,6 +587,10 @@ class PointDiT(nn.Module):
         fine_xyz:    (B, T, 3, h, w) each CNN cell's 3D position, `anchor`'s
                                      space, from its depth. Required with
                                      `fine_map` for a finder with `fine_xyz`.
+        fine_flow:   (B, T, 2, h, w) at each CNN cell, how it moved since the
+                                     frame before, as a fraction of the frame
+                                     (0 at frame 0). Required by a model built
+                                     with `flow_patch`, refused by any other.
 
         visibility:  bool            also return the visibility head's
                                      logits, (B, T, N); a model built with it
@@ -584,9 +618,9 @@ class PointDiT(nn.Module):
             if self.costvol:
                 raise ValueError("the cost volume's support is read in the frames it is given")
             cut = slice(*frames)
-            context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz = (
+            context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow = (
                 None if t is None else t[:, cut]
-                for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz))
+                for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow))
         # Every image reading below is per point once it has been looked up
         # (the match, the cost volume, the finder, the distances), so a mask
         # per point blanks it exactly. The feature map itself is shared by a
@@ -679,7 +713,7 @@ class PointDiT(nn.Module):
         # support window is read around the anchor's own projection into frame
         # 0 rather than around the cached query pixel, so both windows go
         # through one camera model and cannot disagree by a convention.
-        fine = None
+        fine = flow = None
         if self.fine is not None and fine_map is not None:
             with torch.autocast(device_type=dev.type, enabled=False):
                 proj = fine_proj.float()
@@ -699,6 +733,12 @@ class PointDiT(nn.Module):
             fine = self.fine(fine_map, query_map, uv, uv0[:, 0], **places)
             if point_mask is not None:
                 fine = fine * point_mask[..., None]
+            if bool(self.flow_patch) != (fine_flow is not None):
+                raise ValueError("fine_flow is given exactly to a model built with flow_patch")
+            if fine_flow is not None:
+                flow = self._flow_patch(fine_flow, uv)
+                if point_mask is not None:
+                    flow = flow * point_mask[..., None]
             if self.tap is not None:
                 step, logits = self.tap(fine, pos, uv, vis_prev, point_mask)
                 return (step, logits) if visibility else step
@@ -779,6 +819,8 @@ class PointDiT(nn.Module):
             cond = cond + self.cv_gate * cv.to(cond.dtype)   # "and this is the fit"
         if fine is not None:
             cond = cond + self.fine_cond(fine).to(cond.dtype)  # "and this, to the pixel"
+        if flow is not None:
+            cond = cond + self.flow_cond(flow).to(cond.dtype)  # "and how it turned"
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         # --- [feature adapter] raw backbone width -> model width, plus position ---
@@ -849,6 +891,8 @@ class PointDiT(nn.Module):
                 h = h + self.match_more(match[..., 5:])
         if fine is not None:
             h = h + self.fine_tok(fine).to(h.dtype)
+        if flow is not None:
+            h = h + self.flow_tok(flow).to(h.dtype)
         if self.vis_feedback != (vis_prev is not None):
             raise ValueError("vis_prev is given exactly when the model was built with vis_feedback")
         if vis_prev is not None:

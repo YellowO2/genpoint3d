@@ -59,6 +59,8 @@ POINTS=${POINTS:-}
 # --fine-xyz 1).
 FRAMES=${FRAMES:-}
 [ -n "$FRAMES" ] && FR="--frames-cache $ROOT/$FRAMES" || FR=""
+# FLOW=cache/kubric_flow384 is the optical flow, which a --flow-patch run needs.
+[ -n "${FLOW:-}" ] && FR="$FR --flow-cache $ROOT/$FLOW"
 # ITERS=8 overrides a regress checkpoint's refinement iterations at test time.
 ITERS=${ITERS:-}
 [ -n "$ITERS" ] && IT="--refine-iters $ITERS" || IT=""

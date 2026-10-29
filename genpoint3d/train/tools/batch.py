@@ -24,8 +24,8 @@ def to_device(batch: dict, device, amp: bool = False) -> dict:
     b = {k: v.to(device) for k, v in batch.items()}
     for k in ("context", "id_card", "patch_xyz"):
         b[k] = None if b[k].numel() == 0 else b[k].float()
-    for k in ("frames", "depth"):
-        if b[k].numel() == 0:
+    for k in ("frames", "depth", "flow"):
+        if k in b and b[k].numel() == 0:
             b[k] = None
     return b
 
@@ -183,6 +183,11 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
             raise ValueError("this finder reads each cell's depth, and the batch has "
                              "none: load the clips with depth (--fine-xyz 1)")
         out["fine_xyz"] = _cell_xyz(b["depth"].float(), proj)
+    if model.flow_patch:
+        if b.get("flow") is None:
+            raise ValueError("this model reads the optical flow around each guess, and the "
+                             "batch has none: load the clips with --flow-cache")
+        out["fine_flow"] = b["flow"].float()
     return out
 
 

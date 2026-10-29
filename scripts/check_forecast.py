@@ -79,6 +79,10 @@ CONFIGS = [
      "--window", "4", "--overlap", "2", "--causal", "0", "--motion-waves", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--window", "4",
      "--overlap", "2", "--cross-window", "9"],
+    # Each point also given the flow around its guess.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
+     "--flow-patch", "2", "--flow-cache", "unused", "--window", "4", "--overlap", "2",
+     "--causal", "0"],
     # Each frame also compared against the frame before it.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
      "--fine-prev", "1", "--window", "4", "--overlap", "2", "--causal", "0"],
@@ -98,6 +102,7 @@ def batch_from(cache: Path, points: int) -> dict:
     B, T = b["traj"].shape[:2]
     b["frames"] = torch.randint(0, 256, (B, T, RES, RES, 3), dtype=torch.uint8)
     b["depth"] = torch.rand(B, T, RES // 4, RES // 4) * 10 + 1
+    b["flow"] = torch.randn(B, T, 2, RES // 4, RES // 4) * 0.02
     return b
 
 
@@ -110,6 +115,7 @@ def changed(b: dict, frames: slice) -> dict:
     c["patch_xyz"][:, frames] = torch.randn_like(c["patch_xyz"][:, frames]) * 5
     c["frames"][:, frames] = torch.randint_like(c["frames"][:, frames], 0, 256)
     c["depth"][:, frames] = torch.rand_like(c["depth"][:, frames]) * 30 + 0.5
+    c["flow"][:, frames] = torch.randn_like(c["flow"][:, frames])
     c["intrinsics"][:, frames, :2] *= 1.5
     c["extrinsics"][:, frames, :3, 3] += torch.randn_like(c["extrinsics"][:, frames, :3, 3])
     return c

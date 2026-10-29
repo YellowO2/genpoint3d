@@ -284,6 +284,13 @@ class Settings(argparse.Namespace):
                             "turning surface has changed less from than from frame 0 "
                             "(FineFinder._before), started as a copy of the frame-0 "
                             "comparison.")
+        p.add_argument("--flow-patch", type=int, default=0, metavar="R",
+                       help="--fine only: each round, also give every point the optical "
+                            "flow since the frame before (SEA-RAFT, cached) at the "
+                            "(2R+1)^2 CNN cells around its guess: how the surface there "
+                            "moved, a turn showing as a swirl. 0 off.")
+        p.add_argument("--flow-cache", default=None,
+                       help="--flow-patch: the clips' optical flow, from scripts/cache_flow.py")
         p.add_argument("--virtual", type=int, default=0, metavar="M",
                        help="--dino 0 only: points meet through M learned virtual "
                             "tracks in each frame instead of attending to each "
@@ -357,6 +364,8 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if settings.flow_patch and not (settings.fine and settings.flow_cache):
+            p.error("--flow-patch reads the flow at the finder's guess: needs --fine 1 and --flow-cache")
         if settings.fine_prev and not settings.fine_neigh:
             p.error("--fine-prev compares 3D neighbourhoods, which needs --fine-neigh")
         if settings.fine_neigh and (not settings.fine_xyz or settings.fine_waves):

@@ -28,6 +28,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 
 | fyO | fyN at 6,000 steps (the joint model, long; for the weekly report) | | stopped by its 12 h limit after step 5,000; best.pt = step 5,000 | standard scoring: val 0.911 / train 0.919 (last week 0.878 / 0.928), moving hidden val 0.401 (0.283); forecast (frames 12-23 blank): moving future 0.380 (freeze own 0.306, freeze true 0.322, true last speed 0.310; last week 0.293), seen moving 0.892 |
 | fyP | fyO with each frame also compared against the frame before it (`--fine-prev 1`), the second comparison started as a copy of the first | turned moving points closer than fyO at the same step | val seen moving (frames 12-23 blank) 0.872 / 0.892 / 0.903 at steps 1k / 2k / 3k vs fyO 0.841 / 0.868 / 0.881; moving hidden 0.575 vs 0.524 at 3k; forecast moving 0.376 vs 0.361; 10.8 s/step vs fyO 6.8 | does a recent-frame template fix the turned points |
+| fyQ | fyP with each point also given SEA-RAFT's flow since the frame before at the 5 x 5 CNN cells around its guess (`--flow-patch 2`) | turned moving points closer than fyP at the same step | | does the motion of the surface around a point fix the turned points |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
