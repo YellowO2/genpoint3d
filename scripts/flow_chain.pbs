@@ -3,8 +3,8 @@
 #
 #   qsub -v CACHE=fit_check/tuO/val scripts/flow_chain.pbs
 #
-# Paths are relative to ~/scratch. Prints the depth floor (true pixels) first,
-# then the chained flow.
+# Paths are relative to ~/scratch. Prints the depth floor (true pixels), the
+# chained flow, then each point moved with its object.
 #
 #PBS -N flow_chain
 #PBS -l select=1:ncpus=8:mem=32gb
@@ -24,7 +24,9 @@ module load python/3.11.7-gcc11
 source $ROOT/venvs/fyp/bin/activate
 
 A="--cache $ROOT/${CACHE:?} --frames $ROOT/cache/kubric_frames384 --flow $ROOT/cache/kubric_flow384"
-python scripts/flow_chain.py $A --truth
-python scripts/flow_chain.py $A
+# MODES="--truth|none|--object", run in turn ("none" is the plain chain).
+for M in ${MODES:---truth none --object}; do
+  python scripts/flow_chain.py $A $([ "$M" = none ] || echo $M)
+done
 
 echo "=== FLOW CHAIN DONE ==="

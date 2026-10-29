@@ -17,6 +17,15 @@ with that run's.
 
 `--truth` carries the points by their true pixels instead of the flow: what is
 left is the error of reading the depth at a cell, the floor this test has.
+
+`--object` moves each point with its object instead of with its own pixel:
+every step, the one rigid move that best carries the object's visible points
+to where their flow and depth put them in the next frame, applied to all of
+them, the hidden ones too. The cache keeps no object ids, so an object is a
+point's rigid companions among all of the clip's cached points (truth, as in
+`appearance_change`), and which of them are visible is the truth's too: both
+stand in for what a model would have to work out. Scored on the first
+--points, the ones a run is scored on.
 """
 
 import argparse
@@ -45,6 +54,54 @@ def at_cells(grid: torch.Tensor, uv: torch.Tensor, mode: str) -> torch.Tensor:
     return F.grid_sample(grid.float(), g[:, :, None], mode=mode, align_corners=True)[..., 0].transpose(1, 2)
 
 
+def kabsch(src: torch.Tensor, dst: torch.Tensor, w: torch.Tensor):
+    """src, dst (B, M, 3), w (B, N, M) -> for each of the N rows, the rotation
+    (B, N, 3, 3) and shift (B, N, 3) that best carry the weighted src onto dst."""
+    tot = w.sum(-1, keepdim=True).clamp_min(1e-9)
+    cs, cd = (w @ src) / tot, (w @ dst) / tot                                 # (B, N, 3)
+    a, b = src[:, None] - cs[:, :, None], dst[:, None] - cd[:, :, None]       # (B, N, M, 3)
+    H = torch.einsum("bnm,bnmx,bnmy->bnxy", w, a, b)
+    U, _, Vh = torch.linalg.svd(H)
+    flip = torch.ones_like(U[..., 0])
+    flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
+    R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
+    return R, cd - torch.einsum("bnxy,bny->bnx", R, cs)
+
+
+def object_track(flow, depth, proj, vis, gt_scene, tol_scene):
+    """(B, T, N, 3) scene units: every point carried by its object's rigid
+    move, fitted each step from the flow of the object's points visible in
+    both frames. A point with fewer than 3 of those keeps the move its object
+    made the step before."""
+    B, T, N, _ = gt_scene.shape
+    d = (gt_scene[:, :, :, None] - gt_scene[:, :, None]).norm(dim=-1)
+    group = ((d - d[:, :1]).abs().amax(dim=1) < tol_scene[:, None, None]).float()   # (B, N, N), self in
+    pos = [gt_scene[:, 0]]
+    R = torch.eye(3).expand(B, N, 3, 3).clone()
+    shift = torch.zeros(B, N, 3)
+    for t in range(T - 1):
+        uv, _ = project(pos[-1][:, None], proj[:, t:t + 1])
+        uv = uv[:, 0]
+        nxt = uv + at_cells(flow[:, t], uv, "bilinear")
+        z = at_cells(depth[:, t + 1, None], nxt, "nearest")[..., 0]
+        moved = unproject(nxt[:, None], z[:, None], proj[:, t + 1:t + 2])[:, 0]  # (B, N, 3)
+        both = (vis[:, t] & vis[:, t + 1]).float()
+        w = group * both[:, None]
+        R_new, s_new = kabsch(pos[-1], moved, w)
+        # One pass without the worst-fitting quarter of each object's points.
+        res = (torch.einsum("bnxy,bmy->bnmx", R_new, pos[-1]) + s_new[:, :, None] - moved[:, None]).norm(dim=-1)
+        cut = torch.where(w > 0, res, torch.full_like(res, float("inf")))
+        q = torch.nanquantile(torch.where(w > 0, res, torch.full_like(res, float("nan"))), 0.75, dim=-1,
+                              keepdim=True)
+        w2 = w * (cut <= q.nan_to_num(float("inf"))).float()
+        R_new, s_new = kabsch(pos[-1], moved, w2)
+        ok = (w2.sum(-1) >= 3)[..., None]
+        R = torch.where(ok[..., None], R_new, R)
+        shift = torch.where(ok, s_new, shift)
+        pos.append(torch.einsum("bnxy,bny->bnx", R, pos[-1]) + shift)
+    return torch.stack(pos, dim=1)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--cache", required=True)
@@ -52,10 +109,11 @@ def main() -> int:
     p.add_argument("--flow", required=True)
     p.add_argument("--points", type=int, default=128)
     p.add_argument("--truth", action="store_true")
+    p.add_argument("--object", action="store_true", help="move each point with its object")
     args = p.parse_args()
 
     clips = sorted(Path(args.cache).glob("*.pt"))
-    ds = ClipDataset(clips, args.points, resample=False, norm_mode="median", target="displacement",
+    ds = ClipDataset(clips, 256 if args.object else args.points, resample=False, norm_mode="median", target="displacement",
                      fix_idcard=True, frames=Path(args.frames), features=False, depth=True)
     loader = DataLoader(ds, batch_size=8, shuffle=False, num_workers=2)
     errs, disps, turns, vals = [], [], [], None
@@ -70,16 +128,23 @@ def main() -> int:
         scene = (gt - b["norm_mean"][:, None, None]) / b["norm_scale"][:, None, None, None]
         uv_true, _ = project(scene, proj)                                      # (B, T, N, 2)
         T = gt.shape[1]
-        uv = [uv_true[:, 0]]
-        for t in range(T - 1):
-            nxt = uv_true[:, t + 1] if args.truth else uv[-1] + at_cells(flow[:, t], uv[-1], "bilinear")
-            uv.append(nxt)
-        uv = torch.stack(uv, dim=1)
-        depth = torch.stack([at_cells(b["depth"][:, t, None], uv[:, t], "nearest")[..., 0]
-                             for t in range(T)], dim=1)                        # (B, T, N)
-        pr = unproject(uv, depth, proj.float())
-        pr_m = pr * b["norm_scale"][:, None, None, None] + b["norm_mean"][:, None, None]
         vis = b["visibility"].bool()
+        if args.object:
+            pr = object_track(flow.float(), b["depth"].float(), proj.float(), vis, scene.float(),
+                              0.02 / b["norm_scale"].float())
+        else:
+            uv = [uv_true[:, 0]]
+            for t in range(T - 1):
+                nxt = uv_true[:, t + 1] if args.truth else uv[-1] + at_cells(flow[:, t], uv[-1], "bilinear")
+                uv.append(nxt)
+            uv = torch.stack(uv, dim=1)
+            depth = torch.stack([at_cells(b["depth"][:, t, None], uv[:, t], "nearest")[..., 0]
+                                 for t in range(T)], dim=1)                    # (B, T, N)
+            pr = unproject(uv, depth, proj.float())
+        pr_m = pr * b["norm_scale"][:, None, None, None] + b["norm_mean"][:, None, None]
+        # Scored on the run's own points, the first --points.
+        n = args.points
+        pr_m, gt, vis = pr_m[:, :, :n], gt[:, :, :n], vis[:, :, :n]
         e, d = error_and_motion(pr_m, gt, vis, b["intrinsics_256"], b["extrinsics"])
         errs.append(e); disps.append(d)
         a, _ = appearance_change(gt, b["extrinsics"])
@@ -97,7 +162,9 @@ def main() -> int:
             vals[t].append(m["average_pts_within_thresh"])
 
     err, disp, turn = torch.cat(errs), torch.cat(disps), torch.cat(turns)
-    print(f"{len(clips)} clips | {'true pixels (the depth floor)' if args.truth else 'chained SEA-RAFT flow'}")
+    how = ("each point moved with its object, from SEA-RAFT flow" if args.object
+           else "true pixels (the depth floor)" if args.truth else "chained SEA-RAFT flow")
+    print(f"{len(clips)} clips | {how}")
     print("\n    every seen point after frame 0: error against how far it has moved")
     print(motion_table(err, disp))
     known = ~turn.isnan()
