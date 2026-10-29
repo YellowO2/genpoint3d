@@ -150,3 +150,20 @@ Error / moved for points turned 45+ deg, fyP (3,000 steps) against fyO (5,000):
 Moving points by frame: frame 12 0.765 vs 0.739, frame 23 0.701 vs 0.679.
 The frame before closes about a fifth of the gap between turned and unturned
 points; turned points are still 3 times further off.
+
+## Points carried by optical flow alone (scoring only, `scripts/flow_chain.py`)
+
+SEA-RAFT (spring-M, frozen) flow between neighbouring frames, chained from
+each query point, at the frames cache's depth; nothing looks back at frame 0.
+fyO's 100 val clips and points. Reading the depth at the nearest 4 px cell
+alone (true pixels) costs 0.6 px and leaves moving APD 0.83 at frame 23.
+
+| | chained flow | fyO |
+|---|---|---|
+| moving APD, frame 12 / 23 | 0.411 / 0.340 | 0.739 / 0.679 |
+| error / moved, 64-128 px, turned 0-5 deg | 0.023 | 0.008 |
+| error / moved, 64-128 px, turned 45+ deg | 0.095 | 0.029 |
+
+Far worse than the model everywhere, turned points included (4 times worse
+turned than unturned, as fyO's 3.6). Flow chained on its own does not follow
+turned points better; the all-clips flow cache is held.
