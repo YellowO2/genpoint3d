@@ -135,3 +135,9 @@ way, so it is the frame-0 template, not our training. The whole fyO model is
 better on turned points than its matcher alone (64-128 px moved, 45+ deg:
 2.9% of the distance against 6.2%), so the rest of the model makes up part
 of it.
+
+## Decision 2026-10-29: drop the whole-frame match from the next run on
+
+`--correlate 0`. It hands the model only where the best-looking patch is,
+not what the patch shows; DINOv3's meaning reaches the points through the
+cross-attention, which stays. About 15% of a step. Not tested on its own.
