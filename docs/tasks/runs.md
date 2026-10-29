@@ -141,3 +141,12 @@ of it.
 `--correlate 0`. It hands the model only where the best-looking patch is,
 not what the patch shows; DINOv3's meaning reaches the points through the
 cross-attention, which stays. About 15% of a step. Not tested on its own.
+
+## Drift by turn on the frame-before matcher (fyP, step 3,000; scoring only, PER_FRAME)
+
+Error / moved for points turned 45+ deg, fyP (3,000 steps) against fyO (5,000):
+16-32 px moved 0.082 vs 0.091, 32-64 px 0.042 vs 0.042, 64-128 px 0.024 vs
+0.029, 128+ px 0.020 vs 0.026. Points that barely turned unchanged (0.007-0.008).
+Moving points by frame: frame 12 0.765 vs 0.739, frame 23 0.701 vs 0.679.
+The frame before closes about a fifth of the gap between turned and unturned
+points; turned points are still 3 times further off.
