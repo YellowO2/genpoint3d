@@ -15,4 +15,6 @@ def merge_scores(interval: Interval, scores: dict, fit_scores: dict | None) -> R
         merged["train_match_loss"] = interval.match_loss
     if interval.vis_loss is not None:
         merged["train_vis_loss"] = interval.vis_loss
+    if interval.depth_loss is not None:
+        merged["train_depth_loss"] = interval.depth_loss
     return Report(step=interval.step, train_loss=interval.train_loss, scores=merged)

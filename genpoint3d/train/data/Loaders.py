@@ -17,7 +17,7 @@ class Loaders:
         # What every loader shares: how a clip is turned into a sample.
         how_data = dict(norm_mode=settings.norm_mode, target=settings.target,
                         fix_idcard=bool(settings.fix_idcard), frames=clips.frames,
-                        features=clips.has_feats, depth=bool(settings.fine_xyz),
+                        features=clips.has_feats, depth=bool(settings.fine_xyz or settings.depth_loss),
                         flow=Path(settings.flow_cache) if settings.flow_patch else None)
         self.train = DataLoader(
             ClipDataset(clips.train, settings.points, **how_data),

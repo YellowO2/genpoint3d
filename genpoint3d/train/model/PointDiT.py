@@ -84,6 +84,7 @@ class PointDiT(nn.Module):
         fine_neigh: int = 0,
         fine_prev: bool = False,
         flow_patch: int = 0,
+        depth_head: bool = False,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -324,6 +325,16 @@ class PointDiT(nn.Module):
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
+        # [depth head] every cell of the CNN's map says its log depth, from the
+        # pixels alone: dense supervision of what the matcher reads. Trained
+        # by `tools/depth.py`'s loss; the forward pass never calls it.
+        self.depth_head = None
+        if depth_head:
+            if not fine:
+                raise ValueError("the depth head reads the finder's CNN, which needs fine")
+            c = self.fine.fnet.conv3.out_channels
+            self.depth_head = nn.Sequential(nn.Conv2d(c, 64, 3, padding=1), nn.GELU(),
+                                            nn.Conv2d(64, 1, 1))
         # [flow patch] the optical flow since the frame before at the
         # (2R+1)^2 CNN cells around each guess, read like the finder's window:
         # where the surface around the point moved, which a turn shows as a

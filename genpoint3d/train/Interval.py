@@ -16,3 +16,6 @@ class Interval:
     # The mean visibility loss over the same steps, with --vis-loss; None
     # without it.
     vis_loss: float | None
+    # The mean depth loss over the same steps, with --depth-loss; None
+    # without it.
+    depth_loss: float | None = None

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
+from genpoint3d.train.tools.depth import depth_loss
 from genpoint3d.train.tools.batch import (
     apd_weight, fine_inputs, hidden_weight, known_frame0, match_targets, random_cutoff,
     rigid_pairs, to_device, visual_mask,
@@ -58,6 +59,15 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
         (ml * settings.match_loss_weight / settings.accum).backward()
         match = ml.item() / settings.accum
         del scores, ml
+    depth = 0.0
+    if settings.depth_loss:
+        # Its own backward, once per step: it leaves its gradient on the
+        # feature map with the method's, for the replay to carry into the CNN.
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            dl = depth_loss(model.depth_head, fine["fine_map"], b["depth"])
+        (dl * settings.depth_loss / settings.accum).backward()
+        depth = dl.item() / settings.accum
+        del dl
     # Divided by accum so the accumulated gradient is the mean over
     # the effective batch, not its sum -- otherwise the gradient norm
     # scales with accum and clipping would bite differently.
@@ -92,7 +102,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
             model.fine.replay(b["frames"], fine["fine_map"])
         del fine
     return Losses(method=loss.item() / settings.accum, match=match,
-                  visibility=parts["visibility"].item() / settings.accum)
+                  visibility=parts["visibility"].item() / settings.accum, depth=depth)
 
 
 # Change how a training clip looks, never where anything is.

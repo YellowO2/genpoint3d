@@ -31,5 +31,15 @@ def set_up_model(model: PointDiT, settings, hardware: Hardware) -> PointDiT:
             # Strict: a file that is not this CNN should not half-load.
             model.fine.fnet.load_state_dict(sd)
             log.info(f"fine CNN initialised from {settings.fine_init}")
+    if settings.init:
+        # Every weight this model shares with the run, by name and shape; a
+        # part that is new or has changed shape starts as it would without.
+        old = torch.load(settings.init, map_location="cpu", weights_only=False)["model"]
+        own = model.state_dict()
+        same = {k: v for k, v in old.items() if k in own and own[k].shape == v.shape}
+        model.load_state_dict(same, strict=False)
+        new = [k for k in own if k not in same]
+        log.info(f"started from {settings.init}: {len(same)} of {len(own)} weights;"
+                 f" new or reshaped: {', '.join(new) if new else 'none'}")
     log.info(f"model {model.num_parameters() / 1e6:.2f}M params")
     return model

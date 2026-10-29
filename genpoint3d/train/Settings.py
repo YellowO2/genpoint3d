@@ -284,6 +284,17 @@ class Settings(argparse.Namespace):
                             "turning surface has changed less from than from frame 0 "
                             "(FineFinder._before), started as a copy of the frame-0 "
                             "comparison.")
+        p.add_argument("--depth-loss", type=float, default=0.0, metavar="W",
+                       help="--fine only: a small head on the CNN's map also says the "
+                            "depth of every cell of every frame, from the pixels alone, "
+                            "scored against the true depth by the scale-invariant log "
+                            "error (tools/depth.py), weighted W. Dense supervision of "
+                            "the CNN the matcher reads; nothing reads the depth it says. "
+                            "0 leaves it out.")
+        p.add_argument("--init", default=None, metavar="CKPT",
+                       help="start from this run's weights wherever this model has a "
+                            "weight of the same name and shape; the rest start as they "
+                            "would (new parts at zero). After --fine-init.")
         p.add_argument("--flow-patch", type=int, default=0, metavar="R",
                        help="--fine only: each round, also give every point the optical "
                             "flow since the frame before (SEA-RAFT, cached) at the "
@@ -364,6 +375,8 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if settings.depth_loss and not settings.fine:
+            p.error("--depth-loss is a head on the finder's CNN: needs --fine 1")
         if settings.flow_patch and not (settings.fine and settings.flow_cache):
             p.error("--flow-patch reads the flow at the finder's guess: needs --fine 1 and --flow-cache")
         if settings.fine_prev and not settings.fine_neigh:
