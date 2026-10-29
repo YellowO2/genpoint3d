@@ -7,7 +7,7 @@
 # Paths are relative to ~/scratch. Needs a SEA-RAFT clone at
 # references/searaft/repo and its weights at weights/searaft-spring-M
 # (huggingface_hub.snapshot_download of MemorySlices/Tartan-C-T-TSKH-spring540x960-M).
-# Resubmitting resumes.
+# ONLY=fit_check/tuO/val does just that directory's clips. Resubmitting resumes.
 #
 #PBS -N cache_flow
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
@@ -28,6 +28,6 @@ module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
 
 python scripts/cache_flow.py --frames $ROOT/${FRAMES:?} --dst $ROOT/${DST:?} \
-  --repo references/searaft/repo --weights $ROOT/weights/searaft-spring-M ${LIMIT:+--limit $LIMIT}
+  --repo references/searaft/repo --weights $ROOT/weights/searaft-spring-M ${LIMIT:+--limit $LIMIT} ${ONLY:+--only $ROOT/$ONLY}
 
 echo "=== CACHE FLOW DONE ==="

@@ -73,6 +73,7 @@ def main() -> int:
     p.add_argument("--weights", required=True, help="a snapshot of its HuggingFace weights")
     p.add_argument("--cfg", default="spring-M.json")
     p.add_argument("--limit", type=int, default=0, help="only the first N clips")
+    p.add_argument("--only", default="", help="only the clips of this feature cache directory")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,6 +82,9 @@ def main() -> int:
     dst = Path(args.dst)
     dst.mkdir(parents=True, exist_ok=True)
     clips = sorted(f for f in Path(args.frames).glob("*.npy") if not f.name.endswith(".depth.npy"))
+    if args.only:
+        keep = {c.stem for c in Path(args.only).glob("*.pt")}
+        clips = [c for c in clips if c.stem in keep]
     if args.limit:
         clips = clips[: args.limit]
     todo = [c for c in clips if not (dst / f"{c.stem}{FLOW}").exists()]
