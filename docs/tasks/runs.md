@@ -184,3 +184,14 @@ Error / moved at 64-128 px: 0.017 turned 0-5 deg, 0.048 turned 45+ (chain
 0.023 / 0.095, fyO 0.008 / 0.029). Half the chain's error on turned points,
 still worse than the model everywhere: chained over 23 steps with nothing
 looking back at frame 0, the drift dominates.
+
+## The fit against its control, by distance moved (scoring only, PER_FRAME, dense cache, 500 points)
+
+fyV (fit in rounds 1-2, step 1,000) against fyT (no fit, step 500), median
+error: 1.44 vs 1.83 px past 128 px moved, 0.76 vs 1.00 at 64-128, turned 45+
+at 64-128 px 1.4% vs 1.8% of the distance; moving hidden APD 0.608 vs 0.542,
+moving seen late 0.759 vs 0.746; but 0.52 vs 0.29 px at 1-4 px moved, 0.82 vs
+0.37 at 4-8. The fit carries the large motions and the turns and costs the
+small ones. The turn-aware matcher (fyW) against fyV continued (fyV2) at
+250 / 500: seen moving 0.915 / 0.922 vs 0.913 / 0.921, moving hidden 0.749 /
+0.766 vs 0.744 / 0.758: close to neutral.
