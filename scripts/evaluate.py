@@ -268,10 +268,6 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="best.pt or ckpt.pt from a run")
     p.add_argument("--cache", required=True, help="cache DIRECTORY to score")
-    p.add_argument("--gate", default=None,
-                   help="a --rigid-fit run: hold every point's gate at this value (1 = the "
-                        "fitted position alone, 0 = the guess alone) instead of the learned one; "
-                        "comma-separated, one value per refinement round")
     p.add_argument("--flow-cache", default=None,
                    help="optical flow of --cache's clips (scripts/cache_flow.py), for a --flow-patch run")
     p.add_argument("--frames-cache", default=None,
@@ -366,10 +362,6 @@ def main() -> int:
     model = build_model(Settings(**targs), feat_dim, has_feats).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
-    if args.gate is not None:
-        vals = [float(v) for v in args.gate.split(",")]
-        model.gate_force = vals[0] if len(vals) == 1 else vals
-        print(f"every gate held at {args.gate}", flush=True)
     if args.fine_weights:
         # A diagnostic: the trained model with its finder put back to other
         # weights (e.g. TAPIP3D's own), everything else as trained.

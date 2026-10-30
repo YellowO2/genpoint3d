@@ -256,8 +256,8 @@ def regress_loss(
     groups, group_weight, fit_weight: a model built with `rigid_fit` also
               has its points' vectors scored against `groups` (B, N, N), the
               pairs the truth shows keeping their distance (`_group_error`),
-              and the fitted positions alone scored like the guess, whatever
-              its gate is: what trains the grouping before the fit is used.
+              and the fitted positions scored like the guess in every round,
+              those it is used in and those after.
     window, overlap: track in windows of this many frames, sharing `overlap`
               (top of this file); 0 tracks the whole clip at once. Each
               window is scored on its own frames, and the windows' losses are
@@ -296,7 +296,7 @@ def regress_loss(
                     vis_loss = share * w[i] * visibility_error(logits, visible_w)
                 if prev is not None:
                     prev = logits.detach()
-            g = model.settle(g.detach() + _integrate(step, param), anchor)
+            g = model.settle(g.detach() + _integrate(step, param), anchor, i)
             loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
             if vel_weight:
                 loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
@@ -378,19 +378,13 @@ def refine(
                 rounds.extend(whole.clone() for _ in range(iters + 1))
             rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
         for i in range(iters):
-            # A diagnostic gate per round (`scripts/evaluate.py --gate a,b,..`).
-            per_round = getattr(model, "gate_force", None)
-            if isinstance(per_round, list):
-                model.gate_force, schedule = per_round[i], per_round
             out = model(g, _clock(i, iters, B, anchor.device), anchor,
                         visibility=visibility or prev is not None, vis_prev=prev, **at, **cond)
             if visibility or prev is not None:
                 out, logits = out
             if prev is not None:
                 prev = logits
-            g = _pin(model.settle(g + _integrate(out, param), anchor), kx0)
-            if isinstance(per_round, list):
-                model.gate_force = schedule
+            g = _pin(model.settle(g + _integrate(out, param), anchor, i), kx0)
             if carry:
                 g = _carry(g, i, iters)
             if rounds is not None:

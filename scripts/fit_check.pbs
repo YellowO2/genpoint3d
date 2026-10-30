@@ -78,8 +78,6 @@ ABLATE=${ABLATE:-}
 [ -n "${SUPPORT:-}" ] && SP="--support $SUPPORT" || SP=""
 # PER_FRAME=1 also prints the seen moving points' APD frame by frame.
 [ -n "${PER_FRAME:-}" ] && PFR="--per-frame" || PFR=""
-# GATE=1 holds a --rigid-fit run's gates there (1 = the fit alone); GATE=1:1:1:0 one per round.
-[ -n "${GATE:-}" ] && GT="--gate ${GATE//:/,}" || GT=""
 # FINE_WEIGHTS=<file> puts other weights into the trained model's finder.
 [ -n "${FINE_WEIGHTS:-}" ] && FW="--fine-weights $FINE_WEIGHTS" || FW=""
 # SPLITS=val scores only the validation clips.
@@ -100,8 +98,8 @@ for SPLIT in $SPLITS; do
   echo
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
-    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT $FC $SM $AB $SP $PFR $FW $GT \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}${ABLATE:+_ab${ABLATE// /_}}${SUPPORT:+_sup$SUPPORT}${FINE_WEIGHTS:+_fw}${GATE:+_g${GATE//:/-}}.json"
+    --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT $FC $SM $AB $SP $PFR $FW \
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}${ABLATE:+_ab${ABLATE// /_}}${SUPPORT:+_sup$SUPPORT}${FINE_WEIGHTS:+_fw}.json"
 done
 
 echo "=== FIT CHECK DONE ==="

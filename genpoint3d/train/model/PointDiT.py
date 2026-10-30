@@ -86,6 +86,7 @@ class PointDiT(nn.Module):
         flow_patch: int = 0,
         depth_head: bool = False,
         rigid_fit: int = 0,
+        fit_rounds: int = 2,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -329,20 +330,18 @@ class PointDiT(nn.Module):
         # [rigid fit] after RAFT-3D's rigid-motion embeddings and Dense-SE3
         # (docs/tasks/rigid-motion-2026-10-30.md): every point also says a
         # `rigid_fit`-wide vector (its soft group: points whose vectors are
-        # close move as one rigid piece), a confidence per frame, and a gate.
-        # `settle` then places each point by the rigid motion that best carries
-        # its group from frame 0 to where the model says they are. The gate
-        # starts at 0, so a model starts exactly as it would without.
-        self.rigid_fit = rigid_fit
+        # close move as one rigid piece) and a confidence per frame. In the
+        # first `fit_rounds` refinement rounds, `settle` then places each point
+        # by the rigid motion that best carries its group from frame 0 to where
+        # the model says they are; the rounds after refine from there. The fit
+        # carries the large motion and the turn, which the guess alone gets
+        # wrong; the last rounds the sub-pixel detail, which the fit is too
+        # coarse for (runs.md, fyU at its gate held open).
+        self.rigid_fit, self.fit_rounds = rigid_fit, fit_rounds
         self._group = self._fitted = None
-        # A diagnostic, set only by `scripts/evaluate.py --gate`: every point's
-        # gate held at this value instead of the learned one; a list holds it
-        # at one value per refinement round (`regress.refine` picks the round's).
-        self.gate_force = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
             self.group_conf = zero_init(nn.Linear(dim, 1), almost=False)
-            self.group_gate = zero_init(nn.Linear(dim, 1), almost=False)
         # [depth head] every cell of the CNN's map says its log depth, from the
         # pixels alone: dense supervision of what the matcher reads. Trained
         # by `tools/depth.py`'s loss; the forward pass never calls it.
@@ -481,10 +480,10 @@ class PointDiT(nn.Module):
         with torch.autocast(device_type=context.device.type, enabled=False):
             return self._cosine(context.float(), id_card.float())
 
-    def settle(self, g: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
-        """g (B, T, N, 3), the guess after this pass's correction, in the
-        target's units -> the same, each point moved by its gate towards
-        where its soft group's rigid motion puts it.
+    def settle(self, g: torch.Tensor, anchor: torch.Tensor, i: int) -> torch.Tensor:
+        """g (B, T, N, 3), the guess after refinement round i's correction, in
+        the target's units -> in the first `fit_rounds` rounds, each point
+        where its soft group's rigid motion puts it; after them, g.
 
         For each point i and frame t: the rotation R and shift that best carry
         the frame-0 positions of every point j onto their guessed positions at
@@ -493,17 +492,17 @@ class PointDiT(nn.Module):
         Point i's fitted position is its own frame-0 position carried by that
         motion. The rotation is found without a gradient: an SVD's backward is
         unstable when the points are nearly collinear. The gradient still
-        reaches the vectors, the confidences and the gate through the weighted
-        centres and the blend. A model built without `rigid_fit` returns g.
+        reaches the vectors and the confidences through the weighted centres.
+        The fit is made every round, for the losses that train it
+        (`regress_loss`'s fit_weight and group_weight). A model built without
+        `rigid_fit` returns g.
         """
         if not self.rigid_fit:
             return g
         if self._group is None:
             raise ValueError("settle follows a forward pass of this model")
-        emb, conf, gate = self._group
+        emb, conf = self._group
         self._group = None
-        if self.gate_force is not None:
-            gate = torch.full_like(gate, self.gate_force)
         with torch.autocast(device_type=g.device.type, enabled=False):
             pos = self._lookup_pos(g.float(), anchor.float())                    # (B, T, N, 3)
             x0 = anchor.float()[:, None]                                         # (B, 1, N, 3)
@@ -518,12 +517,9 @@ class PointDiT(nn.Module):
                 flip = torch.ones_like(U[..., 0])
                 flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
                 R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
-            fit = torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct
-            out = pos + gate * (fit - pos)
-            # The fit alone and the vectors, for the losses that train them
-            # whatever the gate is (`regress_loss`'s fit_weight and group_weight).
-            self._fitted = (self._target_units(fit, anchor.float()), emb)
-            return self._target_units(out, anchor.float()).to(g.dtype)
+            fit = self._target_units(torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct, anchor.float())
+            self._fitted = (fit, emb)
+            return fit.to(g.dtype) if i < self.fit_rounds else g
 
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
         """flow (B, T, 2, h, w), uv (B, T, N, 2) the guess in [0, 1] ->
@@ -1045,8 +1041,7 @@ class PointDiT(nn.Module):
             # Kept for `settle`, which the refinement calls on this pass's
             # guess straight after it. One group per point for the whole
             # window: which piece a point is on does not change with time.
-            self._group = (self.group_emb(h).float().mean(1), self.group_conf(h).float()[..., 0],
-                           self.group_gate(h).float())
+            self._group = (self.group_emb(h).float().mean(1), self.group_conf(h).float()[..., 0])
         if not visibility:
             return self.out(h)
         if not self.visibility:

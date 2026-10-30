@@ -56,6 +56,7 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     flow_patch=a("flow_patch", 0),
                     depth_head=a("depth_loss", 0.0) > 0,
                     rigid_fit=a("rigid_fit", 0),
+                    fit_rounds=a("fit_rounds", 2),
                     # Absent means a checkpoint from before the head existed.
                     visibility=a("vis_loss", 0.0) > 0,
                     vis_feedback=bool(a("vis_feedback", 0)),

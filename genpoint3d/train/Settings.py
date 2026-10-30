@@ -286,15 +286,18 @@ class Settings(argparse.Namespace):
                             "comparison.")
         p.add_argument("--rigid-fit", type=int, default=0, metavar="E",
                        help="regress only: every point also says an E-wide vector (its "
-                            "soft group), a confidence and a gate, and is moved towards "
-                            "where the rigid motion of its group puts it (RAFT-3D's "
-                            "rigid-motion embeddings; PointDiT.settle). 0 off.")
+                            "soft group) and a confidence, and in the first --fit-rounds "
+                            "rounds is placed where the rigid motion of its group puts it "
+                            "(RAFT-3D's rigid-motion embeddings; PointDiT.settle). 0 off.")
+        p.add_argument("--fit-rounds", type=int, default=2, metavar="K",
+                       help="--rigid-fit: the refinement rounds the fit places the points in; "
+                            "the rounds after refine from there.")
         p.add_argument("--group-loss", type=float, default=0.0, metavar="W",
                        help="--rigid-fit only: the points' vectors are also scored "
                             "against the pairs the truth shows moving as one, weighted W.")
         p.add_argument("--fit-loss", type=float, default=0.0, metavar="W",
-                       help="--rigid-fit only: the fitted positions alone are also "
-                            "scored like the guess, weighted W, whatever the gate is.")
+                       help="--rigid-fit only: the fitted positions are also scored "
+                            "like the guess in every round, weighted W.")
         p.add_argument("--depth-loss", type=float, default=0.0, metavar="W",
                        help="--fine only: a small head on the CNN's map also says the "
                             "depth of every cell of every frame, from the pixels alone, "
