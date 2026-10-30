@@ -61,7 +61,8 @@ class FineFinder(nn.Module):
                     carry the gradient that the correlation left on the map.
       the windows   49 x 128 numbers per (point, frame, level) is 2.5 GB a
                     level in fp32, 10 GB for four, held until backward. The
-                    correlation is checkpointed instead: `chunk` clips and one
+                    correlation is checkpointed instead: as many clips as hold
+                    `chunk` points (at least one) and one
                     level at a time (0.3 GB of windows), only its
                     (B, T, N, out_dim) result is kept, and the windows are
                     rebuilt on the way back.
@@ -72,7 +73,7 @@ class FineFinder(nn.Module):
     """
 
     def __init__(self, levels: int = 4, radius: int = 3, feat_dim: int = 128,
-                 hidden: int = 256, width: int = 64, chunk: int = 2,
+                 hidden: int = 256, width: int = 64, chunk: int = 256,
                  xyz: bool = False, waves: int = 0, neigh: int = 0, prev: bool = False) -> None:
         super().__init__()
         self.levels, self.radius, self.chunk = levels, radius, chunk
@@ -257,8 +258,11 @@ class FineFinder(nn.Module):
         if bool(self.neigh) != (pos0 is not None):
             raise ValueError("pos0 is given exactly to a finder built with neigh")
         out = []
-        for i in range(0, fmap.shape[0], self.chunk):
-            cut = slice(i, i + self.chunk)
+        # As many clips at a time as hold `chunk` points between them, so a
+        # clip with more points is not more memory per piece.
+        clips = max(1, self.chunk // uv.shape[2])
+        for i in range(0, fmap.shape[0], clips):
+            cut = slice(i, i + clips)
             if self.neigh:
                 fn = self._neighbourhoods
                 part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut])
