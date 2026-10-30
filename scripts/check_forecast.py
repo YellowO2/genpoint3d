@@ -82,6 +82,10 @@ CONFIGS = [
     # Each point moved towards its soft group's rigid motion.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
      "--rigid-fit", "8", "--window", "4", "--overlap", "2", "--causal", "0"],
+    # ... the fit's position given to each point instead of placing it.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
+     "--rigid-fit", "8", "--fit-rounds", "0", "--fit-input", "1", "--window", "4", "--overlap", "2",
+     "--causal", "0"],
     # ... and the matcher turning frame 0's neighbourhood by the fit's rotation.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
      "--rigid-fit", "8", "--rot-match", "1", "--window", "4", "--overlap", "2", "--causal", "0"],

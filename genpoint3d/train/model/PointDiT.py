@@ -88,6 +88,7 @@ class PointDiT(nn.Module):
         rigid_fit: int = 0,
         fit_rounds: int = 2,
         rot_match: bool = False,
+        fit_input: bool = False,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -339,6 +340,15 @@ class PointDiT(nn.Module):
         # wrong; the last rounds the sub-pixel detail, which the fit is too
         # coarse for (runs.md, fyU at its gate held open).
         self.rigid_fit, self.fit_rounds, self.rot_match = rigid_fit, fit_rounds, rot_match
+        # With `fit_input`, each round every point is also told where the last
+        # round's fit put it, as an offset from its guess, and decides itself
+        # how far to go there: a placed fit is coarser than a guess that is
+        # already close (runs.md, fyV by distance moved). Zero at first.
+        self.fit_input = fit_input
+        if fit_input:
+            if not rigid_fit:
+                raise ValueError("the fit's offset comes from the rigid fit, which needs rigid_fit")
+            self.fit_proj = zero_init(nn.Linear(99, dim, bias=False), almost=False)
         self._group = self._fitted = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
@@ -631,6 +641,7 @@ class PointDiT(nn.Module):
         fine_xyz: torch.Tensor | None = None,
         fine_flow: torch.Tensor | None = None,
         rot: torch.Tensor | None = None,
+        fit_hint: torch.Tensor | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
@@ -663,6 +674,9 @@ class PointDiT(nn.Module):
                                      frame 0, from the last round's fit, for a
                                      model built with `rot_match`; None in the
                                      first round
+        fit_hint:    (B, T, N, 3)    where the last round's fit put each point,
+                                     in `x`'s units, for a model built with
+                                     `fit_input`; None in the first round
         fine_flow:   (B, T, 2, h, w) at each CNN cell, how it moved since the
                                      frame before, as a fraction of the frame
                                      (0 at frame 0). Required by a model built
@@ -967,6 +981,9 @@ class PointDiT(nn.Module):
                 h = h + self.match_more(match[..., 5:])
         if fine is not None:
             h = h + self.fine_tok(fine).to(h.dtype)
+        if self.fit_input:
+            off = torch.zeros_like(x) if fit_hint is None else fit_hint.to(x.dtype) - x
+            h = h + self.fit_proj(_posenc(off.float()).to(h.dtype))
         if flow is not None:
             h = h + self.flow_tok(flow).to(h.dtype)
         if self.vis_feedback != (vis_prev is not None):

@@ -132,11 +132,15 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
 
 
 def _turn(model: nn.Module) -> dict:
-    """The rotation this round's fit found, for the next round's matcher, as
-    the model call's `rot`; nothing for a model built without `rot_match`."""
-    if not getattr(model, "rot_match", False):
-        return {}
-    return {"rot": model._fitted[2]}
+    """What this round's fit hands the next round, as model call arguments:
+    its rotation for a model built with `rot_match`, its positions for one
+    built with `fit_input`."""
+    out = {}
+    if getattr(model, "rot_match", False):
+        out["rot"] = model._fitted[2]
+    if getattr(model, "fit_input", False):
+        out["fit_hint"] = model._fitted[0].detach()
+    return out
 
 
 def _group_error(emb: torch.Tensor, groups: torch.Tensor) -> torch.Tensor:

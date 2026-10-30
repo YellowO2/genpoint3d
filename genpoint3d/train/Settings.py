@@ -293,6 +293,10 @@ class Settings(argparse.Namespace):
                        help="--rigid-fit with --fine-neigh: each round, the matcher turns "
                             "frame 0's neighbourhood by the rotation the last round's fit "
                             "found before comparing (FineFinder._neighbourhoods).")
+        p.add_argument("--fit-input", type=int, default=0, choices=[0, 1],
+                       help="--rigid-fit: each round every point is also given where the "
+                            "last round's fit put it, as an offset from its guess, and "
+                            "chooses how far to go; usually with --fit-rounds 0.")
         p.add_argument("--fit-rounds", type=int, default=2, metavar="K",
                        help="--rigid-fit: the refinement rounds the fit places the points in; "
                             "the rounds after refine from there.")
@@ -393,6 +397,8 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if settings.fit_input and not settings.rigid_fit:
+            p.error("--fit-input hands each point the rigid fit's position: needs --rigid-fit E")
         if settings.rot_match and not (settings.rigid_fit and settings.fine_neigh):
             p.error("--rot-match turns the 3D neighbourhood by the fit's rotation: needs "
                     "--rigid-fit E and --fine-neigh K")
