@@ -1,64 +1,80 @@
-# Points that carry a rigid motion (after RAFT-3D)
+# Dense rigid motion: design
 
 ## Why
 
 Tracking gets worse the further a point moves because points that move far
 have usually turned (runs.md, drift by turn). The matcher compares a point's
-3D neighbourhood with frame 0's, and once the surface has turned the two no
+3D neighbourhood with frame 0's, and once the surface has turned they no
 longer line up. Comparing with the frame before as well (fyP) closed a fifth
-of the gap; optical flow, chained, fitted per object or given as an input
-(fyQ), added nothing. The model never represents how a surface turned, so it
-cannot use it.
+of the gap; optical flow, chained, fitted per object or as an input (fyQ),
+added nothing. The model never represents how a surface turned.
 
-## What RAFT-3D does (Teed and Deng, CVPR 2021)
+A first try (fyS) grouped the 256 query points into soft rigid pieces and
+moved each point by its piece's fitted motion, through a gate that started
+shut. The gate never opened (its weights stayed at about 0.02): the groups
+were only trained through the gate, so they never became good enough to open
+it. And 256 points, about 20 an object, is far sparser than what this idea
+is built on.
 
-Scene flow from two RGB-D frames, built on RAFT.
+## The end state
 
-1. State: every pixel carries a rigid motion, a rotation and a translation,
-   not a displacement.
-2. Each iteration, the update network reads the correlation at where that
-   motion sends the pixel, and outputs three things: a revision (where the
-   pixel should really go, and its inverse depth), a confidence for it, and a
-   rigid-motion embedding, a vector per pixel.
-3. Dense-SE3, a differentiable layer: for each pixel i, one Gauss-Newton step
-   on the rigid motion that best explains the revised correspondences of the
-   pixels j around it, each weighted by its confidence and by the affinity
-   a_ij = 2 sigmoid(-|v_i - v_j|^2) of the two embeddings. Pixels with similar
-   embeddings act as one rigid piece; nothing says what an object is.
-4. Supervised only by optical flow and depth change. The embeddings get no
-   labels: they are learned through the fit.
+One model that watches the clip and infers, densely, the scene's structure and
+how every part of it moves; the query points are read off that.
 
-## The same in our model
+1. Dense state. A grid of cells over frame 0 (the CNN's map, at a stride),
+   each tracked through every frame: its 3D position per frame, a group vector
+   (which rigid piece it is on) and a confidence per frame. Later also its
+   depth, predicted instead of given.
+2. Joint refinement in rounds, as now: every cell compares its neighbourhood
+   with frame 0's and the frame before's, and the blocks attend over time and
+   between cells.
+3. Rigid motion, from the dense state. After each round, for each cell and
+   frame, the rotation and shift that best carry its group's frame-0 positions
+   onto their current positions (RAFT-3D's Dense-SE3, but from frame 0 across
+   the clip rather than between two frames). The rotation is not a separate
+   output to be guessed: it is computed from how many cells of one surface
+   moved together.
+4. The rotation is used. Each cell's position is settled towards its group's
+   rigid motion, and the matcher rotates frame 0's neighbourhood by it before
+   comparing.
+5. Query points ride on the dense state: a query sits among cells in frame 0
+   and is carried by their rigid motion, plus a small correction of its own
+   from the matcher.
+6. Physics carries the dense state through hiding and into the forecast.
 
-| RAFT-3D | here |
-|---|---|
-| a rigid motion per pixel, frame 1 to 2 | a rigid motion per query point, frame 0 to t: which way its patch of surface faces now, and where it is |
-| GRU update | the DiT blocks, each round |
-| revision + confidence | the correction the model gives now, plus a confidence per point and frame |
-| rigid-motion embedding | a vector per point, from its tokens |
-| Dense-SE3 step | for each point i and frame t, the weighted rigid fit (Kabsch, closed form) that best carries the frame-0 positions of the points j onto their revised positions at t, weights confidence x affinity; point i's position is its own frame-0 position carried by it |
-| loss on flow and depth change | the loss we have, on positions; no rotation or group labels |
+How the existing work does the dense part: DELTA (ICLR 2025, cloned here)
+tracks a coarse grid of every 4th pixel of its model resolution with a
+CoTracker-style transformer, using attention within local 6 x 6 windows of
+cells plus a few global tokens so that thousands of cells stay affordable,
+and an attention upsampler to full resolution. SpatialTracker learns a
+soft "moves rigidly with" signal between points.
 
-What this gives the points:
+## What trains what
 
-- A point is placed by the motion of every point that moves with it, so a spot
-  that has turned away is placed by the rest of its surface.
-- A hidden point is placed the same way, by its group's visible points.
-- Each point has a rotation, which the matcher can then use: rotate frame 0's
-  neighbourhood offsets by it before comparing, so a turned surface lines up
-  again. RAFT-3D does not need this (its frames are neighbours); we compare
-  against frame 0.
+- Positions: the true tracks. The cache has 256 a clip; the raw Kubric data
+  has 2048, so a denser cache gives far more supervised points.
+- Groups: pairs of tracked points that keep their distance (`rigid_pairs`)
+  should have close vectors, other pairs far ones: their own loss, so the
+  groups learn whatever the settling does.
+- The fit: a loss on the fitted positions themselves (RAFT-3D's loss on the
+  motion its fit induces), so the fit learns even before it is trusted.
+- Depth, later: the dense depth loss (`tools/depth.py`, built).
 
-## Runs
+## Steps, each a piece of the end state
 
-All warm-started from fyP (`--init`), with the whole-frame match off
-(`--correlate 0`), about 1,500 steps, judged by the turn table and moving APD
-by frame.
+1. Dense cells with given depth. A grid of cells tracked with the query
+   points (CoTracker's support grid, trained rather than only at test), the
+   group and fit losses above, positions settled by the fit, queries carried
+   by it. Warm-started from fyP; reference fyR (running).
+2. The rotation-aware matcher.
+3. Depth predicted, not given.
+4. The dense state forecast.
 
-1. Control: fyP so, nothing else.
-2. The rigid fit: embeddings, confidences and the fit layer; positions come
-   from the fit.
-3. Only if 2 helps: the rotation-aware matcher.
+## Open
 
-Open: 128 points per clip may be too few for good groups (about 10 per
-object). If 2 is held back by that, add a grid of helper points.
+- Grid size against cost: 24 x 24 = 576 cells a frame with all-pairs
+  attention between cells costs about 4 times what 256 points do; DELTA's
+  local-window attention is the way out if that is too slow.
+- Cells have no true track of their own (only the 256 or 2048 tracked points
+  do): they learn through the queries they carry and the group losses. A
+  2048-point cache would let most cells be tracked points instead.
