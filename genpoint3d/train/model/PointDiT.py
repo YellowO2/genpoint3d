@@ -336,7 +336,8 @@ class PointDiT(nn.Module):
         self.rigid_fit = rigid_fit
         self._group = self._fitted = None
         # A diagnostic, set only by `scripts/evaluate.py --gate`: every point's
-        # gate held at this value instead of the learned one.
+        # gate held at this value instead of the learned one; a list holds it
+        # at one value per refinement round (`regress.refine` picks the round's).
         self.gate_force = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)

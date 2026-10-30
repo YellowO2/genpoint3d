@@ -378,6 +378,10 @@ def refine(
                 rounds.extend(whole.clone() for _ in range(iters + 1))
             rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
         for i in range(iters):
+            # A diagnostic gate per round (`scripts/evaluate.py --gate a,b,..`).
+            per_round = getattr(model, "gate_force", None)
+            if isinstance(per_round, list):
+                model.gate_force, schedule = per_round[i], per_round
             out = model(g, _clock(i, iters, B, anchor.device), anchor,
                         visibility=visibility or prev is not None, vis_prev=prev, **at, **cond)
             if visibility or prev is not None:
@@ -385,6 +389,8 @@ def refine(
             if prev is not None:
                 prev = logits
             g = _pin(model.settle(g + _integrate(out, param), anchor), kx0)
+            if isinstance(per_round, list):
+                model.gate_force = schedule
             if carry:
                 g = _carry(g, i, iters)
             if rounds is not None:

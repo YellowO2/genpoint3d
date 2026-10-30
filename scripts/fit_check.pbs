@@ -101,7 +101,7 @@ for SPLIT in $SPLITS; do
   echo "########## $SPLIT split, $SPACE score${AXIS:+, true $AXIS} ($N clips) ##########"
   python scripts/evaluate.py --ckpt "$CKPT" --cache "$WORK/$SPLIT" \
     --space "$SPACE" --scaling "$SCALING" --min-motion-px "$MOTION" $OZ $PTS $FR $IT $FC $SM $AB $SP $PFR $FW $GT \
-    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}${ABLATE:+_ab${ABLATE// /_}}${SUPPORT:+_sup$SUPPORT}${FINE_WEIGHTS:+_fw}${GATE:+_g$GATE}.json"
+    --out "$(dirname "$CKPT")/fit_check_${SPLIT}_${SPACE}${AXIS:+_oracle$AXIS}_${SCALING}_m$MOTION${POINTS:+_p$POINTS}${ITERS:+_it$ITERS}${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}${ABLATE:+_ab${ABLATE// /_}}${SUPPORT:+_sup$SUPPORT}${FINE_WEIGHTS:+_fw}${GATE:+_g${GATE//,/-}}.json"
 done
 
 echo "=== FIT CHECK DONE ==="
