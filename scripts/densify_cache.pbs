@@ -1,0 +1,28 @@
+#!/bin/bash
+# A copy of a feature cache with every true track visible in frame 0
+# (scripts/densify_cache.py). CPU only.
+#
+#   qsub -v SRC=cache/kubric_ctr,DST=cache/kubric_dense scripts/densify_cache.pbs
+#
+#PBS -N densify
+#PBS -l select=1:ncpus=16:mem=64gb
+#PBS -l walltime=02:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/densify.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+export KUBRIC_READ_WORKERS=2
+
+python scripts/densify_cache.py --src $ROOT/${SRC:?} --raw $ROOT/${RAW:-kubric} --dst $ROOT/${DST:?} \
+  --workers 16 ${LIMIT:+--limit $LIMIT}
+
+echo "=== DENSIFY DONE ==="
