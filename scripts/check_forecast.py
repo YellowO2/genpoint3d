@@ -79,6 +79,9 @@ CONFIGS = [
      "--window", "4", "--overlap", "2", "--causal", "0", "--motion-waves", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--window", "4",
      "--overlap", "2", "--cross-window", "9"],
+    # Each point moved towards its soft group's rigid motion.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
+     "--rigid-fit", "8", "--window", "4", "--overlap", "2", "--causal", "0"],
     # Each point also given the flow around its guess.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
      "--flow-patch", "2", "--flow-cache", "unused", "--window", "4", "--overlap", "2",

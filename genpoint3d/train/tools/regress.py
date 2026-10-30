@@ -274,7 +274,7 @@ def regress_loss(
                     vis_loss = share * w[i] * visibility_error(logits, visible_w)
                 if prev is not None:
                     prev = logits.detach()
-            g = g.detach() + _integrate(step, param)
+            g = model.settle(g.detach() + _integrate(step, param), anchor)
             loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
             if vel_weight:
                 loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
@@ -356,7 +356,7 @@ def refine(
                 out, logits = out
             if prev is not None:
                 prev = logits
-            g = _pin(g + _integrate(out, param), kx0)
+            g = _pin(model.settle(g + _integrate(out, param), anchor), kx0)
             if carry:
                 g = _carry(g, i, iters)
             if rounds is not None:

@@ -85,6 +85,7 @@ class PointDiT(nn.Module):
         fine_prev: bool = False,
         flow_patch: int = 0,
         depth_head: bool = False,
+        rigid_fit: int = 0,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -325,6 +326,19 @@ class PointDiT(nn.Module):
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
+        # [rigid fit] after RAFT-3D's rigid-motion embeddings and Dense-SE3
+        # (docs/tasks/rigid-motion-2026-10-30.md): every point also says a
+        # `rigid_fit`-wide vector (its soft group: points whose vectors are
+        # close move as one rigid piece), a confidence per frame, and a gate.
+        # `settle` then places each point by the rigid motion that best carries
+        # its group from frame 0 to where the model says they are. The gate
+        # starts at 0, so a model starts exactly as it would without.
+        self.rigid_fit = rigid_fit
+        self._group = None
+        if rigid_fit:
+            self.group_emb = nn.Linear(dim, rigid_fit)
+            self.group_conf = zero_init(nn.Linear(dim, 1), almost=False)
+            self.group_gate = zero_init(nn.Linear(dim, 1), almost=False)
         # [depth head] every cell of the CNN's map says its log depth, from the
         # pixels alone: dense supervision of what the matcher reads. Trained
         # by `tools/depth.py`'s loss; the forward pass never calls it.
@@ -462,6 +476,45 @@ class PointDiT(nn.Module):
             context, _ = self._upsample(context, patch_xyz)
         with torch.autocast(device_type=context.device.type, enabled=False):
             return self._cosine(context.float(), id_card.float())
+
+    def settle(self, g: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        """g (B, T, N, 3), the guess after this pass's correction, in the
+        target's units -> the same, each point moved by its gate towards
+        where its soft group's rigid motion puts it.
+
+        For each point i and frame t: the rotation R and shift that best carry
+        the frame-0 positions of every point j onto their guessed positions at
+        t, each weighted by its confidence at t and by the affinity
+        2 sigmoid(-|v_i - v_j|^2) of the two points' vectors (RAFT-3D's).
+        Point i's fitted position is its own frame-0 position carried by that
+        motion. The rotation is found without a gradient: an SVD's backward is
+        unstable when the points are nearly collinear. The gradient still
+        reaches the vectors, the confidences and the gate through the weighted
+        centres and the blend. A model built without `rigid_fit` returns g.
+        """
+        if not self.rigid_fit:
+            return g
+        if self._group is None:
+            raise ValueError("settle follows a forward pass of this model")
+        emb, conf, gate = self._group
+        self._group = None
+        with torch.autocast(device_type=g.device.type, enabled=False):
+            pos = self._lookup_pos(g.float(), anchor.float())                    # (B, T, N, 3)
+            x0 = anchor.float()[:, None]                                         # (B, 1, N, 3)
+            a = 2 * torch.sigmoid(-torch.cdist(emb, emb) ** 2)                   # (B, N, N)
+            W = a[:, None] * torch.sigmoid(conf)[:, :, None, :]                  # (B, T, i, j)
+            tot = W.sum(-1, keepdim=True).clamp_min(1e-9)
+            c0, ct = (W @ x0) / tot, (W @ pos) / tot                             # (B, T, N, 3)
+            with torch.no_grad():
+                A = x0[:, :, None] - c0[:, :, :, None]                           # (B, T, i, j, 3)
+                Bm = pos[:, :, None] - ct[:, :, :, None]
+                U, _, Vh = torch.linalg.svd(torch.einsum("btij,btijx,btijy->btixy", W, A, Bm))
+                flip = torch.ones_like(U[..., 0])
+                flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
+                R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
+            fit = torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct
+            out = pos + gate * (fit - pos)
+            return self._target_units(out, anchor.float()).to(g.dtype)
 
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
         """flow (B, T, 2, h, w), uv (B, T, N, 2) the guess in [0, 1] ->
@@ -979,6 +1032,12 @@ class PointDiT(nn.Module):
 
         # --- [5] head ---
         h = self.out_norm(h)
+        if self.rigid_fit:
+            # Kept for `settle`, which the refinement calls on this pass's
+            # guess straight after it. One group per point for the whole
+            # window: which piece a point is on does not change with time.
+            self._group = (self.group_emb(h).float().mean(1), self.group_conf(h).float()[..., 0],
+                           self.group_gate(h).float())
         if not visibility:
             return self.out(h)
         if not self.visibility:
