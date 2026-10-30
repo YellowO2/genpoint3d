@@ -335,6 +335,9 @@ class PointDiT(nn.Module):
         # starts at 0, so a model starts exactly as it would without.
         self.rigid_fit = rigid_fit
         self._group = self._fitted = None
+        # A diagnostic, set only by `scripts/evaluate.py --gate`: every point's
+        # gate held at this value instead of the learned one.
+        self.gate_force = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
             self.group_conf = zero_init(nn.Linear(dim, 1), almost=False)
@@ -498,6 +501,8 @@ class PointDiT(nn.Module):
             raise ValueError("settle follows a forward pass of this model")
         emb, conf, gate = self._group
         self._group = None
+        if self.gate_force is not None:
+            gate = torch.full_like(gate, self.gate_force)
         with torch.autocast(device_type=g.device.type, enabled=False):
             pos = self._lookup_pos(g.float(), anchor.float())                    # (B, T, N, 3)
             x0 = anchor.float()[:, None]                                         # (B, 1, N, 3)
