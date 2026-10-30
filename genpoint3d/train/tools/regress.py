@@ -131,6 +131,20 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
     return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
 
 
+def _group_error(emb: torch.Tensor, groups: torch.Tensor) -> torch.Tensor:
+    """How far the affinities of the points' vectors (B, N, E) are from the
+    pairs that truly move as one (B, N, N): cross-entropy of
+    2 sigmoid(-|v_i - v_j|^2) against 1 for such a pair and 0 otherwise, the
+    two kinds averaged apart so the rarer one counts as much."""
+    v = emb.float()
+    a = (2 * torch.sigmoid(-(v[:, :, None] - v[:, None]).pow(2).sum(-1))).clamp(1e-4, 1 - 1e-4)
+    off = ~torch.eye(emb.shape[1], dtype=torch.bool, device=emb.device)
+    pos, neg = groups & off, ~groups & off
+    p = -(a.log() * pos).sum() / pos.sum().clamp_min(1)
+    n = -((1 - a).log() * neg).sum() / neg.sum().clamp_min(1)
+    return (p + n) / 2
+
+
 def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
     """(B, T, N) zeros for the first iteration's fed-back visibility, or None
     for a model that is not given it."""
@@ -201,6 +215,9 @@ def regress_loss(
     rigid_weight: float = 0.0,
     window: int = 0,
     overlap: int = 0,
+    groups: Optional[torch.Tensor] = None,
+    group_weight: float = 0.0,
+    fit_weight: float = 0.0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -236,6 +253,11 @@ def regress_loss(
     pairs, rigid_weight: (B, N, N) the pairs of points on one rigid object
               (`batch.rigid_pairs`), and the weight of the loss that keeps
               the gap between them true, at every iteration.
+    groups, group_weight, fit_weight: a model built with `rigid_fit` also
+              has its points' vectors scored against `groups` (B, N, N), the
+              pairs the truth shows keeping their distance (`_group_error`),
+              and the fitted positions alone scored like the guess, whatever
+              its gate is: what trains the grouping before the fit is used.
     window, overlap: track in windows of this many frames, sharing `overlap`
               (top of this file); 0 tracks the whole clip at once. Each
               window is scored on its own frames, and the windows' losses are
@@ -282,6 +304,12 @@ def regress_loss(
                 loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
             if rigid_weight:
                 loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs, loss_type)
+            if fit_weight or group_weight:
+                fitted, emb = model._fitted
+                if fit_weight:
+                    loss = loss + w[i] * fit_weight * masked_error(fitted, x1_w, mask_w, weight_w, loss_type)
+                if group_weight:
+                    loss = loss + w[i] * group_weight * _group_error(emb, groups)
             loss = share * loss
             if backward is not None:
                 # Out of autocast, where the training loop's own backward runs.

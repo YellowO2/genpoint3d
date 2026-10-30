@@ -289,6 +289,12 @@ class Settings(argparse.Namespace):
                             "soft group), a confidence and a gate, and is moved towards "
                             "where the rigid motion of its group puts it (RAFT-3D's "
                             "rigid-motion embeddings; PointDiT.settle). 0 off.")
+        p.add_argument("--group-loss", type=float, default=0.0, metavar="W",
+                       help="--rigid-fit only: the points' vectors are also scored "
+                            "against the pairs the truth shows moving as one, weighted W.")
+        p.add_argument("--fit-loss", type=float, default=0.0, metavar="W",
+                       help="--rigid-fit only: the fitted positions alone are also "
+                            "scored like the guess, weighted W, whatever the gate is.")
         p.add_argument("--depth-loss", type=float, default=0.0, metavar="W",
                        help="--fine only: a small head on the CNN's map also says the "
                             "depth of every cell of every frame, from the pixels alone, "
@@ -380,6 +386,8 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if (settings.group_loss or settings.fit_loss) and not settings.rigid_fit:
+            p.error("--group-loss and --fit-loss train the rigid fit: need --rigid-fit E")
         if settings.rigid_fit and settings.method != "regress":
             p.error("--rigid-fit settles each refinement's guess: --method regress")
         if settings.depth_loss and not settings.fine:

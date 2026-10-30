@@ -334,7 +334,7 @@ class PointDiT(nn.Module):
         # its group from frame 0 to where the model says they are. The gate
         # starts at 0, so a model starts exactly as it would without.
         self.rigid_fit = rigid_fit
-        self._group = None
+        self._group = self._fitted = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
             self.group_conf = zero_init(nn.Linear(dim, 1), almost=False)
@@ -501,7 +501,7 @@ class PointDiT(nn.Module):
         with torch.autocast(device_type=g.device.type, enabled=False):
             pos = self._lookup_pos(g.float(), anchor.float())                    # (B, T, N, 3)
             x0 = anchor.float()[:, None]                                         # (B, 1, N, 3)
-            a = 2 * torch.sigmoid(-torch.cdist(emb, emb) ** 2)                   # (B, N, N)
+            a = 2 * torch.sigmoid(-_sq_dist(emb))                                # (B, N, N)
             W = a[:, None] * torch.sigmoid(conf)[:, :, None, :]                  # (B, T, i, j)
             tot = W.sum(-1, keepdim=True).clamp_min(1e-9)
             c0, ct = (W @ x0) / tot, (W @ pos) / tot                             # (B, T, N, 3)
@@ -514,6 +514,9 @@ class PointDiT(nn.Module):
                 R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
             fit = torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct
             out = pos + gate * (fit - pos)
+            # The fit alone and the vectors, for the losses that train them
+            # whatever the gate is (`regress_loss`'s fit_weight and group_weight).
+            self._fitted = (self._target_units(fit, anchor.float()), emb)
             return self._target_units(out, anchor.float()).to(g.dtype)
 
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
@@ -1043,6 +1046,13 @@ class PointDiT(nn.Module):
         if not self.visibility:
             raise ValueError("this model was built without the visibility head")
         return self.out(h), F.linear(h, self.vis_weight[None], self.vis_bias[None])[..., 0]
+
+
+def _sq_dist(v: torch.Tensor) -> torch.Tensor:
+    """(B, N, E) -> (B, N, N) squared distances. Written out rather than
+    `cdist ** 2`, whose square root has no gradient where two vectors meet --
+    which, at the start, is everywhere."""
+    return (v[:, :, None] - v[:, None]).pow(2).sum(-1)
 
 
 def _example():

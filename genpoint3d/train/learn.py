@@ -8,7 +8,7 @@ from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.depth import depth_loss
 from genpoint3d.train.tools.batch import (
     apd_weight, fine_inputs, hidden_weight, known_frame0, match_targets, random_cutoff,
-    rigid_pairs, to_device, visual_mask,
+    rigid_groups, rigid_pairs, to_device, visual_mask,
 )
 from genpoint3d.train.tools.flow import flow_matching_loss
 from genpoint3d.train.tools.matching import match_ce
@@ -33,6 +33,9 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     mask, w = hidden_weight(vis, w, settings.hidden_loss)
     kx0 = known_frame0(b) if settings.anchor_frame0 else None
     rigid = dict(pairs=rigid_pairs(b), rigid_weight=settings.rigid_loss) if settings.rigid_loss else {}
+    if settings.group_loss or settings.fit_loss:
+        rigid.update(group_weight=settings.group_loss, fit_weight=settings.fit_loss,
+                     groups=rigid_groups(b) if settings.group_loss else None)
     # With --vis-loss, what the visibility head should say: every frame,
     # hidden and forecast ones included, whatever --hidden-loss is.
     seen = {}

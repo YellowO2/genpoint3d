@@ -142,6 +142,16 @@ def rigid_pairs(b: dict) -> torch.Tensor:
     return rigid_buddies(to_metres(b["traj"], b))
 
 
+def rigid_groups(b: dict, tol: float = 0.02) -> torch.Tensor:
+    """(B, N, N) bool: the pairs of points whose distance never strays more
+    than `tol` metres from its frame-0 value, moving or not -- the pairs that
+    move as one, which a rigid-fit model's vectors should put together. Two
+    still points count: they move alike. A point pairs with itself."""
+    p = to_metres(b["traj"], b)
+    d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)
+    return (d - d[:, :1]).abs().amax(dim=1) < tol
+
+
 def rigid_buddies(p: torch.Tensor, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor:
     """(B, N, N) bool from true positions `p` (B, T, N, 3) in metres: the pairs
     of points on one moving rigid object.
