@@ -131,6 +131,14 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
     return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
 
 
+def _turn(model: nn.Module) -> dict:
+    """The rotation this round's fit found, for the next round's matcher, as
+    the model call's `rot`; nothing for a model built without `rot_match`."""
+    if not getattr(model, "rot_match", False):
+        return {}
+    return {"rot": model._fitted[2]}
+
+
 def _group_error(emb: torch.Tensor, groups: torch.Tensor) -> torch.Tensor:
     """How far the affinities of the points' vectors (B, N, E) are from the
     pairs that truly move as one (B, N, N): cross-entropy of
@@ -285,18 +293,20 @@ def regress_loss(
         kx0 = known_x0 if start == 0 else None
         at = {} if len(spans) == 1 else {"frames": (start, end)}
         prev = _no_logits(model, x1_w)
+        rot = {}
         for i in range(iters):
             k = _clock(i, iters, B, x1.device)
             vis_loss = x1.new_zeros(())
             if visible_w is None and prev is None:
-                step = model(g.detach(), k, anchor, **at, **cond)
+                step = model(g.detach(), k, anchor, **at, **rot, **cond)
             else:
-                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **cond)
+                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot, **cond)
                 if visible_w is not None:
                     vis_loss = share * w[i] * visibility_error(logits, visible_w)
                 if prev is not None:
                     prev = logits.detach()
             g = model.settle(g.detach() + _integrate(step, param), anchor, i)
+            rot = _turn(model)
             loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
             if vel_weight:
                 loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
@@ -305,7 +315,7 @@ def regress_loss(
             if rigid_weight:
                 loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs, loss_type)
             if fit_weight or group_weight:
-                fitted, emb = model._fitted
+                fitted, emb, _ = model._fitted
                 if fit_weight:
                     loss = loss + w[i] * fit_weight * masked_error(fitted, x1_w, mask_w, weight_w, loss_type)
                 if group_weight:
@@ -373,18 +383,20 @@ def refine(
         at = {} if len(spans) == 1 else {"frames": (start, end)}
         prev = _no_logits(model, g)
         logits = None
+        rot = {}
         if rounds is not None:
             if not rounds:
                 rounds.extend(whole.clone() for _ in range(iters + 1))
             rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
         for i in range(iters):
             out = model(g, _clock(i, iters, B, anchor.device), anchor,
-                        visibility=visibility or prev is not None, vis_prev=prev, **at, **cond)
+                        visibility=visibility or prev is not None, vis_prev=prev, **at, **rot, **cond)
             if visibility or prev is not None:
                 out, logits = out
             if prev is not None:
                 prev = logits
             g = _pin(model.settle(g + _integrate(out, param), anchor, i), kx0)
+            rot = _turn(model)
             if carry:
                 g = _carry(g, i, iters)
             if rounds is not None:

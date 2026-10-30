@@ -87,6 +87,7 @@ class PointDiT(nn.Module):
         depth_head: bool = False,
         rigid_fit: int = 0,
         fit_rounds: int = 2,
+        rot_match: bool = False,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -337,7 +338,7 @@ class PointDiT(nn.Module):
         # carries the large motion and the turn, which the guess alone gets
         # wrong; the last rounds the sub-pixel detail, which the fit is too
         # coarse for (runs.md, fyU at its gate held open).
-        self.rigid_fit, self.fit_rounds = rigid_fit, fit_rounds
+        self.rigid_fit, self.fit_rounds, self.rot_match = rigid_fit, fit_rounds, rot_match
         self._group = self._fitted = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
@@ -518,7 +519,8 @@ class PointDiT(nn.Module):
                 flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
                 R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
             fit = self._target_units(torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct, anchor.float())
-            self._fitted = (fit, emb)
+            # The rotation goes to the next round's matcher (`rot_match`).
+            self._fitted = (fit, emb, R)
             return fit.to(g.dtype) if i < self.fit_rounds else g
 
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
@@ -628,6 +630,7 @@ class PointDiT(nn.Module):
         fine_proj: torch.Tensor | None = None,
         fine_xyz: torch.Tensor | None = None,
         fine_flow: torch.Tensor | None = None,
+        rot: torch.Tensor | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
@@ -656,6 +659,10 @@ class PointDiT(nn.Module):
         fine_xyz:    (B, T, 3, h, w) each CNN cell's 3D position, `anchor`'s
                                      space, from its depth. Required with
                                      `fine_map` for a finder with `fine_xyz`.
+        rot:         (B, T, N, 3, 3) how each point's surface has turned since
+                                     frame 0, from the last round's fit, for a
+                                     model built with `rot_match`; None in the
+                                     first round
         fine_flow:   (B, T, 2, h, w) at each CNN cell, how it moved since the
                                      frame before, as a fraction of the frame
                                      (0 at frame 0). Required by a model built
@@ -796,7 +803,7 @@ class PointDiT(nn.Module):
                     places = {}
                 elif self.fine.neigh:
                     places = dict(xyz=fine_xyz.float(), xyz0=query_xyz.float(), pos=pos,
-                                  pos0=anchor.float())
+                                  pos0=anchor.float(), rot=rot if self.rot_match else None)
                 else:
                     places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale)
             fine = self.fine(fine_map, query_map, uv, uv0[:, 0], **places)

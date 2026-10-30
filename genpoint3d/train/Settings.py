@@ -289,6 +289,10 @@ class Settings(argparse.Namespace):
                             "soft group) and a confidence, and in the first --fit-rounds "
                             "rounds is placed where the rigid motion of its group puts it "
                             "(RAFT-3D's rigid-motion embeddings; PointDiT.settle). 0 off.")
+        p.add_argument("--rot-match", type=int, default=0, choices=[0, 1],
+                       help="--rigid-fit with --fine-neigh: each round, the matcher turns "
+                            "frame 0's neighbourhood by the rotation the last round's fit "
+                            "found before comparing (FineFinder._neighbourhoods).")
         p.add_argument("--fit-rounds", type=int, default=2, metavar="K",
                        help="--rigid-fit: the refinement rounds the fit places the points in; "
                             "the rounds after refine from there.")
@@ -389,6 +393,9 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if settings.rot_match and not (settings.rigid_fit and settings.fine_neigh):
+            p.error("--rot-match turns the 3D neighbourhood by the fit's rotation: needs "
+                    "--rigid-fit E and --fine-neigh K")
         if (settings.group_loss or settings.fit_loss) and not settings.rigid_fit:
             p.error("--group-loss and --fit-loss train the rigid fit: need --rigid-fit E")
         if settings.rigid_fit and settings.method != "regress":

@@ -237,7 +237,7 @@ class FineFinder(nn.Module):
     def forward(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
                 uv0: torch.Tensor, xyz: torch.Tensor | None = None,
                 xyz0: torch.Tensor | None = None, pos: torch.Tensor | None = None,
-                pos0: torch.Tensor | None = None) -> torch.Tensor:
+                pos0: torch.Tensor | None = None, rot: torch.Tensor | None = None) -> torch.Tensor:
         """
         fmap  (B, T, C, h, w)  from `encode`, the frames being tracked
         fmap0 (B, C, h, w)     the clip's frame 0, where the query is: the
@@ -249,6 +249,10 @@ class FineFinder(nn.Module):
         xyz0  (B, 3, h, w)     the same for frame 0
         pos   (B, T, N, 3)     the current guess in 3D, in the same units
         pos0  (B, N, 3)        the query point in 3D, likewise (`neigh` only)
+        rot   (B, T, N, 3, 3)  how each point's surface has turned since frame 0
+                               (`PointDiT.settle`'s fit), or None: frame 0's
+                               neighbourhood is turned by it before the two
+                               are compared (`neigh` only)
 
         returns (B, T, N, out_dim)
         """
@@ -257,6 +261,8 @@ class FineFinder(nn.Module):
                              "and only that one does")
         if bool(self.neigh) != (pos0 is not None):
             raise ValueError("pos0 is given exactly to a finder built with neigh")
+        if rot is not None and not self.neigh:
+            raise ValueError("turning frame 0's neighbourhood is the 3D neighbourhood's (neigh)")
         out = []
         # As many clips at a time as hold `chunk` points between them, so a
         # clip with more points is not more memory per piece.
@@ -265,7 +271,8 @@ class FineFinder(nn.Module):
             cut = slice(i, i + clips)
             if self.neigh:
                 fn = self._neighbourhoods
-                part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut])
+                part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut],
+                        None if rot is None else rot[cut])
             else:
                 fn = self._correlate
                 part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut],
@@ -279,7 +286,7 @@ class FineFinder(nn.Module):
     # ---------------------------------------------- the 3D neighbourhood
     def _neighbourhoods(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
                         uv0: torch.Tensor, xyz: torch.Tensor, xyz0: torch.Tensor, pos: torch.Tensor,
-                        pos0: torch.Tensor) -> torch.Tensor:
+                        pos0: torch.Tensor, rot: torch.Tensor | None = None) -> torch.Tensor:
         """TAPIP3D's lookup (`knn_feature_4d_optimized.py`): at each level, the
         K cells nearest the current guess IN 3D, against the K cells nearest
         the query point in frame 0 plus the query's own feature, compared by
@@ -341,9 +348,17 @@ class FineFinder(nn.Module):
             sup_off = torch.cat([torch.zeros_like(sup_x[:, :, :1]), sup_x - pos0[:, :, None]], dim=2)
             cur_off = cur_x - pos[:, :, :, None]
             enc = self.posenc_mlps[lvl]
-            x = sup_f + enc(_posenc(sup_off))                                # (b, N, k+1, D)
             y = cur_f + enc(_posenc(cur_off))                                # (b, T, N, k, D)
-            x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)
+            if rot is None:
+                x = sup_f + enc(_posenc(sup_off))                            # (b, N, k+1, D)
+                x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)
+            else:
+                # Frame 0's neighbourhood turned the way the surface has
+                # turned since, so a turned surface is compared with its own
+                # shape as it faces now. The rotation is the same in these
+                # units: the clip is brought to unit spread by one scale.
+                turned = torch.einsum("btnxy,bnky->btnkx", rot.float(), sup_off)
+                x = (sup_f[:, None] + enc(_posenc(turned))).flatten(0, 2)    # (b T N, k+1, D)
             out.append(self.transformers[lvl](x, y.flatten(0, 2)).reshape(b, T, N, -1))
             if self.prev:
                 out_prev.append(self._before(f, x_cells, pick, before, uv, pos, hl, wl, s, enc,
