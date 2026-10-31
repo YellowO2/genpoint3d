@@ -14,17 +14,28 @@ cache format, raw loader and metric are imported from this repo.
 
 Their model works in a world frame. Our tracks are stored in the frame-0
 camera, so that camera IS the world here: the cached extrinsics (cam_0 -> cam_t)
-are passed as world -> camera, and each query is its true 3D start point.
+are passed as world -> camera, and each query starts where our model's does,
+at the clip's `anchor`: the true 3D start on Kubric, the query pixel at Depth
+Anything 3's depth on TAPVid-3D.
 
-Run (see scripts/ref_tapip3d.pbs):
+The frames and depth are read at full size from the raw clips, as their own
+demo does. A TAPVid-3D half-clip (`scripts/tapvid3d_cache.py`) is
+`<clip>_q<q>_<f|b>`: frames q, q+1, ... of `<clip>.npz`, or q, q-1, ... for
+the backward half, with the depth `<clip>.da3.npy` in the same order.
+
+Run (see scripts/ref_tapip3d.pbs and scripts/tapvid3d_ref.pbs):
   python scripts/ref_tapip3d.py --ref-repo ~/scratch/refs/tapip3d \\
       --clips ~/scratch/ref_eval/val100 --raw ~/scratch/kubric
+  python scripts/ref_tapip3d.py --ref-repo ~/scratch/refs/tapip3d \\
+      --clips ~/scratch/tapvid3d/pstudio_cache/clips --raw ~/scratch/tapvid3d/pstudio \\
+      --raw-kind tapvid3d
 """
 
 import argparse
 import os
 import sys
 import types
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -34,12 +45,38 @@ import torch
 OURS = Path(__file__).resolve().parent.parent
 
 
+def kubric_video(raw: Path, seq: str) -> tuple[np.ndarray, np.ndarray]:
+    """(T, H, W, 3) uint8 frames and (T, H, W) depth in metres of a Kubric clip."""
+    from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
+    r = KubricSequenceDataset(str(raw), seq_ids=[seq], num_query_points=None)[0]
+    return r.frames, r.depths
+
+
+@lru_cache(maxsize=1)
+def _tapvid3d_clip(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """A whole TAPVid-3D clip's frames and DA3 depth; its halves come in a row."""
+    return (np.load(path.with_suffix(".npz"))["images"],
+            np.load(path.with_suffix(".da3.npy")).astype(np.float32))
+
+
+def tapvid3d_video(raw: Path, seq: str) -> tuple[np.ndarray, np.ndarray]:
+    """The frames and depth of one half-clip, in the order tapvid3d_cache.py
+    put them: from its query frame forward to the end, or back to frame 0."""
+    name, q, way = seq.rsplit("_", 2)
+    frames, depth = _tapvid3d_clip(raw / name)
+    q = int(q[1:])
+    order = list(range(q, len(frames))) if way == "f" else list(range(q, -1, -1))
+    return frames[order], depth[order]
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ref-repo", required=True, help="clone of zbw001/TAPIP3D")
     p.add_argument("--ckpt", default="checkpoints/tapip3d_final.pth")
     p.add_argument("--clips", required=True, help="directory of cached clips to score")
-    p.add_argument("--raw", required=True, help="raw Kubric root (frames and depth)")
+    p.add_argument("--raw", required=True,
+                   help="the raw clips: Kubric root, or the TAPVid-3D .npz with their .da3.npy")
+    p.add_argument("--raw-kind", default="kubric", choices=["kubric", "tapvid3d"])
     p.add_argument("--out", default=None, help="save predictions here, one .pt per clip")
     p.add_argument("--resolution-factor", type=float, default=1.0,
                    help="1 runs at the 384x512 the model was trained at")
@@ -66,7 +103,6 @@ def main() -> int:
     from datasets.data_ops import _filter_one_depth
     from utils.inference_utils import inference, load_model, resize_depth_bilinear
 
-    from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
     from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
 
     dev = torch.device("cuda")
@@ -76,6 +112,7 @@ def main() -> int:
     print(f"TAPIP3D {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params"
           f" | inference at {res[0]}x{res[1]} | {args.num_iters} iters", flush=True)
 
+    read_video = kubric_video if args.raw_kind == "kubric" else tapvid3d_video
     clips = sorted(Path(args.clips).expanduser().glob("*.pt"))
     out = Path(args.out).expanduser() if args.out else None
     if out:
@@ -87,25 +124,27 @@ def main() -> int:
     for i, path in enumerate(clips, 1):
         c = torch.load(path, weights_only=False)
         seq = c["seq_id"]
-        raw = KubricSequenceDataset(str(Path(args.raw).expanduser()), seq_ids=[seq],
-                                    num_query_points=None)[0]
-        H0, W0 = raw.frames.shape[1:3]
+        frames, raw_depths = read_video(Path(args.raw).expanduser(), seq)
+        H0, W0 = frames.shape[1:3]
+        if (H0, W0) != tuple(c["hw"]) or len(frames) != c["traj_metric"].shape[0]:
+            raise SystemExit(f"{seq}: raw video {frames.shape[:3]} does not match the clip")
 
         K = c["intrinsics"].clone().float()                         # (T, 3, 3) native pixels
         K_in = K.clone().numpy()
         K_in[:, 0, :] *= (res[1] - 1) / (W0 - 1)
         K_in[:, 1, :] *= (res[0] - 1) / (H0 - 1)
         video = np.stack([cv2.resize(f, (res[1], res[0]), interpolation=cv2.INTER_LINEAR)
-                          for f in raw.frames])
-        depths = np.stack([resize_depth_bilinear(d, (res[1], res[0])) for d in raw.depths])
+                          for f in frames])
+        depths = np.stack([resize_depth_bilinear(d, (res[1], res[0])) for d in raw_depths])
         depths = np.stack([_filter_one_depth(d, 0.08, 15, k) for d, k in zip(depths, K_in)])
 
         gt = c["traj_metric"].float().to(dev)                              # (T, N, 3) frame-0 camera, metres
         vis = c["visibility"].to(dev)
+        start = c["anchor_metric"].float().to(dev)                          # (N, 3) as our model gets it
         if args.max_points:
-            gt, vis = gt[:, :args.max_points], vis[:, :args.max_points]
+            gt, vis, start = gt[:, :args.max_points], vis[:, :args.max_points], start[:args.max_points]
         E = c["extrinsics"].float().to(dev)                         # cam_0 -> cam_t
-        query = torch.cat([torch.zeros_like(gt[0, :, :1]), gt[0]], dim=-1)   # (N, 4): t, x, y, z
+        query = torch.cat([torch.zeros_like(start[:, :1]), start], dim=-1)   # (N, 4): t, x, y, z
 
         chunk = args.chunk or query.shape[0]
         parts = []
