@@ -11,6 +11,7 @@ with cameras, also split by how far the point turned.
 import argparse
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -25,6 +26,7 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--points", type=int, default=1000)
+p.add_argument("--flow", default=None, help="a flow cache (scripts/cache_flow.py): steps from it, not the comparison")
 args = p.parse_args()
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,8 +52,13 @@ with torch.no_grad():
         turned, _ = appearance_change(gt, b["extrinsics"])
         keep = vis.clone()
         keep[:, 0] = False
+        flow = None
+        if args.flow:
+            name_ = clips[len(res["rigid"][0])].stem
+            fl = torch.from_numpy(np.load(Path(args.flow) / f"{name_}.flow.npy")).float().to(dev)
+            flow = (fl[None, 0], fl[None, 1])
         for name, rigid in (("rigid", True), ("own step", False)):
-            pos = model.track(fmap, xyz, proj, b["anchor"], emb, rigid=rigid)
+            pos = model.track(fmap, xyz, proj, b["anchor"], emb, rigid=rigid, flow=flow)
             pr = pos * b["norm_scale"][:, None, None, None] + b["norm_mean"][:, None, None]
             e, d = error_and_motion(pr, gt, vis, b["intrinsics_256"], b["extrinsics"])
             res[name][0].append(e); res[name][1].append(d); res[name][2].append(turned[keep].cpu())
