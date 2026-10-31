@@ -43,6 +43,14 @@ with each other, so a turning surface is never seen turning as a whole.
 
 ## Still to settle
 
+- What a point is matched against. Frame 0's look only (now); then the latest
+  frame it was clearly seen in, which looks more like it does now; then a
+  template the model keeps and learns when to update (SAM2's memory of recent
+  frames, MixFormer's template updates).
+- The whole-frame comparison is in (fyY, `--grid-cmp`): frame t-1 against t
+  at a 24 x 24 grid, once per clip, read by every point at its nearest cells.
+  fyY2 tests it in place of the per-point frame-before comparison (40% faster).
+
 - How points read the frame-to-frame comparison.
 - How each piece's rigid motion is built from it, step by step (frame t's
   motion = the step from t-1 to t on top of t-1's), with frame 0 only to
