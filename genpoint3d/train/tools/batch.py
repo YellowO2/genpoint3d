@@ -193,6 +193,9 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
             raise ValueError("this finder reads each cell's depth, and the batch has "
                              "none: load the clips with depth (--fine-xyz 1)")
         out["fine_xyz"] = _cell_xyz(b["depth"].float(), proj)
+    if model.grid_cmp:
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            out["grid"] = model.grid_comparison(fmap.detach().float(), proj.float(), out["fine_xyz"])
     if model.flow_patch:
         if b.get("flow") is None:
             raise ValueError("this model reads the optical flow around each guess, and the "

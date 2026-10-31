@@ -89,6 +89,8 @@ class PointDiT(nn.Module):
         fit_rounds: int = 2,
         rot_match: bool = False,
         fit_input: bool = False,
+        grid_cmp: int = 0,
+        grid_window: int = 16,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -359,6 +361,25 @@ class PointDiT(nn.Module):
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
             self.group_conf = zero_init(nn.Linear(dim, 1), almost=False)
+        # [grid comparison] frame t-1 against frame t over the whole frame
+        # (docs/tasks/scene-points-2026-10-31.md): at a fixed `grid_cmp` x
+        # `grid_cmp` grid of cells, the finder's comparison of each cell's
+        # neighbourhood in t-1 with the same spot's in t, made once per clip
+        # (`grid_comparison`, from `fine_inputs`). Every point then reads the
+        # `grid_window` cells nearest its guess, each round, by a cross-
+        # attention per block: how the whole surface around it is changing,
+        # not only the few cells around itself -- a point on the hidden back of
+        # a turning ball can read the visible side turning. The blocks start at
+        # zero, so a model starts as it would without.
+        self.grid_cmp, self.grid_window = grid_cmp, grid_window
+        if grid_cmp:
+            if not (fine and self.fine.neigh):
+                raise ValueError("the grid comparison is the 3D neighbourhood finder's (fine, neigh)")
+            w = self.fine.out_dim // (2 if self.fine.prev else 1)
+            self.grid_proj = nn.Linear(w + 99, dim)
+            self.grid_blocks = nn.ModuleList(
+                CrossBlock(dim, num_heads, mlp_mult, cond_dim, locality=False, correlate=False)
+                for _ in range(depth))
         # [depth head] every cell of the CNN's map says its log depth, from the
         # pixels alone: dense supervision of what the matcher reads. Trained
         # by `tools/depth.py`'s loss; the forward pass never calls it.
@@ -540,6 +561,35 @@ class PointDiT(nn.Module):
             self._fitted = (fit, emb, R, conf)
             return fit.to(g.dtype) if i < self.fit_rounds else g
 
+    @torch.no_grad()
+    def grid_comparison(self, fmap: torch.Tensor, proj: torch.Tensor, xyz: torch.Tensor) -> tuple:
+        """fmap (B, T, C, h, w), proj (B, T, 3, 4), xyz (B, T, 3, h, w) ->
+        (features (B, T, G, W), cells (B, T, G, 3)) at a `grid_cmp` square grid:
+        each cell's neighbourhood in frame t-1 against the same spot's in t,
+        by the finder's comparison (its frame-0 half: the template is t-1);
+        zeros at frame 0. A cell is where the depth puts its pixel in each
+        frame. Made once per clip, without a gradient: the rounds read it."""
+        B, T = fmap.shape[:2]
+        S = self.grid_cmp
+        c = (torch.arange(S, device=fmap.device, dtype=torch.float32) + 0.5) / S
+        gy, gx = torch.meshgrid(c, c, indexing="ij")
+        uv = torch.stack([gx, gy], -1).reshape(1, 1, S * S, 2).expand(B, T, -1, -1)
+        hh, ww = xyz.shape[-2:]
+        cell = (uv * uv.new_tensor([ww, hh]) - 0.125).round().long()
+        cells = xyz.float().permute(0, 1, 3, 4, 2)[torch.arange(B)[:, None, None], torch.arange(T)[None, :, None],
+                                                   cell[..., 1].clamp(0, hh - 1), cell[..., 0].clamp(0, ww - 1)]
+        w = self.fine.out_dim // (2 if self.fine.prev else 1)
+        feat = fmap.new_zeros(B, T, S * S, w, dtype=torch.float32)
+        if T > 1:
+            M = B * (T - 1)
+            cmp = self.fine(fmap[:, 1:].reshape(M, 1, *fmap.shape[2:]), fmap[:, :-1].reshape(M, *fmap.shape[2:]),
+                            uv[:, 1:].reshape(M, 1, S * S, 2), uv[:, :-1].reshape(M, S * S, 2),
+                            xyz=xyz[:, 1:].reshape(M, 1, *xyz.shape[2:]).float(),
+                            xyz0=xyz[:, :-1].reshape(M, *xyz.shape[2:]).float(),
+                            pos=cells[:, 1:].reshape(M, 1, S * S, 3), pos0=cells[:, :-1].reshape(M, S * S, 3))
+            feat[:, 1:] = cmp[..., :w].float().reshape(B, T - 1, S * S, w)
+        return feat, cells
+
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
         """flow (B, T, 2, h, w), uv (B, T, N, 2) the guess in [0, 1] ->
         (B, T, N, (2R+1)^2 * 2): the flow at the cells around each guess, in
@@ -649,6 +699,7 @@ class PointDiT(nn.Module):
         fine_flow: torch.Tensor | None = None,
         rot: torch.Tensor | None = None,
         fit_hint: torch.Tensor | None = None,
+        grid: tuple | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
@@ -681,6 +732,9 @@ class PointDiT(nn.Module):
                                      frame 0, from the last round's fit, for a
                                      model built with `rot_match`; None in the
                                      first round
+        grid:        (features (B, T, G, W), cells (B, T, G, 3)) the grid
+                                     comparison (`grid_comparison`), for a
+                                     model built with `grid_cmp`
         fit_hint:    the last round's rigid state, for a model built with
                                      `fit_input`, None in the first round:
                                      (fit (B, T, N, 3) where it put each point,
@@ -720,6 +774,8 @@ class PointDiT(nn.Module):
             context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow = (
                 None if t is None else t[:, cut]
                 for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow))
+            if grid is not None:
+                grid = (grid[0][:, cut], grid[1][:, cut])
         # Every image reading below is per point once it has been looked up
         # (the match, the cost volume, the finder, the distances), so a mask
         # per point blanks it exactly. The feature map itself is shared by a
@@ -773,6 +829,24 @@ class PointDiT(nn.Module):
             window = torch.full_like(d, -CrossBlock.FAR).scatter(-1, near, 0.0)
             if point_mask is not None:
                 window = window * point_mask.reshape(B * T, -1, 1)
+
+        # [grid comparison] each frame's cells as tokens, blanked where the
+        # frame has no image; the cells nearest each guess as a window.
+        grid_ctx = grid_win = None
+        if self.grid_cmp:
+            if grid is None:
+                raise ValueError("a model built with grid_cmp is given the grid comparison")
+            if self.virtual:
+                raise ValueError("the grid comparison is read by the points, not by virtual tokens")
+            feat, cells = grid
+            tok = self.grid_proj(torch.cat([feat.float(), _posenc(cells.float())], -1))
+            if frame_mask is not None:
+                tok = tok * frame_mask[..., None, None]
+            grid_ctx = tok.reshape(B * T, -1, self.dim)
+            with torch.no_grad():
+                gd = torch.cdist(pos.float().reshape(B * T, N, 3), cells.float().reshape(B * T, -1, 3))
+                near = gd.topk(min(self.grid_window, gd.shape[-1]), dim=-1, largest=False).indices
+                grid_win = torch.full_like(gd, -CrossBlock.FAR).scatter(-1, near, 0.0)
 
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
@@ -1041,7 +1115,7 @@ class PointDiT(nn.Module):
                   if self.causal else None)
 
         # --- [4] blocks ---
-        seen_blocks = []
+        seen_blocks, seen_grid = [], []
         cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth
         for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
                                                   cross_blocks, biases):
@@ -1078,6 +1152,10 @@ class PointDiT(nn.Module):
                                   dist2=dist2, corr=corr, noise=noise, window=window)
                     seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
                 h = seen
+            if grid_ctx is not None:
+                gb = self.grid_blocks[len(seen_grid)]
+                seen_grid.append(None)
+                h = gb(h, cs, grid_ctx.to(h.dtype), window=grid_win)
             h = h.view(B, T, Nt, -1)
         h = h[:, :, :N]                                               # the virtual tokens go no further
 

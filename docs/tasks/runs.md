@@ -38,6 +38,8 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fyV2 | fyV's weights trained on as they were (gdev, cut at 2 h) | the reference for fyW | | |
 | fyX | fyT's weights (no fit, groups trained); the rigid state carried round to round as input -- where the last fit put the point, how its surface turned, its group vector and confidence -- and the fit never placing the points (`--fit-rounds 0 --fit-input 1`), group and fit losses (gdev, cut at 2 h) | far and hidden points as fyV, small motion as fyT | at 250 / 500: seen moving 0.919 / 0.924, moving hidden 0.679 / 0.692, forecast moving 0.374 / 0.384, all 0.864 / 0.869; stopped at ~500 | the fit as an input is not used: behind fyT2 on every score, and without fyV's gain on hidden points |
 | fyT2 | fyT's weights trained on as they were (gdev, cut at 2 h) | the reference for fyX| at 250 / 500: seen moving 0.929 / 0.931, moving hidden 0.696 / 0.703, forecast moving 0.393 / 0.392, all 0.874 / 0.875 | |
+| fyY | fyT's weights + the visibility output fed back each round (`--vis-loss 1 --vis-feedback 1`) + frame t-1 against frame t over a whole-frame 24 x 24 grid, read by every point at its 16 nearest cells (`--grid-cmp 24`) | turned and hidden points closer than fyZ; the ball test's spin nearer its sliding | | does the whole-frame comparison carry turning surfaces, hidden backs included |
+| fyZ | fyT's weights + the visibility output fed back each round (gdev, cut at 2 h) | the reference for fyY | | |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 

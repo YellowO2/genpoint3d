@@ -293,6 +293,12 @@ class Settings(argparse.Namespace):
                        help="--rigid-fit with --fine-neigh: each round, the matcher turns "
                             "frame 0's neighbourhood by the rotation the last round's fit "
                             "found before comparing (FineFinder._neighbourhoods).")
+        p.add_argument("--grid-cmp", type=int, default=0, metavar="S",
+                       help="--fine-neigh: compare frame t-1 with frame t at an S x S grid of "
+                            "cells over the whole frame, once per clip, and let every point read "
+                            "the --grid-window cells nearest its guess each round (PointDiT."
+                            "grid_comparison). 0 off.")
+        p.add_argument("--grid-window", type=int, default=16, metavar="K")
         p.add_argument("--fit-input", type=int, default=0, choices=[0, 1],
                        help="--rigid-fit: the rigid state is carried from round to round: "
                             "each round every point is also given the last round's fit "
@@ -399,6 +405,8 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
+        if settings.grid_cmp and not (settings.fine and settings.fine_neigh):
+            p.error("--grid-cmp uses the 3D neighbourhood finder: needs --fine 1 and --fine-neigh K")
         if settings.fit_input and not settings.rigid_fit:
             p.error("--fit-input hands each point the rigid fit's position: needs --rigid-fit E")
         if settings.rot_match and not (settings.rigid_fit and settings.fine_neigh):

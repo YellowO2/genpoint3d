@@ -79,6 +79,10 @@ CONFIGS = [
      "--window", "4", "--overlap", "2", "--causal", "0", "--motion-waves", "1"],
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--window", "4",
      "--overlap", "2", "--cross-window", "9"],
+    # Frame t-1 against frame t over a whole-frame grid, read by every point.
+    ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8", "--fine-prev", "1",
+     "--grid-cmp", "4", "--grid-window", "4", "--window", "4", "--overlap", "2", "--causal", "0",
+     "--vis-loss", "1", "--vis-feedback", "1"],
     # Each point moved towards its soft group's rigid motion.
     ["--method", "regress", "--fine", "1", "--fine-xyz", "1", "--fine-neigh", "8",
      "--rigid-fit", "8", "--window", "4", "--overlap", "2", "--causal", "0"],
