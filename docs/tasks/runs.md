@@ -204,3 +204,22 @@ point's group holds, 95% or more truly move with it to 5 mm for points moving
 Scored with 6 rounds instead of 4 (fit in 2): small motion unchanged (0.82 px
 at 4-8 px), far worse. A placed fit is coarser than a close guess and the
 rounds after do not win it back.
+
+## Where forecasting fails (scoring only, `scripts/forecast_split.py`, frames 12-23 forecast)
+
+Points split by their true track over frames 11-23: at rest (moves < 1 cm),
+smooth (acceleration never jumps by more than 0.02 m/frame^3), impact (it
+does). Median error in metric px over the forecast frames, fyT / fyV, against
+holding the last seen position (stop) and keeping the last speed:
+
+| kind | share of point-frames | fyT | fyV | stop | last speed |
+|---|---|---|---|---|---|
+| at rest | 74% | 0.02 | 0.04 | 0.00 | 0.00 |
+| smooth | 6% | 1.78 | 2.37 | 1.81 | 2.28 |
+| impact | 20% | 11.8 | 11.2 | 19.2 | 15.5 |
+
+Almost no free motion is left by frame 12 (Kubric's objects land early), and
+the little smooth motion is slow. The forecast error is the points that hit
+something in the forecast frames: the model beats both baselines there but is
+still 11-12 px off. Spin and momentum would help little; contact, the unseen
+shape that makes it, and more than one possible outcome are where it is lost.
