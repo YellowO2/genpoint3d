@@ -268,3 +268,21 @@ fitted to it, the spinning ball is tracked as well as the sliding one, and
 the fast spin the models lose entirely is followed to 2 px. The core of the
 scene-points design holds; what the learned version must supply is the
 grouping (here the truth) and its own frame comparison.
+
+## On the spinning ball, drawn position against depth (fyT, `scripts/error_split.py`)
+
+Median error for seen points that moved more than 16 px, in metric px: the 3D
+error, the gap between the drawn pixels (256 px frame), the gap in depth.
+
+| motion | 3D | 2D | depth |
+|---|---|---|---|
+| sliding | 0.44 | 0.30 | 0.22 |
+| spin, vertical axis, 5 deg | 1.02 | 0.74 | 0.43 |
+| spin, vertical axis, 10 deg | 1.13 | 0.82 | 0.48 |
+| spin, horizontal axis, 10 deg | 1.02 | 0.69 | 0.53 |
+| rolling | 1.95 | 1.45 | 0.99 |
+| spin, vertical axis, 20 deg | 58.4 | 26.4 | 33.6 |
+
+Both grow with the turn, about 2.5 times sliding's; the drawn position is the
+larger part. The model puts a turned point in the wrong place in the image,
+not only at the wrong depth.
