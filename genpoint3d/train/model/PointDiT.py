@@ -98,6 +98,7 @@ class PointDiT(nn.Module):
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
         group_oracle: bool = False,
+        group_vis_bias: bool = False,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -507,6 +508,16 @@ class PointDiT(nn.Module):
             self.group_out = nn.Linear(dim, group_feedback)
             self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
             self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
+        # `group_vis_bias`: a second bias, per block and head, on the same
+        # affinity times how sure the model is that the querying point is
+        # hidden and the other one seen in that frame (both from the fed-back
+        # visibility): a hidden point can lean on its seen group-mates harder
+        # than the plain bias lets every point lean on all of them.
+        if group_vis_bias and not (group_feedback and vis_feedback):
+            raise ValueError("group_vis_bias reads the fed-back groups and visibility: needs both")
+        self.group_vis_bias = group_vis_bias
+        if group_vis_bias:
+            self.group_hid_bias = nn.Parameter(torch.zeros(depth, num_heads))
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -1154,8 +1165,13 @@ class PointDiT(nn.Module):
                 raise ValueError("group_pairs is given exactly when the model was built with group_oracle")
             a = group_pairs.float() if group_pairs is not None else 2 * torch.sigmoid(-_sq_dist(v))  # (B, N, N)
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
-            biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
-                      + (0 if bb_d is None else bb_d)
+            hid = None
+            if self.group_vis_bias:
+                seen = torch.sigmoid(vis_prev.float()).reshape(B * T, N)
+                hid = a * ((1 - seen)[:, :, None] * seen[:, None, :])[:, None]          # (B*T, 1, N, N)
+            biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]
+                       + (0 if hid is None else hid * self.feedback_scale * self.group_hid_bias[d][:, None, None])
+                       ).to(h.dtype) + (0 if bb_d is None else bb_d)
                       for d, bb_d in enumerate(biases)]
 
         # --- positions for RoPE, and the causal mask ---

@@ -68,6 +68,7 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     group_feedback=a("group_feedback", 0),
                     feedback_scale=a("feedback_scale", 1.0),
                     group_oracle=bool(a("group_oracle", 0)),
+                    group_vis_bias=bool(a("group_vis_bias", 0)),
                     motion_waves=bool(a("motion_waves", 0)),
                     buddies=bool(a("buddies", 0)),
                     buddy_bias=bool(a("buddy_bias", 0)),

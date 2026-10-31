@@ -325,6 +325,10 @@ class Settings(argparse.Namespace):
                             "attention bias uses the true pairs that move as one in "
                             "place of the vectors' affinity, in training and scoring. "
                             "0 off.")
+        p.add_argument("--group-vis-bias", type=int, default=0, choices=[0, 1],
+                       help="--group-feedback with --vis-feedback: a second attention "
+                            "bias towards group-mates, scaled by how hidden the point is "
+                            "and how seen the other one is in that frame. 0 off.")
         p.add_argument("--group-feedback", type=int, default=0, metavar="E",
                        help="regress only, with --group-loss: every point also says an "
                             "E-wide group vector, fed back to the next round into its "
