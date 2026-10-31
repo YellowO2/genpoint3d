@@ -204,6 +204,8 @@ def main() -> int:
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="forecast: frames C on get no image, as in evaluate.py")
     p.add_argument("--sample-steps", type=int, default=50)
+    p.add_argument("--batch", type=int, default=None,
+                   help="clips per batch; the run's own by default. 1 for clips with different numbers of points")
     p.add_argument("--out", required=True, help="directory for the mp4s and PNGs")
     p.add_argument("--draw-truth-as-pred", action="store_true",
                    help="debug: draw the truth as the prediction; red must sit on green")
@@ -233,7 +235,7 @@ def main() -> int:
                      features=bool(targs.get("dino", 1)), depth=fine_xyz)
     # The trainer's val batch size: flow sampling draws its noise per batch,
     # so this is what makes these the very samples the val APD scored.
-    loader = DataLoader(ds, batch_size=targs.get("batch", 1), shuffle=False, num_workers=2)
+    loader = DataLoader(ds, batch_size=args.batch or targs.get("batch", 1), shuffle=False, num_workers=2)
 
     model = build_model(Settings(**targs), split.feat_dim, split.has_feats).to(device)
     model.load_state_dict(ckpt["model"])
