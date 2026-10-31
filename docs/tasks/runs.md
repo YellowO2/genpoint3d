@@ -244,3 +244,27 @@ Sliding without turning is tracked to 0.4% of the distance; the same ball
 spinning is 3 times further off, rolling 5 times. The fit helps slow spin
 about the vertical axis and costs sliding, rolling and spin about the
 horizontal axis. At 20 deg a frame both lose the ball altogether.
+
+## Whole-frame flow and a rigid fit on the spinning ball (no model, `scripts/ball_flow_fit.py`)
+
+SEA-RAFT between neighbouring frames over the whole frame, every ball cell
+seen in both (which cells are the ball's from its true centre, standing in
+for learned grouping; true depth), the ball's rotation and shift fitted each
+step and composed; the points carried by it from frame 0. Median error in
+metric px at 32-64 / 64-128 px moved, against the models on the same clips:
+
+| motion | flow + rigid fit | fyT | fyV |
+|---|---|---|---|
+| sliding | 0.32 / 0.57 | 0.39 / 0.50 | 0.67 / 0.92 |
+| spin, vertical axis, 5 deg a frame | 0.50 / 0.75 | 1.04 / 1.28 | 0.61 / 0.84 |
+| spin, vertical axis, 10 deg | 0.30 / 0.50 | 1.00 / 1.63 | 0.68 / 1.45 |
+| spin, horizontal axis, 10 deg | 0.30 / 0.40 | 0.93 / 1.64 | 0.80 / 2.69 |
+| spin, vertical axis, 20 deg | 2.44 / 2.51 | lost (50-65) | lost (40-56) |
+| spin, horizontal axis, 20 deg | 1.67 / 1.45 | lost (44-58) | lost (30-46) |
+| rolling | 0.63 / 1.02 | 1.85 / 2.43 | 1.94 / 3.02 |
+
+With the whole visible surface compared frame to frame and one rigid motion
+fitted to it, the spinning ball is tracked as well as the sliding one, and
+the fast spin the models lose entirely is followed to 2 px. The core of the
+scene-points design holds; what the learned version must supply is the
+grouping (here the truth) and its own frame comparison.
