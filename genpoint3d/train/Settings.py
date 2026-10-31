@@ -315,6 +315,11 @@ class Settings(argparse.Namespace):
         p.add_argument("--group-loss", type=float, default=0.0, metavar="W",
                        help="--rigid-fit or --group-feedback: the points' vectors are also "
                             "scored against the pairs the truth shows moving as one, weighted W.")
+        p.add_argument("--feedback-scale", type=float, default=1.0, metavar="S",
+                       help="--vis-feedback / --group-feedback: what the fed-back "
+                            "visibility and groups add is multiplied by S, so their "
+                            "zero-started weights reach a useful size in a short run "
+                            "(PointDiT, visibility fed back). 1: every run before it.")
         p.add_argument("--group-feedback", type=int, default=0, metavar="E",
                        help="regress only, with --group-loss: every point also says an "
                             "E-wide group vector, fed back to the next round into its "

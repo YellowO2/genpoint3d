@@ -66,6 +66,7 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     visibility=a("vis_loss", 0.0) > 0,
                     vis_feedback=bool(a("vis_feedback", 0)),
                     group_feedback=a("group_feedback", 0),
+                    feedback_scale=a("feedback_scale", 1.0),
                     motion_waves=bool(a("motion_waves", 0)),
                     buddies=bool(a("buddies", 0)),
                     buddy_bias=bool(a("buddy_bias", 0)),

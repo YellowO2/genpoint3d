@@ -96,6 +96,7 @@ class PointDiT(nn.Module):
         visibility: bool = False,
         vis_feedback: bool = False,
         group_feedback: int = 0,
+        feedback_scale: float = 1.0,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -432,6 +433,13 @@ class PointDiT(nn.Module):
         if vis_feedback and not visibility:
             raise ValueError("vis_feedback feeds the visibility head back, which needs visibility")
         self.vis_feedback = vis_feedback
+        # The fed-back visibility and groups (below) enter through weights
+        # that start at zero, and Adam moves a weight about the learning rate a
+        # step whatever its gradient: at 2e-4, 0.1 in 500 steps, where an
+        # attention bias needs about 1 to matter (runs.md, fzA's group bias at
+        # 0.01). `feedback_scale` multiplies what they add, so the same steps
+        # go that much further. Still zero at step 0.
+        self.feedback_scale = feedback_scale
         if vis_feedback:
             self.vis_in = nn.Parameter(torch.zeros(dim))
 
@@ -1114,7 +1122,7 @@ class PointDiT(nn.Module):
         if self.vis_feedback != (vis_prev is not None):
             raise ValueError("vis_prev is given exactly when the model was built with vis_feedback")
         if vis_prev is not None:
-            h = h + vis_prev[..., None].to(h.dtype) * self.vis_in.to(h.dtype)
+            h = h + vis_prev[..., None].to(h.dtype) * (self.feedback_scale * self.vis_in).to(h.dtype)
         biases = [None] * self.depth
         if self.buddies is not None:
             prop, support, bb = self.buddies(self._lookup_pos(x, anchor), anchor, vis_prev)
@@ -1128,10 +1136,11 @@ class PointDiT(nn.Module):
         if self.group_feedback:
             v = (group_prev.float() if group_prev is not None
                  else torch.zeros(B, N, self.group_feedback, device=dev))
-            h = h + self.group_in(v.to(h.dtype))[:, None]
+            h = h + self.feedback_scale * self.group_in(v.to(h.dtype))[:, None]
             a = 2 * torch.sigmoid(-_sq_dist(v))                                # (B, N, N)
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
-            biases = [(a * self.group_bias[d][:, None, None]).to(h.dtype) + (0 if bb_d is None else bb_d)
+            biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
+                      + (0 if bb_d is None else bb_d)
                       for d, bb_d in enumerate(biases)]
 
         # --- positions for RoPE, and the causal mask ---
