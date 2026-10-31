@@ -459,8 +459,10 @@ def main() -> int:
             print("    NOTE: per-frame APD is always 3D, over all visible points,"
                   " with no oracle axis.\n    --space, --min-motion-px and"
                   " --oracle-axis do NOT apply to it; only --scaling does.")
+        top = max((v for v in per_frame if v == v), default=0.0)
         for t, v in enumerate(per_frame):
-            bar = "#" * int(round(v / max(max(per_frame), 1e-9) * 40))
+            # NaN where a frame has no moving point to score (a still scene).
+            bar = "" if v != v else "#" * int(round(v / max(top, 1e-9) * 40))
             print(f"    frame {t:>2}  {v:.4f}  {bar}")
         print(f"\n    frame 0 {per_frame[0]:.4f}  ->  frame {len(per_frame)-1}"
               f" {per_frame[-1]:.4f}")

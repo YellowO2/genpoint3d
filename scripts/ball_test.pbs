@@ -36,7 +36,7 @@ for CKPT in ${CKPTS:?}; do
     echo "########## $CKPT  $M"
     python scripts/evaluate.py --ckpt "$CKPT" --cache $B/by_motion/$M --frames-cache $B/frames \
       --points 1000 --batch 1 --per-frame --out $B/score_$(basename $(dirname $CKPT))_$M.json \
-      | grep -A10 "error against how far it has moved$" | head -11
+      | grep -A10 "error against how far it has moved$" | head -11 || true
   done
 done
 echo "=== BALL TEST DONE ==="
