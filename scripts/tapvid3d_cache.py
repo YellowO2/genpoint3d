@@ -42,6 +42,8 @@ p.add_argument("--src", required=True, help="TAPVid-3D .npz files with their .da
 p.add_argument("--dst", required=True)
 p.add_argument("--frames-dst", required=True)
 p.add_argument("--every", type=int, default=8, help="keep every n-th query frame of a clip")
+p.add_argument("--depth-suffix", default=".da3.npy",
+               help="the depth beside each clip: Depth Anything 3's, or the true one of a rendered clip")
 args = p.parse_args()
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,7 +55,7 @@ fdst.mkdir(parents=True, exist_ok=True)
 for src in sorted(Path(args.src).glob("*.npz")):
     d = np.load(src, allow_pickle=True)
     frames = torch.from_numpy(d["images"])                                    # (T, H, W, 3)
-    depth = torch.from_numpy(np.load(src.with_suffix(".da3.npy")).astype(np.float32))
+    depth = torch.from_numpy(np.load(src.with_suffix(args.depth_suffix)).astype(np.float32))
     T, H, W = frames.shape[:3]
     fx, fy, cx, cy = d["fx_fy_cx_cy"]
     K = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float32)
