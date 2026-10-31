@@ -330,10 +330,10 @@ def main() -> int:
                    help="regress, CNN-only models: also track an S x S grid of "
                         "helper points over frame 0 and score the queries only "
                         "(TAPIP3D's test-time support grid uses 16)")
-    p.add_argument("--reach", default="hold", choices=["hold", "continue"],
+    p.add_argument("--reach", default=None, choices=["hold", "continue"],
                    help="regress in windows: each window's new frames start held "
-                        "where the point last was (as trained), or carrying on at "
-                        "its speed over the frames shared with the window before")
+                        "where the point last was, or carrying on at its speed over "
+                        "the frames shared with the window before; default as trained")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -412,10 +412,11 @@ def main() -> int:
           f" | norm {targs.get('norm_mode', 'median')}"
           f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
 
+    reach = args.reach or targs.get("reach", "hold")
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
                               anchor_frame0, args.scaling, method,
                               refine_iters, param, carry, window, overlap,
-                              args.reach) if args.per_frame else None
+                              reach) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
     judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
                             anchor_frame0=anchor_frame0, loss_type=loss_type,
@@ -424,7 +425,7 @@ def main() -> int:
                             method=method, refine_iters=refine_iters, param=param, carry=carry,
                             window=window, overlap=overlap,
                             cutoff=args.eval_cutoff, samples=args.samples,
-                            support=args.support, reach=args.reach)
+                            support=args.support, reach=reach)
     m = score(model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

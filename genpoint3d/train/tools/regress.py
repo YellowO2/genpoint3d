@@ -242,6 +242,7 @@ def regress_loss(
     groups: Optional[torch.Tensor] = None,
     group_weight: float = 0.0,
     fit_weight: float = 0.0,
+    reach: str = "hold",
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -303,7 +304,7 @@ def regress_loss(
     total = vis_total = x1.new_zeros(())
     done = 0
     for start, end in spans:
-        whole = _reach(whole, done, end)
+        whole = _reach(whole, done, end, start, reach)
         g, x1_w = whole[:, start:end], x1[:, start:end]
         mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
         kx0 = known_x0 if start == 0 else None

@@ -272,6 +272,11 @@ class Settings(argparse.Namespace):
                             "(`regress._windows`).")
         p.add_argument("--overlap", type=int, default=4, metavar="F",
                        help="frames each window shares with the one before it.")
+        p.add_argument("--reach", default="hold", choices=["hold", "continue"],
+                       help="--window: each window's new frames start held where the "
+                            "point last was, or carrying on at its speed over the "
+                            "frames shared with the window before (`regress._reach`); "
+                            "in training and scoring.")
         p.add_argument("--fine-neigh", type=int, default=0, metavar="K",
                        help="--fine-xyz only: replace the finder's 7x7 window "
                             "with TAPIP3D's lookup, the K cells nearest the guess "
