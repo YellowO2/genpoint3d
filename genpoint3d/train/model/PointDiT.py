@@ -95,6 +95,7 @@ class PointDiT(nn.Module):
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
+        group_feedback: int = 0,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -472,6 +473,25 @@ class PointDiT(nn.Module):
                 raise ValueError("TAPIP3D's updater reads the 3D-neighbourhood finder, with no DINOv3")
             self.tap = TapUpdater(self.fine.out_dim)
 
+        # [groups fed back] with `group_feedback` every point also says a
+        # `group_feedback`-wide vector, one for the window: points on one rigid
+        # object should have close vectors (trained by `regress_loss`'s
+        # group_weight against the truth's rigid pairs). The next round is
+        # given it, as visibility is: into each point's token, and as a bias
+        # in the attention between points, per block and head, scaling the
+        # affinity 2 sigmoid(-|v_i - v_j|^2), so a point can learn to listen
+        # to its own object -- a hidden one most of all, knowing from the fed
+        # back visibility that it is hidden. Zeros before the first round, and
+        # both inputs start at zero, so step 0 is the model without it.
+        self.group_feedback = group_feedback
+        self._emb = None
+        if group_feedback:
+            if virtual:
+                raise ValueError("group_feedback biases the attention between points, which virtual tracks replace")
+            self.group_out = nn.Linear(dim, group_feedback)
+            self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
+            self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -707,6 +727,7 @@ class PointDiT(nn.Module):
         grid: tuple | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
+        group_prev: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -756,6 +777,9 @@ class PointDiT(nn.Module):
                                      iteration gave, 0 before the first.
                                      Required by a model built with
                                      `vis_feedback`, refused by any other.
+        group_prev:  (B, N, E)       the group vectors the previous round
+                                     said (`group_feedback`); None before the
+                                     first, read as zeros.
         frames:      (start, end)    the clip's frames `x` covers, one window
                                      of a longer clip; the visual arguments
                                      are still the whole clip's, and its
@@ -1099,6 +1123,16 @@ class PointDiT(nn.Module):
             h = h + self.buddy_tok(torch.cat([prop, support[..., None]], -1).to(h.dtype))
             if bb is not None:
                 biases = [b.to(h.dtype) for b in bb]
+        if group_prev is not None and not self.group_feedback:
+            raise ValueError("group_prev is fed back to a model built with group_feedback")
+        if self.group_feedback:
+            v = (group_prev.float() if group_prev is not None
+                 else torch.zeros(B, N, self.group_feedback, device=dev))
+            h = h + self.group_in(v.to(h.dtype))[:, None]
+            a = 2 * torch.sigmoid(-_sq_dist(v))                                # (B, N, N)
+            a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
+            biases = [(a * self.group_bias[d][:, None, None]).to(h.dtype) + (0 if bb_d is None else bb_d)
+                      for d, bb_d in enumerate(biases)]
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in
@@ -1166,6 +1200,9 @@ class PointDiT(nn.Module):
 
         # --- [5] head ---
         h = self.out_norm(h)
+        if self.group_feedback:
+            # One vector per point for the window, as `rigid_fit`'s below.
+            self._emb = self.group_out(h).float().mean(1)
         if self.rigid_fit:
             # Kept for `settle`, which the refinement calls on this pass's
             # guess straight after it. One group per point for the whole

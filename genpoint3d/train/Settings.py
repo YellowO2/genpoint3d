@@ -313,8 +313,13 @@ class Settings(argparse.Namespace):
                        help="--rigid-fit: the refinement rounds the fit places the points in; "
                             "the rounds after refine from there.")
         p.add_argument("--group-loss", type=float, default=0.0, metavar="W",
-                       help="--rigid-fit only: the points' vectors are also scored "
-                            "against the pairs the truth shows moving as one, weighted W.")
+                       help="--rigid-fit or --group-feedback: the points' vectors are also "
+                            "scored against the pairs the truth shows moving as one, weighted W.")
+        p.add_argument("--group-feedback", type=int, default=0, metavar="E",
+                       help="regress only, with --group-loss: every point also says an "
+                            "E-wide group vector, fed back to the next round into its "
+                            "token and as an attention bias towards points with close "
+                            "vectors (PointDiT, groups fed back). 0 off.")
         p.add_argument("--fit-loss", type=float, default=0.0, metavar="W",
                        help="--rigid-fit only: the fitted positions are also scored "
                             "like the guess in every round, weighted W.")
@@ -416,8 +421,12 @@ class Settings(argparse.Namespace):
         if settings.rot_match and not (settings.rigid_fit and settings.fine_neigh):
             p.error("--rot-match turns the 3D neighbourhood by the fit's rotation: needs "
                     "--rigid-fit E and --fine-neigh K")
-        if (settings.group_loss or settings.fit_loss) and not settings.rigid_fit:
-            p.error("--group-loss and --fit-loss train the rigid fit: need --rigid-fit E")
+        if settings.group_feedback and (settings.group_loss <= 0 or settings.method != "regress"):
+            p.error("--group-feedback trains its vectors by --group-loss W, in --method regress")
+        if settings.fit_loss and not settings.rigid_fit:
+            p.error("--fit-loss trains the rigid fit: needs --rigid-fit E")
+        if settings.group_loss and not (settings.rigid_fit or settings.group_feedback):
+            p.error("--group-loss trains group vectors: needs --rigid-fit E or --group-feedback E")
         if settings.rigid_fit and settings.method != "regress":
             p.error("--rigid-fit settles each refinement's guess: --method regress")
         if settings.depth_loss and not settings.fine:

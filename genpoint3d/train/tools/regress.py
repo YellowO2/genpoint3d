@@ -150,6 +150,8 @@ def _turn(model: nn.Module) -> dict:
     if getattr(model, "fit_input", False):
         fit, emb, R, conf = model._fitted
         out["fit_hint"] = (fit.detach(), R, emb.detach(), conf.detach())
+    if getattr(model, "group_feedback", 0):
+        out["group_prev"] = model._emb.detach()
     return out
 
 
@@ -328,12 +330,11 @@ def regress_loss(
                 loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
             if rigid_weight:
                 loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs, loss_type)
-            if fit_weight or group_weight:
-                fitted, emb = model._fitted[:2]
-                if fit_weight:
-                    loss = loss + w[i] * fit_weight * masked_error(fitted, x1_w, mask_w, weight_w, loss_type)
-                if group_weight:
-                    loss = loss + w[i] * group_weight * _group_error(emb, groups)
+            if fit_weight:
+                loss = loss + w[i] * fit_weight * masked_error(model._fitted[0], x1_w, mask_w, weight_w, loss_type)
+            if group_weight:
+                emb = model._emb if getattr(model, "group_feedback", 0) else model._fitted[1]
+                loss = loss + w[i] * group_weight * _group_error(emb, groups)
             loss = share * loss
             if backward is not None:
                 # Out of autocast, where the training loop's own backward runs.
