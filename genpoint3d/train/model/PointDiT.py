@@ -97,6 +97,7 @@ class PointDiT(nn.Module):
         vis_feedback: bool = False,
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
+        group_oracle: bool = False,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -492,6 +493,13 @@ class PointDiT(nn.Module):
         # back visibility that it is hidden. Zeros before the first round, and
         # both inputs start at zero, so step 0 is the model without it.
         self.group_feedback = group_feedback
+        # `group_oracle`, a diagnostic: the attention bias uses the truth's
+        # pairs that move as one (`batch.rigid_groups`, handed in as
+        # `group_pairs`) in place of the vectors' affinity, so whether the
+        # points use a right grouping is tested apart from learning one.
+        if group_oracle and not group_feedback:
+            raise ValueError("group_oracle replaces group_feedback's affinity: needs group_feedback")
+        self.group_oracle = group_oracle
         self._emb = None
         if group_feedback:
             if virtual:
@@ -736,6 +744,7 @@ class PointDiT(nn.Module):
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
+        group_pairs: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -788,6 +797,10 @@ class PointDiT(nn.Module):
         group_prev:  (B, N, E)       the group vectors the previous round
                                      said (`group_feedback`); None before the
                                      first, read as zeros.
+        group_pairs: (B, N, N) bool  the truth's pairs that move as one, in
+                                     place of the vectors' affinity; given
+                                     exactly to a model built with
+                                     `group_oracle`.
         frames:      (start, end)    the clip's frames `x` covers, one window
                                      of a longer clip; the visual arguments
                                      are still the whole clip's, and its
@@ -1137,7 +1150,9 @@ class PointDiT(nn.Module):
             v = (group_prev.float() if group_prev is not None
                  else torch.zeros(B, N, self.group_feedback, device=dev))
             h = h + self.feedback_scale * self.group_in(v.to(h.dtype))[:, None]
-            a = 2 * torch.sigmoid(-_sq_dist(v))                                # (B, N, N)
+            if self.group_oracle != (group_pairs is not None):
+                raise ValueError("group_pairs is given exactly when the model was built with group_oracle")
+            a = group_pairs.float() if group_pairs is not None else 2 * torch.sigmoid(-_sq_dist(v))  # (B, N, N)
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
             biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
                       + (0 if bb_d is None else bb_d)

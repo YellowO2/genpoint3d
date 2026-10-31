@@ -320,6 +320,11 @@ class Settings(argparse.Namespace):
                             "visibility and groups add is multiplied by S, so their "
                             "zero-started weights reach a useful size in a short run "
                             "(PointDiT, visibility fed back). 1: every run before it.")
+        p.add_argument("--group-oracle", type=int, default=0, choices=[0, 1],
+                       help="--group-feedback, a diagnostic that reads the truth: the "
+                            "attention bias uses the true pairs that move as one in "
+                            "place of the vectors' affinity, in training and scoring. "
+                            "0 off.")
         p.add_argument("--group-feedback", type=int, default=0, metavar="E",
                        help="regress only, with --group-loss: every point also says an "
                             "E-wide group vector, fed back to the next round into its "

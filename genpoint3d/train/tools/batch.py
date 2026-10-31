@@ -201,6 +201,9 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
             raise ValueError("this model reads the optical flow around each guess, and the "
                              "batch has none: load the clips with --flow-cache")
         out["fine_flow"] = b["flow"].float()
+    if getattr(model, "group_oracle", False):
+        # A diagnostic that reads the truth (`--group-oracle`).
+        out["group_pairs"] = rigid_groups(b)
     return out
 
 
