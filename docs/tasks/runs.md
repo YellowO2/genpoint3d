@@ -342,3 +342,20 @@ Of the points a point's group holds, 96-99.6% truly move with it for points
 moving 8 px or more, and 85-97% of its true mates are in it; points moving
 1-8 px are put with the still floor (54-66%). The groups are right where it
 matters, so they are not why the group bias goes unused.
+
+## Against last week's report (standard scoring: 100 val clips, 256 points; `scripts/fit_check.pbs`)
+
+Tracking with every frame's image; forecasting with frames 12-23 blank
+(CUTOFF=12). fyO is last week's reported model (week 9).
+
+| | all points | non-visible | moving non-visible | forecast (all) | forecast (moving) | seen moving, forecast run |
+|---|---|---|---|---|---|---|
+| fyO, last week | 0.911 | 0.488 | 0.401 | 0.632 | 0.379 | 0.892 |
+| fyP, frame-before comparison | 0.921 | 0.556 | 0.454 | 0.635 | 0.386 | 0.908 |
+| fyT, fyP's line on the dense data (the ball model) | 0.920 | 0.546 | 0.448 | 0.625 | 0.385 | 0.907 |
+| fyV, rigid fit in rounds 1-2 | 0.906 | 0.546 | 0.463 | 0.609 | 0.346 | 0.871 |
+
+fyP is the single best: +0.010 on all points, +0.068 on non-visible points,
+forecasting level or a little better. fyT is level with it; the dense data and
+the shut gate added nothing on this protocol. fyV's fit helps moving
+non-visible points and costs everything else.
