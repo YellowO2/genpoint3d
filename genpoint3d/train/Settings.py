@@ -299,6 +299,10 @@ class Settings(argparse.Namespace):
                             "the --grid-window cells nearest its guess each round (PointDiT."
                             "grid_comparison). 0 off.")
         p.add_argument("--grid-window", type=int, default=16, metavar="K")
+        p.add_argument("--fine-prev-skip", type=int, default=0, choices=[0, 1],
+                       help="--fine-prev: do not make the per-point frame-before comparison; "
+                            "zeros fill its place, so a run trained with it loads. A test of "
+                            "--grid-cmp in its place.")
         p.add_argument("--fit-input", type=int, default=0, choices=[0, 1],
                        help="--rigid-fit: the rigid state is carried from round to round: "
                             "each round every point is also given the last round's fit "

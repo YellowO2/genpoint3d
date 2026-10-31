@@ -132,6 +132,10 @@ class FineFinder(nn.Module):
         # weights above draw what they draw without it; `copy_prev` starts it
         # as the frame-0 comparison once that has its weights.
         self.prev = prev
+        # A test of the whole-frame grid in its place (PointDiT `grid_cmp`): the
+        # frame-before comparison is not made, and zeros fill its half, so a
+        # model trained with it still loads. Set by `--fine-prev-skip`.
+        self.prev_skip = False
         if prev:
             if not neigh:
                 raise ValueError("the frame-before comparison is the 3D neighbourhood's (neigh)")
@@ -360,7 +364,9 @@ class FineFinder(nn.Module):
                 turned = torch.einsum("btnxy,bnky->btnkx", rot.float(), sup_off)
                 x = (sup_f[:, None] + enc(_posenc(turned))).flatten(0, 2)    # (b T N, k+1, D)
             out.append(self.transformers[lvl](x, y.flatten(0, 2)).reshape(b, T, N, -1))
-            if self.prev:
+            if self.prev and self.prev_skip:
+                out_prev.append(out[-1].new_zeros(out[-1].shape))
+            elif self.prev:
                 out_prev.append(self._before(f, x_cells, pick, before, uv, pos, hl, wl, s, enc,
                                              self.prev_transformers[lvl], y))
         return torch.cat(out + out_prev, dim=-1)

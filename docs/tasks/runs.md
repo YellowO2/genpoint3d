@@ -40,6 +40,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fyT2 | fyT's weights trained on as they were (gdev, cut at 2 h) | the reference for fyX| at 250 / 500: seen moving 0.929 / 0.931, moving hidden 0.696 / 0.703, forecast moving 0.393 / 0.392, all 0.874 / 0.875 | |
 | fyY | fyT's weights + the visibility output fed back each round (`--vis-loss 1 --vis-feedback 1`) + frame t-1 against frame t over a whole-frame 24 x 24 grid, read by every point at its 16 nearest cells (`--grid-cmp 24`) | turned and hidden points closer than fyZ; the ball test's spin nearer its sliding | | does the whole-frame comparison carry turning surfaces, hidden backs included |
 | fyZ | fyT's weights + the visibility output fed back each round (gdev, cut at 2 h) | the reference for fyY | | |
+| fyY2 | fyY without the per-point frame-before comparison (`--fine-prev-skip 1`: not made, zeros in its place so fyT's weights load): the whole-frame grid instead of it, not beside it (gdev, cut at 2 h) | as fyY or better | | is the per-point frame-before comparison redundant once the grid is there |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 

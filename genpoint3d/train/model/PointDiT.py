@@ -91,6 +91,7 @@ class PointDiT(nn.Module):
         fit_input: bool = False,
         grid_cmp: int = 0,
         grid_window: int = 16,
+        fine_prev_skip: bool = False,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
@@ -372,6 +373,10 @@ class PointDiT(nn.Module):
         # a turning ball can read the visible side turning. The blocks start at
         # zero, so a model starts as it would without.
         self.grid_cmp, self.grid_window = grid_cmp, grid_window
+        if fine_prev_skip:
+            if not (fine and self.fine.prev):
+                raise ValueError("fine_prev_skip leaves out the frame-before comparison, which needs fine_prev")
+            self.fine.prev_skip = True
         if grid_cmp:
             if not (fine and self.fine.neigh):
                 raise ValueError("the grid comparison is the 3D neighbourhood finder's (fine, neigh)")
