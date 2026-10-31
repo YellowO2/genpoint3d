@@ -99,7 +99,11 @@ class ClipDataset(Dataset):
         # because `n` is rebound below.
         pxyz = None if clip.patch_xyz is None else n.apply(clip.patch_xyz)
         if self.target == "displacement":
-            offset = traj[:1].clone()          # (1, N, 3), each point's own start
+            # Each point's own start, as the model is given it: the anchor.
+            # On Kubric that is frame 0 of the track exactly; on real video
+            # (TAPVid-3D) it is the query pixel at the estimated depth, and the
+            # true start must not reach the prediction through this offset.
+            offset = anchor[None].clone()      # (1, N, 3)
             traj = traj - offset
         else:
             offset = torch.zeros_like(traj[:1])
