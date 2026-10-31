@@ -340,15 +340,21 @@ class PointDiT(nn.Module):
         # wrong; the last rounds the sub-pixel detail, which the fit is too
         # coarse for (runs.md, fyU at its gate held open).
         self.rigid_fit, self.fit_rounds, self.rot_match = rigid_fit, fit_rounds, rot_match
-        # With `fit_input`, each round every point is also told where the last
-        # round's fit put it, as an offset from its guess, and decides itself
-        # how far to go there: a placed fit is coarser than a guess that is
-        # already close (runs.md, fyV by distance moved). Zero at first.
+        # With `fit_input`, the rigid state is carried from round to round, as
+        # RAFT-3D carries its rigid motions and SpatialTrackerV2 its dynamic
+        # probability and confidence: each round every point is also given
+        # what the last round's fit said -- where it put the point (as an
+        # offset from the guess), how its surface has turned since frame 0,
+        # its group vector and its confidence -- and decides itself how far to
+        # follow, and says a new group and confidence from there. A placed fit
+        # is coarser than a guess that is already close (runs.md, fyV by
+        # distance moved), so with this the fit usually places nothing
+        # (`fit_rounds` 0). Zero at first.
         self.fit_input = fit_input
         if fit_input:
             if not rigid_fit:
-                raise ValueError("the fit's offset comes from the rigid fit, which needs rigid_fit")
-            self.fit_proj = zero_init(nn.Linear(99, dim, bias=False), almost=False)
+                raise ValueError("the carried rigid state comes from the rigid fit, which needs rigid_fit")
+            self.fit_proj = zero_init(nn.Linear(99 + 6 + rigid_fit + 1, dim, bias=False), almost=False)
         self._group = self._fitted = None
         if rigid_fit:
             self.group_emb = nn.Linear(dim, rigid_fit)
@@ -529,8 +535,9 @@ class PointDiT(nn.Module):
                 flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
                 R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
             fit = self._target_units(torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct, anchor.float())
-            # The rotation goes to the next round's matcher (`rot_match`).
-            self._fitted = (fit, emb, R)
+            # The rotation goes to the next round's matcher (`rot_match`), and
+            # all of it to the next round's input (`fit_input`).
+            self._fitted = (fit, emb, R, conf)
             return fit.to(g.dtype) if i < self.fit_rounds else g
 
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
@@ -674,9 +681,11 @@ class PointDiT(nn.Module):
                                      frame 0, from the last round's fit, for a
                                      model built with `rot_match`; None in the
                                      first round
-        fit_hint:    (B, T, N, 3)    where the last round's fit put each point,
-                                     in `x`'s units, for a model built with
-                                     `fit_input`; None in the first round
+        fit_hint:    the last round's rigid state, for a model built with
+                                     `fit_input`, None in the first round:
+                                     (fit (B, T, N, 3) where it put each point,
+                                     in `x`'s units; rot (B, T, N, 3, 3); group
+                                     vectors (B, N, E); confidences (B, T, N))
         fine_flow:   (B, T, 2, h, w) at each CNN cell, how it moved since the
                                      frame before, as a fraction of the frame
                                      (0 at frame 0). Required by a model built
@@ -982,8 +991,21 @@ class PointDiT(nn.Module):
         if fine is not None:
             h = h + self.fine_tok(fine).to(h.dtype)
         if self.fit_input:
-            off = torch.zeros_like(x) if fit_hint is None else fit_hint.to(x.dtype) - x
-            h = h + self.fit_proj(_posenc(off.float()).to(h.dtype))
+            if fit_hint is None:
+                off = torch.zeros_like(x, dtype=torch.float32)
+                rot6 = torch.eye(3, device=dev)[:, :2].T.reshape(6).expand(B, T, N, 6)
+                emb = torch.zeros(B, T, N, self.rigid_fit, device=dev)
+                conf = torch.zeros(B, T, N, 1, device=dev)
+            else:
+                fit, R, v, c = fit_hint
+                off = fit.float() - x.float()
+                # The first two columns of the rotation: continuous, unlike
+                # angles, and enough to fix it.
+                rot6 = R[..., :, :2].transpose(-1, -2).reshape(B, T, N, 6).float()
+                emb = v.float()[:, None].expand(B, T, N, -1)
+                conf = c.float()[..., None]
+            state = torch.cat([_posenc(off), rot6, emb, conf], -1)
+            h = h + self.fit_proj(state.to(h.dtype))
         if flow is not None:
             h = h + self.flow_tok(flow).to(h.dtype)
         if self.vis_feedback != (vis_prev is not None):

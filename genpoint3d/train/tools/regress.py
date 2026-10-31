@@ -133,13 +133,15 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
 
 def _turn(model: nn.Module) -> dict:
     """What this round's fit hands the next round, as model call arguments:
-    its rotation for a model built with `rot_match`, its positions for one
-    built with `fit_input`."""
+    its rotation for a model built with `rot_match`; for one built with
+    `fit_input`, all of it -- positions, rotation, group vectors and
+    confidences -- detached like the guess."""
     out = {}
     if getattr(model, "rot_match", False):
         out["rot"] = model._fitted[2]
     if getattr(model, "fit_input", False):
-        out["fit_hint"] = model._fitted[0].detach()
+        fit, emb, R, conf = model._fitted
+        out["fit_hint"] = (fit.detach(), R, emb.detach(), conf.detach())
     return out
 
 
@@ -319,7 +321,7 @@ def regress_loss(
             if rigid_weight:
                 loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs, loss_type)
             if fit_weight or group_weight:
-                fitted, emb, _ = model._fitted
+                fitted, emb = model._fitted[:2]
                 if fit_weight:
                     loss = loss + w[i] * fit_weight * masked_error(fitted, x1_w, mask_w, weight_w, loss_type)
                 if group_weight:

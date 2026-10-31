@@ -294,9 +294,11 @@ class Settings(argparse.Namespace):
                             "frame 0's neighbourhood by the rotation the last round's fit "
                             "found before comparing (FineFinder._neighbourhoods).")
         p.add_argument("--fit-input", type=int, default=0, choices=[0, 1],
-                       help="--rigid-fit: each round every point is also given where the "
-                            "last round's fit put it, as an offset from its guess, and "
-                            "chooses how far to go; usually with --fit-rounds 0.")
+                       help="--rigid-fit: the rigid state is carried from round to round: "
+                            "each round every point is also given the last round's fit "
+                            "(where it put the point, how its surface turned, its group "
+                            "vector and confidence) and chooses how far to follow; usually "
+                            "with --fit-rounds 0.")
         p.add_argument("--fit-rounds", type=int, default=2, metavar="K",
                        help="--rigid-fit: the refinement rounds the fit places the points in; "
                             "the rounds after refine from there.")
