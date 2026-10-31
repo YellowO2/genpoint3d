@@ -286,3 +286,16 @@ error, the gap between the drawn pixels (256 px frame), the gap in depth.
 Both grow with the turn, about 2.5 times sliding's; the drawn position is the
 larger part. The model puts a turned point in the wrong place in the image,
 not only at the wrong depth.
+
+## The step tracker, our own comparison (step_a, `scripts/train_step.py`)
+
+TAPIP3D's comparison (its CNN frozen) between each point in frame t-1 at its
+true position and frame t around a guess, 3 refinements, trained 1,500 steps
+on the dense cache from true previous positions; a group head on DINOv3, the
+CNN and position. One step ends about 1 px off (median, 384 px frame).
+Chained over clips it does not work: with each point's own step even still
+points drift 6-7 px and moving ones are lost; with the rigid fit it blew up
+(the fit's weights collapsed, now floored). One step at 1 px against
+SEA-RAFT's far finer flow, and trained only from true previous positions, so
+it never learns to recover from its own errors. Next: SEA-RAFT's flow for the
+steps with the same learned groups, to tell the comparison from the rest.
