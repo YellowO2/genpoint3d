@@ -223,3 +223,24 @@ the little smooth motion is slow. The forecast error is the points that hit
 something in the forecast frames: the model beats both baselines there but is
 still 11-12 px off. Spin and momentum would help little; contact, the unseen
 shape that makes it, and more than one possible outcome are where it is lost.
+
+## The spinning-ball test (scoring only, `scripts/ball_test.pbs`)
+
+A textured ball over a textured floor, ray-traced with exact tracks and true
+depth (`scripts/render_ball.py`), 3 textures per motion, 24 frames; queries
+on the ball and floor at frame 0. Median error in metric px for points that
+moved 32-64 / 64-128 px, fyT (no fit) and fyV (fit in rounds 1-2):
+
+| motion | fyT | fyV |
+|---|---|---|
+| sliding, no spin | 0.39 / 0.50 | 0.67 / 0.92 |
+| spin about the vertical axis, 5 deg a frame | 1.04 / 1.28 | 0.61 / 0.84 |
+| the same, 10 deg a frame | 1.00 / 1.63 | 0.68 / 1.45 |
+| spin about the horizontal axis, 10 deg a frame | 0.93 / 1.64 | 0.80 / 2.69 |
+| rolling | 1.85 / 2.43 | 1.94 / 3.02 |
+| either spin at 20 deg a frame | 49-65 px: lost | 36-56 px: lost |
+
+Sliding without turning is tracked to 0.4% of the distance; the same ball
+spinning is 3 times further off, rolling 5 times. The fit helps slow spin
+about the vertical axis and costs sliding, rolling and spin about the
+horizontal axis. At 20 deg a frame both lose the ball altogether.
