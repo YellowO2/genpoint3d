@@ -47,6 +47,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fzB | fyY2's step-750 weights (the whole-frame grid in place of the per-point frame-before comparison) trained on for 2,000 more steps (g1) | closes on fyZ / fyT's plateau (seen moving 0.931, moving hidden 0.700) | at +500 / +1,000 / +1,500: seen moving 0.896 / 0.902 / 0.906, moving hidden 0.609 / 0.627 / 0.638, forecast moving 0.375 / 0.381 / 0.383, all 0.866 / 0.866 / 0.875; 6.8 s/step; stopped at ~1,600 | closing by 0.01-0.02 hidden a 500 steps, still 0.05 behind fyZ hidden and 0.02 seen: the coarse grid does not replace the per-point comparison here. Not tested: a finer grid, or training with the grid from scratch |
 | fzE | fzD (true groups) + a second bias towards group-mates scaled by how hidden the point is and how seen the other one is in that frame (`--group-vis-bias 1`) (gdev, cut at 2 h) | hidden moving above fyZ and fzD | | does an explicit pull of hidden points to their seen group-mates help, given right groups |
 | fzF | fzE with the learned groups (no oracle): the version that runs on real video (g1, 1,000 steps) | as fzE | | do the learned groups (right for moving points, check_groups) do as well as the truth |
+| fzG | fyZ (fyT's weights + visibility fed back) with each window's new frames starting at the point's speed over the shared frames instead of held at frame 15's position (`--reach continue`), in training and scoring (g1, 1,000 steps) | moving hidden and forecast above fyZ; on the ball, hidden points keep turning past frame 16 | | is the window handover what stops hidden points |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
@@ -361,3 +362,13 @@ fyP is the single best: +0.010 on all points, +0.068 on non-visible points,
 forecasting level or a little better. fyT is level with it; the dense data and
 the shut gate added nothing on this protocol. fyV's fit helps moving
 non-visible points and costs everything else.
+
+## Overnight, 1 Nov (queued on NSCC)
+
+- fzE (true groups + hidden pull, gdev) and fzF (learned groups + hidden pull,
+  g1) at step 250: moving hidden 0.664 / 0.665, as fyZ / fzD. To step 500 (fzE)
+  and 1,000 (fzF).
+- fzG: the window handover fix trained in (`--reach continue`), g1, 1,000 steps.
+- After each run ends: a ball render to `~/scratch/renders/ball_<run>` (spin up
+  10 / 20, roll), and for fzF and fzG the standard scoring against last week
+  (`fit_check_val_3d_median_m0_p256{,_c12}.json` in the run's outputs).
