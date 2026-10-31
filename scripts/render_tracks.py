@@ -92,12 +92,15 @@ def border_arrow(img, p: np.ndarray, colour) -> None:
 
 
 def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
-               cols: list, cutoff: int, first: int = 0, look=(GREEN, RED)) -> np.ndarray:
+               cols: list, cutoff: int, first: int = 0, look=(GREEN, RED),
+               behind: np.ndarray | None = None) -> np.ndarray:
     """One frame: rgb (R, R, 3) uint8, gt and pr each (pixels (T, N, 2),
     depth (T, N)), vis (T, N) bool. Returns SIZE x SIZE BGR.
 
     Drawn at twice the size and shrunk, so the small dots and thin lines come
-    out smooth. Green is the truth (faded while the point is hidden), red the
+    out smooth. `behind` (T, N) marks predictions that fall behind the visible
+    surface at their pixel: drawn as a ring, not a dot, since the image there
+    shows what is in front of them. Green is the truth (faded while the point is hidden), red the
     prediction, a faint line between them, and a thin trail in the point's own
     colour."""
     k = 2
@@ -138,7 +141,8 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
     img[mask] = cv2.addWeighted(hidden, 0.4, img, 0.6, 0)[mask]
     for n in range(N):
         if show and on(pp[t, n], pz[t, n]):
-            cv2.circle(img, at(pp[t, n]), 6, p_col, -1, cv2.LINE_AA)
+            hollow = behind is not None and behind[t, n]
+            cv2.circle(img, at(pp[t, n]), 6, p_col, 3 if hollow else -1, cv2.LINE_AA)
     img = cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     for n in range(N):
         if show and not on(pp[t, n], pz[t, n]) and pz[t, n] > 0:
@@ -281,6 +285,16 @@ def main() -> int:
             pick = moving_px[i].argsort(descending=True)[: args.points]
             gt = pixels(gt_m[i][:, pick], one)
             pr = pixels(pr_m[i][:, pick], one)
+            # Predictions farther than the surface the frame shows at their
+            # pixel (its depth at the CNN cell there), by more than 3%.
+            behind = None
+            if b.get("depth") is not None:
+                d = b["depth"][i].float().cpu().numpy()                     # (T, h, w)
+                h, w = d.shape[1:]
+                cu = np.clip(np.round(pr[0][..., 0] / SIZE * w - 0.125), 0, w - 1).astype(int)
+                cv = np.clip(np.round(pr[0][..., 1] / SIZE * h - 0.125), 0, h - 1).astype(int)
+                surface = d[np.arange(d.shape[0])[:, None], cv, cu]
+                behind = pr[1] > surface * 1.03
             v = vis[i][:, pick].cpu().numpy()
             rgb = np.load(Path(args.frames_cache) / f"{name}.npy")
             cols = colours(len(pick))
@@ -290,7 +304,8 @@ def main() -> int:
             fc_m = to_metres(ahead.tracks.float(), b) if ahead else None
             if ahead:
                 gt, pr = pr, pixels(fc_m[i][:, pick], one)
-            frames = [draw_frame(rgb[t], t, gt, pr, v, cols, args.eval_cutoff or args.forecast_from, **how)
+            frames = [draw_frame(rgb[t], t, gt, pr, v, cols, args.eval_cutoff or args.forecast_from,
+                                 behind=None if ahead else behind, **how)
                       for t in range(rgb.shape[0])]
             if args.panel_points:
                 every = moving_px[i].argsort(descending=True)[: args.panel_points]
