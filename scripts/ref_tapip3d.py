@@ -45,11 +45,12 @@ import torch
 OURS = Path(__file__).resolve().parent.parent
 
 
-def kubric_video(raw: Path, seq: str) -> tuple[np.ndarray, np.ndarray]:
-    """(T, H, W, 3) uint8 frames and (T, H, W) depth in metres of a Kubric clip."""
+def kubric_video(raw: Path, seq: str) -> tuple[str, list[int], np.ndarray, np.ndarray]:
+    """A Kubric clip is its own raw video, every frame in order: its name, the
+    frames it uses, (T, H, W, 3) uint8 frames and (T, H, W) depth in metres."""
     from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
     r = KubricSequenceDataset(str(raw), seq_ids=[seq], num_query_points=None)[0]
-    return r.frames, r.depths
+    return seq, list(range(len(r.frames))), r.frames, r.depths
 
 
 @lru_cache(maxsize=1)
@@ -59,14 +60,15 @@ def _tapvid3d_clip(path: Path) -> tuple[np.ndarray, np.ndarray]:
             np.load(path.with_suffix(".da3.npy")).astype(np.float32))
 
 
-def tapvid3d_video(raw: Path, seq: str) -> tuple[np.ndarray, np.ndarray]:
-    """The frames and depth of one half-clip, in the order tapvid3d_cache.py
-    put them: from its query frame forward to the end, or back to frame 0."""
+def tapvid3d_video(raw: Path, seq: str) -> tuple[str, list[int], np.ndarray, np.ndarray]:
+    """One half-clip: the whole clip it is cut from, and its frames in the
+    order tapvid3d_cache.py put them, from its query frame forward to the
+    end or back to frame 0."""
     name, q, way = seq.rsplit("_", 2)
     frames, depth = _tapvid3d_clip(raw / name)
     q = int(q[1:])
     order = list(range(q, len(frames))) if way == "f" else list(range(q, -1, -1))
-    return frames[order], depth[order]
+    return name, order, frames, depth
 
 
 def main() -> int:
@@ -120,23 +122,32 @@ def main() -> int:
 
     keys = [f"pts_within_{t}" for t in THRESHOLDS] + ["average_pts_within_thresh"]
     sums, moving_frac, oa = {}, 0.0, 0.0
+    # Each raw frame resized and its depth edges filtered once, though the
+    # half-clips of a TAPVid-3D clip share most of their frames: the filter
+    # is the slow part, and gives the same frame the same answer every time.
+    ready, ready_for = {}, None
 
     for i, path in enumerate(clips, 1):
         c = torch.load(path, weights_only=False)
         seq = c["seq_id"]
-        frames, raw_depths = read_video(Path(args.raw).expanduser(), seq)
+        name, order, frames, raw_depths = read_video(Path(args.raw).expanduser(), seq)
         H0, W0 = frames.shape[1:3]
-        if (H0, W0) != tuple(c["hw"]) or len(frames) != c["traj_metric"].shape[0]:
+        if (H0, W0) != tuple(c["hw"]) or len(order) != c["traj_metric"].shape[0]:
             raise SystemExit(f"{seq}: raw video {frames.shape[:3]} does not match the clip")
+        if name != ready_for:
+            ready, ready_for = {}, name
 
         K = c["intrinsics"].clone().float()                         # (T, 3, 3) native pixels
         K_in = K.clone().numpy()
         K_in[:, 0, :] *= (res[1] - 1) / (W0 - 1)
         K_in[:, 1, :] *= (res[0] - 1) / (H0 - 1)
-        video = np.stack([cv2.resize(f, (res[1], res[0]), interpolation=cv2.INTER_LINEAR)
-                          for f in frames])
-        depths = np.stack([resize_depth_bilinear(d, (res[1], res[0])) for d in raw_depths])
-        depths = np.stack([_filter_one_depth(d, 0.08, 15, k) for d, k in zip(depths, K_in)])
+        for f, k in zip(order, K_in):
+            if f not in ready:
+                d = resize_depth_bilinear(raw_depths[f], (res[1], res[0]))
+                ready[f] = (cv2.resize(frames[f], (res[1], res[0]), interpolation=cv2.INTER_LINEAR),
+                            _filter_one_depth(d, 0.08, 15, k))
+        video = np.stack([ready[f][0] for f in order])
+        depths = np.stack([ready[f][1] for f in order])
 
         gt = c["traj_metric"].float().to(dev)                              # (T, N, 3) frame-0 camera, metres
         vis = c["visibility"].to(dev)
