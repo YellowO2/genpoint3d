@@ -36,4 +36,16 @@ estimate them. We are given both, so the trackers match our setup.
   APD3D 88.6. Dense queries, so not like-for-like with sparse ones.
 - Predicts depth as `log(d_t / d_1)`.
 
-**SpatialTrackerV2**, **4RC**: cloned, not read yet.
+**SpatialTrackerV2** (`spatialtrackerv2/repo`,
+`models/SpaTrackV2/models/tracker3D/TrackRefiner.py`)
+- Each refinement round carries, besides the tracks: visibility, a
+  confidence and a dynamic probability per point (static or moving), each fed
+  back as an input and corrected; a depth scale and shift per frame and a dense
+  depth residual, all corrected round by round (depth is refined, not given).
+- Each round fits the camera to the points it believes static, weighted by
+  the dynamic probability and confidence (`cam_from_track`): a rigid fit inside
+  the loop, with a soft two-way grouping (static or moving) that is refined.
+- Per-point tokens are rebuilt each round from the carried state; a small set
+  of global sparse and dense tokens is carried and added to round by round.
+
+**4RC**: cloned, not read yet.
