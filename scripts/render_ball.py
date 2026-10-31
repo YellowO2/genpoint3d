@@ -143,8 +143,11 @@ def render(name, axis, deg, vel, seed, out):
     uv0 = tracks[0, :, :2] / tracks[0, :, 2:] * F + W / 2
     queries = torch.cat([uv0, torch.zeros(len(uv0), 1)], -1)
     stem = f"{name}_{seed}"
+    # The ball's centre per frame, and how many of the points are the ball's
+    # (the first ones), for checks that need to know which surface is which.
     np.savez(out / f"{stem}.npz", images=torch.stack(frames).numpy(), fx_fy_cx_cy=np.array([F, F, W / 2, H / 2]),
-             tracks_XYZ=tracks.numpy(), visibility=visible.numpy(), queries_xyt=queries.numpy())
+             tracks_XYZ=tracks.numpy(), visibility=visible.numpy(), queries_xyt=queries.numpy(),
+             centres=torch.stack(centres).float().numpy(), ball_points=int(keep[:len(local_pts)].sum()))
     np.save(out / f"{stem}.depth.npy", torch.stack(depths).numpy().astype(np.float16))
     turned = math.degrees(step * (T - 1))
     print(f"  {stem}: {int(keep[:len(local_pts)].sum())} ball + {int(keep[len(local_pts):].sum())} floor points,"
