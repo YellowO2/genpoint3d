@@ -207,6 +207,8 @@ def main() -> int:
                    help="draw tracking (red) against forecasting from frame C (green), no truth")
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="forecast: frames C on get no image, as in evaluate.py")
+    p.add_argument("--reach", default="hold", choices=["hold", "continue"],
+                   help="how each window's new frames start (scripts/evaluate.py --reach)")
     p.add_argument("--sample-steps", type=int, default=50)
     p.add_argument("--batch", type=int, default=None,
                    help="clips per batch; the run's own by default. 1 for clips with different numbers of points")
@@ -249,7 +251,8 @@ def main() -> int:
                             refine_iters=targs.get("refine_iters", 4),
                             param=targs.get("param", "position"),
                             carry=bool(targs.get("carry", 0)), window=targs.get("window", 0),
-                            overlap=targs.get("overlap", 0), cutoff=args.eval_cutoff)
+                            overlap=targs.get("overlap", 0), cutoff=args.eval_cutoff,
+                            reach=args.reach)
     predictor = Predictor(model, judging)
     # The same model, the frames from C on blank: what it forecasts there.
     forecaster = (Predictor(model, dataclasses.replace(judging, cutoff=args.forecast_from))
