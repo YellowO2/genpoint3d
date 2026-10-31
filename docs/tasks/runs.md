@@ -299,3 +299,13 @@ points drift 6-7 px and moving ones are lost; with the rigid fit it blew up
 SEA-RAFT's far finer flow, and trained only from true previous positions, so
 it never learns to recover from its own errors. Next: SEA-RAFT's flow for the
 steps with the same learned groups, to tell the comparison from the rest.
+
+## Does fyT send points round to the ball's back? (`scripts/ball_backside.py`)
+
+Of the ball's points truly hidden (turned to the back) in a frame, the share
+whose prediction is behind the ball's centre along the line of sight: spin
+about the vertical axis 5 deg 59%, 10 deg 88%; about the horizontal axis 10
+deg 78%; rolling 66%. Of seen points, 0-3%. The model mostly does carry a
+turning point round to the back; the videos draw every prediction on top, so
+they look as if it stays in front. Points just turned past the edge sit near
+the centre's plane, which is most of the 5 deg misses.
