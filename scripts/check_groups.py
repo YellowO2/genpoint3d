@@ -1,4 +1,5 @@
-"""How well a --rigid-fit run's groups match the truth, by how far points move.
+"""How well a --rigid-fit or --group-feedback run's groups match the truth, by
+how far points move.
 
 For every pair of points, the run's affinity 2 sigmoid(-|v_i - v_j|^2) (above
 0.5 counts as "same piece") against the truth at two tolerances: the pairs the
@@ -8,7 +9,9 @@ the share that truly move with it at each tolerance, and how far apart in
 motion they are: the gap between their displacements, in metric pixels at the
 point's depth. Split by how far the point moves. A slow object grouped with the
 still floor shows as a high share at 2 cm, a lower one at 5 mm, and a gap
-close to the point's own motion.
+close to the point's own motion. And the other way round: of the points that
+truly move with it to 2 cm, the share the run puts with it ("found"), which a
+run grouping each point with almost nothing would fail.
 
   python scripts/check_groups.py --ckpt outputs/fyV_fit_rounds/best.pt --cache <val dir> \\
       --frames-cache <frames> [--points 500]
@@ -46,7 +49,7 @@ model = build_model(Settings(**targs), first["feat_dim"], first["context"] is no
 model.load_state_dict(ckpt["model"])
 
 edges = (0, 1, 4, 8, 16, 32, 64, float("inf"))
-rows = {e: [[], [], [], []] for e in edges[:-1]}
+rows = {e: [[], [], [], [], []] for e in edges[:-1]}
 with torch.no_grad():
     for batch in DataLoader(ds, batch_size=2, num_workers=2):
         b = to_device(batch, dev)
@@ -56,7 +59,7 @@ with torch.no_grad():
         refine(model, b["anchor"], num_frames=b["traj"].shape[1], iters=targs.get("refine_iters", 4),
                known_x0=known_frame0(b) if targs.get("anchor_frame0") else None, param=targs.get("param", "position"),
                window=targs.get("window", 0), overlap=targs.get("overlap", 0), **cond)
-        emb = model._fitted[1].float()                                       # the last window's
+        emb = (model._emb if getattr(model, "group_feedback", 0) else model._fitted[1]).float()  # the last window's
         a = 2 * torch.sigmoid(-(emb[:, :, None] - emb[:, None]).pow(2).sum(-1))
         same = a > 0.5
         gt = to_metres(b["traj"].float(), b)
@@ -73,18 +76,21 @@ with torch.no_grad():
         sel = same & off
         n = sel.sum(-1).clamp_min(1)
         for lo, hi in zip(edges[:-1], edges[1:]):
-            m = (moved >= lo) & (moved < hi) & (sel.sum(-1) > 0)
+            mates = rigid2 & off
+            m = (moved >= lo) & (moved < hi) & (sel.sum(-1) > 0) & (mates.sum(-1) > 0)
             if m.any():
                 rows[lo][0].append(((rigid2 & sel).sum(-1) / n)[m].cpu())
                 rows[lo][1].append(((rigid05 & sel).sum(-1) / n)[m].cpu())
                 rows[lo][2].append(((gap * sel).sum(-1) / n)[m].cpu())
                 rows[lo][3].append(sel.sum(-1)[m].float().cpu())
+                rows[lo][4].append(((mates & sel).sum(-1) / mates.sum(-1).clamp_min(1))[m].cpu())
 
 print(f"{len(clips)} clips | {args.ckpt} | a pair counts as one piece above affinity 0.5")
-print(f"  {'moved (px)':>11} {'points':>7} {'piece size':>10} {'rigid 2 cm':>11} {'rigid 5 mm':>11} {'motion gap px':>14}")
+print(f"  {'moved (px)':>11} {'points':>7} {'piece size':>10} {'rigid 2 cm':>11} {'rigid 5 mm':>11}"
+      f" {'motion gap px':>14} {'found':>6}")
 for lo, hi in zip(edges[:-1], edges[1:]):
     r = rows[lo]
     if r[0]:
         c = [torch.cat(x) for x in r]
         print(f"  {f'{lo:g}-{hi:g}':>11} {len(c[0]):>7} {c[3].median():>10.0f} {c[0].mean():>11.3f}"
-              f" {c[1].mean():>11.3f} {c[2].median():>14.2f}")
+              f" {c[1].mean():>11.3f} {c[2].median():>14.2f} {c[4].mean():>6.3f}")
