@@ -43,7 +43,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                   anchor_frame0: bool = False, scaling: str = "median",
                   method: str = "flow", refine_iters: int = 4,
                   param: str = "position", carry: bool = False, window: int = 0,
-                  overlap: int = 0) -> list[float]:
+                  overlap: int = 0, reach: str = "hold") -> list[float]:
     """APD for each frame index separately: APD3D over every visible point
     that moves (more than 4 px), with no rescale -- the points the tracking
     is about, and where it falls off through the clip.
@@ -75,7 +75,8 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
             if method == "regress":
                 pred = refine(model, anchor, num_frames=traj.shape[1],
                               iters=refine_iters, known_x0=kx0, param=param,
-                              carry=carry, window=window, overlap=overlap, rounds=rounds, **cond)
+                              carry=carry, window=window, overlap=overlap, rounds=rounds,
+                              reach=reach, **cond)
             else:
                 pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                                    generator=gen, known_x0=kx0, **cond)
@@ -329,6 +330,10 @@ def main() -> int:
                    help="regress, CNN-only models: also track an S x S grid of "
                         "helper points over frame 0 and score the queries only "
                         "(TAPIP3D's test-time support grid uses 16)")
+    p.add_argument("--reach", default="hold", choices=["hold", "continue"],
+                   help="regress in windows: each window's new frames start held "
+                        "where the point last was (as trained), or carrying on at "
+                        "its speed over the frames shared with the window before")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -409,7 +414,8 @@ def main() -> int:
 
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
                               anchor_frame0, args.scaling, method,
-                              refine_iters, param, carry, window, overlap) if args.per_frame else None
+                              refine_iters, param, carry, window, overlap,
+                              args.reach) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
     judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
                             anchor_frame0=anchor_frame0, loss_type=loss_type,
@@ -418,7 +424,7 @@ def main() -> int:
                             method=method, refine_iters=refine_iters, param=param, carry=carry,
                             window=window, overlap=overlap,
                             cutoff=args.eval_cutoff, samples=args.samples,
-                            support=args.support)
+                            support=args.support, reach=args.reach)
     m = score(model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

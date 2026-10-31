@@ -123,12 +123,20 @@ def _cut(t: Optional[torch.Tensor], start: int, end: int) -> Optional[torch.Tens
     return None if t is None else t[:, start:end]
 
 
-def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
+def _reach(g: torch.Tensor, done: int, end: int, start: int = 0, reach: str = "hold") -> torch.Tensor:
     """The frames from `done` to `end`, which no window has settled yet, start
-    where the point was in the last one that has."""
+    where the point was in the last one that has ("hold"), or carry on from
+    there at its average speed over the frames this window shares with that
+    one, `start` to `done` ("continue")."""
     if done == 0 or done >= end:
         return g
-    return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
+    last = g[:, done - 1:done]
+    new = last.expand(-1, end - done, -1, -1)
+    if reach == "continue" and done - start > 1:
+        speed = (last - g[:, start:start + 1]) / (done - 1 - start)
+        n = torch.arange(1, end - done + 1, device=g.device, dtype=g.dtype)
+        new = last + speed * n[None, :, None, None]
+    return torch.cat([g[:, :done], new, g[:, end:]], dim=1)
 
 
 def _turn(model: nn.Module) -> dict:
@@ -358,6 +366,7 @@ def refine(
     window: int = 0,
     overlap: int = 0,
     rounds: Optional[list] = None,
+    reach: str = "hold",
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -374,6 +383,8 @@ def refine(
     A `rounds` list is filled with the whole clip's guess before the first
     correction and after each one, `iters + 1` (B, T, N, 3) tensors; in
     windows, each frame from the last window that covers it.
+
+    `reach`: how a window's frames past the last one start (`_reach`).
     """
     if window and carry:
         raise ValueError("windows and carry both restart the later frames: use one")
@@ -383,7 +394,7 @@ def refine(
     seen = whole.new_zeros(B, num_frames, N) if visibility else None
     done = 0
     for start, end in spans:
-        whole = _reach(whole, done, end)
+        whole = _reach(whole, done, end, start, reach)
         g = whole[:, start:end]
         kx0 = known_x0 if start == 0 else None
         at = {} if len(spans) == 1 else {"frames": (start, end)}

@@ -1,0 +1,41 @@
+#!/bin/bash
+# Does a hidden point stop at a window's handover because the new window's
+# frames start held where the point last was? Scores one checkpoint with its
+# windows' new frames held (as trained) and carrying on at the point's speed
+# over the shared frames (`evaluate.py --reach continue`), on the turning
+# ball clips (scripts/ball_test.pbs) and on validation clips.
+#
+#   qsub -v CKPT=outputs/fyT_dense_reference/best.pt scripts/reach_check.pbs
+#
+#PBS -N reach_check
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=01:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/reach_check.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+
+CKPT=${CKPT:?}
+B=$ROOT/ball_test
+WORK=$ROOT/reach_check
+python scripts/split_dir.py --cache $ROOT/cache/kubric_dense --split val --n ${N:-50} \
+  --val-frac 0.1 --seed 0 --out $WORK/val
+for REACH in hold continue; do
+  for M in spin_up_10 spin_up_20 spin_side_20 roll; do
+    echo "########## ball $M, $REACH"
+    python scripts/evaluate.py --ckpt "$CKPT" --cache $B/by_motion/$M --frames-cache $B/frames \
+      --points 1000 --batch 1 --reach $REACH | grep -E "average_pts_within|apd_moving_hidden |apd_hidden " || true
+  done
+  echo "########## kubric val, $REACH"
+  python scripts/evaluate.py --ckpt "$CKPT" --cache $WORK/val --frames-cache $ROOT/cache/kubric_frames384 \
+    --points 500 --batch 4 --reach $REACH | grep -E "average_pts_within|apd_moving_hidden|apd_hidden |apd_moving_gone |apd_moving_returns " || true
+done
+echo "=== REACH CHECK DONE ==="
