@@ -316,3 +316,29 @@ deg 78%; rolling 66%. Of seen points, 0-3%. The model mostly does carry a
 turning point round to the back; the videos draw every prediction on top, so
 they look as if it stays in front. Points just turned past the edge sit near
 the centre's plane, which is most of the 5 deg misses.
+
+## TAPVid-3D, 10 Panoptic Studio clips (quick check, `scripts/tapvid3d_score.pbs`, `scripts/tapvid3d_ref.pbs`)
+
+Every 8th query frame, each query's track scored as its forward and backward
+half-clips (322 half-clips), Depth Anything 3 metric depth, queries starting
+at their pixel at that depth, our scorer (the benchmark's metric, median
+rescale). TAPIP3D is its published checkpoint at its defaults (384 x 512, 16 x
+16 support grid) on the same half-clips, frames, depth and queries.
+
+| | APD | AJ | OA | moving hidden APD |
+|---|---|---|---|---|
+| nothing moves | 0.202 | | | |
+| fyT | 0.271 | | | 0.080 |
+| fyZ | 0.272 | 0.175 | 0.822 | 0.083 |
+| TAPIP3D | 0.287 | 0.181 | 0.815 | 0.097 |
+
+Real video is hard for both at this depth: TAPIP3D, trained far longer, is
+only 0.015 APD ahead of us, and both barely beat a prediction that nothing
+moves. The depth (Depth Anything 3, per frame) is the first suspect.
+
+## Learned groups against the truth (`scripts/check_groups.py`, fzC, 50 val clips)
+
+Of the points a point's group holds, 96-99.6% truly move with it for points
+moving 8 px or more, and 85-97% of its true mates are in it; points moving
+1-8 px are put with the still floor (54-66%). The groups are right where it
+matters, so they are not why the group bias goes unused.
