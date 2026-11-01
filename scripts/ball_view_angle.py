@@ -66,7 +66,8 @@ with torch.no_grad():
         gt, pr = to_metres(b["traj"].float(), b)[0, :, :n], to_metres(pred.tracks.float(), b)[0, :, :n]
         vis = b["visibility"][0, :, :n].bool()
         K = b["intrinsics_256"][0].float()
-        focal = (K[..., 0, 0] * K[..., 1, 1]).sqrt()
+        focal = (K[..., 0, 0] * K[..., 1, 1]).sqrt()                          # (T,) or ()
+        focal = focal[:, None] if focal.dim() else focal
         err = (pr - gt).norm(dim=-1) / (gt[..., 2].abs() / focal).clamp_min(1e-12)   # (T, n) px
         normal = gt - centre[:, None]
         normal = normal / normal.norm(dim=-1, keepdim=True)
