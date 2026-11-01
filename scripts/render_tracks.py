@@ -99,7 +99,7 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
 
     Drawn at twice the size and shrunk, so the small dots and thin lines come
     out smooth. `behind` (T, N) marks predictions that fall behind the visible
-    surface at their pixel: drawn as a ring, not a dot, since the image there
+    surface at their pixel: drawn in a darker shade, since the image there
     shows what is in front of them. Green is the truth (faded while the point is hidden), red the
     prediction, a faint line between them, and a thin trail in the point's own
     colour."""
@@ -141,8 +141,9 @@ def draw_frame(rgb: np.ndarray, t: int, gt: tuple, pr: tuple, vis: np.ndarray,
     img[mask] = cv2.addWeighted(hidden, 0.4, img, 0.6, 0)[mask]
     for n in range(N):
         if show and on(pp[t, n], pz[t, n]):
-            hollow = behind is not None and behind[t, n]
-            cv2.circle(img, at(pp[t, n]), 6, p_col, 3 if hollow else -1, cv2.LINE_AA)
+            back = behind is not None and behind[t, n]
+            cv2.circle(img, at(pp[t, n]), 6, tuple(int(0.45 * c) for c in p_col) if back else p_col,
+                       -1, cv2.LINE_AA)
     img = cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     for n in range(N):
         if show and not on(pp[t, n], pz[t, n]) and pz[t, n] > 0:
