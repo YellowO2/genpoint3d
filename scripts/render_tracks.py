@@ -7,10 +7,11 @@ batch size, so the same noise -- and each clip's moving-point APD is printed,
 so every video can be matched to a number.
 
 Per point, in each frame:
-    GREEN  the truth: filled where it is visible, a ring where it is hidden,
+    GREEN  the truth: bright where it is visible, faded where it is hidden,
            left out behind the camera or off the image
-    RED    the prediction, with a thin line to the truth, and a short trail of
-           its last few positions in the point's own colour. Off the image, a
+    RED    the prediction, darker where it falls behind the visible surface,
+           with a thin line to the truth, and a short trail of its last few
+           positions in the point's own colour. Off the image, a
            small arrow at the border points the way it went.
 
 Beside it, on black, every point of the clip the same way without the video
