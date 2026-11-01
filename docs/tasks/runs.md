@@ -396,3 +396,21 @@ or not; worse towards the edge (2-3 px). Once hidden it is lost (13-43 px),
 and when it comes back into view it is not found again: returned points are
 further off than hidden ones, none within 4 px. The turn's cost is hiding and
 the missing re-find, not the turn itself.
+
+## On Kubric, always seen against seen again after hiding (fyP, `scripts/return_split.py`, standard 100 val clips)
+
+Moving points, every frame given its image. Median error in metric px (share
+within 4 px).
+
+| class | frames 1-7 | frames 8-15 | frames 16+ |
+|---|---|---|---|
+| always seen | 0.34 (0.98) | 0.81 (0.92) | 1.00 (0.89) |
+| seen again after hiding | 0.73 (0.88) | 1.30 (0.76) | 1.73 (0.67) |
+| hidden | 1.47 (0.78) | 4.80 (0.43) | 8.01 (0.25) |
+
+Unlike the spinning ball, points that come back are mostly found again on
+Kubric (a point leaving an occluder reappears near where it is expected),
+though they stay about twice as far off as points never hidden. Points never
+hidden also drift, 0.34 to 1.0 px over the clip: smaller, but real. By frame
+16 about a third of the seen moving point-frames are returned ones. Hidden
+points are the large error, growing to 8 px.
