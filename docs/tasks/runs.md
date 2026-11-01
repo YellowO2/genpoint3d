@@ -377,3 +377,22 @@ fzE at step 500: moving hidden 0.681, the same as fyZ, fzA, fzC and fzD. Every
 change to how points attend to their group lands at the same score. The ball
 movies showed hidden points stopping at frame 16, the window handover; fzG
 tests that directly.
+
+## On the spinning ball, error by how the point faces the camera (fyT, `scripts/ball_view_angle.py`)
+
+Median error in metric px (share within 4 px). Facing / oblique / edge count
+only points never hidden so far; returned = seen again after hiding.
+
+| motion | facing <45 deg | oblique 45-70 | edge 70-90 | hidden | returned |
+|---|---|---|---|---|---|
+| slide | 0.25 (1.00) | 0.37 (1.00) | 0.83 (0.99) | 2.2 (0.89) | - |
+| spin up 10 | 0.58 (0.97) | 0.79 (0.97) | 1.54 (0.98) | 21.8 (0.12) | 82.9 (0.00) |
+| spin up 20 | 0.85 (0.75) | 1.08 (0.82) | 2.24 (0.74) | 41.4 (0.02) | 70.2 (0.00) |
+| spin side 20 | 0.87 (0.81) | 0.99 (0.83) | 2.54 (0.70) | 42.7 (0.02) | 59.4 (0.01) |
+| roll | 0.70 (0.88) | 1.35 (0.80) | 2.68 (0.67) | 13.3 (0.11) | 28.0 (0.00) |
+
+A point is tracked to about a pixel for as long as it stays in view, turned
+or not; worse towards the edge (2-3 px). Once hidden it is lost (13-43 px),
+and when it comes back into view it is not found again: returned points are
+further off than hidden ones, none within 4 px. The turn's cost is hiding and
+the missing re-find, not the turn itself.
