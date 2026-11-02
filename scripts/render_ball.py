@@ -1,5 +1,6 @@
 """A textured ball that spins, rolls or slides over a textured floor: a clean
-test of tracking points on a turning surface.
+test of tracking points on a turning surface. And one that drops and bounces
+("drop"), a clean test of forecasting an impact whose shape is in plain view.
 
 Ray-traced in plain PyTorch, so every pixel's surface point, and every tracked
 point's true position, comes from the motion itself: no physics engine, no
@@ -40,7 +41,26 @@ MOTIONS = {
     "spin_side_10": ((1, 0, 0), 10.0, (0.0, 0.0)),
     "spin_side_20": ((1, 0, 0), 20.0, (0.0, 0.0)),
     "roll": ((0, 0, 1), None, (0.06, 0.0)),     # turns as it travels: no slipping
+    "drop": ((0, 1, 0), 0.0, (0.03, 0.0)),      # falls from DROP_HEIGHT and bounces (`drop_heights`)
 }
+
+# The drop: from this height above resting on the floor, under a gravity that
+# makes it land at frame LAND, so the bounce falls in a forecast's frames
+# 12-23; each bounce keeps BOUNCE of the speed.
+DROP_HEIGHT, LAND, BOUNCE = 1.2, 15, 0.6
+
+
+def drop_heights() -> list[float]:
+    """The ball's height above resting on the floor at each frame."""
+    a = 2 * DROP_HEIGHT / LAND ** 2
+    h, v, out = DROP_HEIGHT, 0.0, []
+    for _ in range(T):
+        out.append(h)
+        v -= a
+        h += v
+        if h < 0:
+            h, v = -h * BOUNCE, -v * BOUNCE
+    return out
 
 
 def rotation(axis, angle):
@@ -91,6 +111,8 @@ def render(name, axis, deg, vel, seed, out):
         spin_axis = torch.tensor(axis, dtype=torch.float64)
         step = math.radians(deg)
     centres = [start + v * t for t in range(T)]
+    if name == "drop":
+        centres = [c + h * up for c, h in zip(centres, drop_heights())]
     rots = [rotation(spin_axis.tolist(), step * t) for t in range(T)]
 
     ys, xs = torch.meshgrid(torch.arange(H, dtype=torch.float64) + 0.5, torch.arange(W, dtype=torch.float64) + 0.5, indexing="ij")
@@ -157,9 +179,12 @@ def render(name, axis, deg, vel, seed, out):
 p = argparse.ArgumentParser()
 p.add_argument("--out", required=True)
 p.add_argument("--seeds", type=int, default=3)
+p.add_argument("--only", nargs="*", default=None, help="render these motions only")
 args = p.parse_args()
 out = Path(args.out)
 out.mkdir(parents=True, exist_ok=True)
 for name, (axis, deg, vel) in MOTIONS.items():
+    if args.only and name not in args.only:
+        continue
     for seed in range(args.seeds):
         render(name, axis, deg, vel, seed, out)
