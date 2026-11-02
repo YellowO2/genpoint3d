@@ -166,7 +166,7 @@ for obj in objects:
                  "velocity": list(obj.velocity), "spin": list(obj.angular_velocity)})
 
 
-# --- Camera: fixed, looking at the middle of the floor from 6-9 units away,
+# --- Camera: fixed, looking at the middle of the floor from 7-10 units away,
 # resampled until every object is fully in view in the first frame.
 scene.camera = kb.PerspectiveCamera(focal_length=35., sensor_width=32)
 
@@ -181,9 +181,12 @@ def all_in_view(margin=0.05):
 
 
 for attempt in range(200):
-  scene.camera.position = kb.sample_point_in_half_sphere_shell(
-      inner_radius=6., outer_radius=9., offset=1.0)
-  scene.camera.look_at((rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5), rng.uniform(0.3, 1.2)))
+  # From the side and a little above, as a person would film it: 10-35 deg
+  # over the floor, never looking straight down at it.
+  r, elev, azim = rng.uniform(7., 10.), np.radians(rng.uniform(10., 35.)), rng.uniform(0., 2 * np.pi)
+  scene.camera.position = (r * np.cos(elev) * np.cos(azim), r * np.cos(elev) * np.sin(azim),
+                           r * np.sin(elev))
+  scene.camera.look_at((rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5), rng.uniform(0.5, 1.2)))
   if all_in_view():
     break
 else:
