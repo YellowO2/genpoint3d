@@ -61,7 +61,7 @@ predictor = Predictor(model, ScoreSettings(
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():
-    for clip, batch in zip(clips, DataLoader(ds, batch_size=1, num_workers=2)):
+    for clip, batch in zip(clips, DataLoader(ds, batch_size=1, num_workers=2 if dev.type == "cuda" else 0)):
         raw = np.load(Path(args.raw) / f"{clip.stem.split('_q')[0]}.npz")
         n = int(raw["ball_points"])
         centre = torch.from_numpy(raw["centres"]).to(dev).float()            # (T, 3) camera, metres
