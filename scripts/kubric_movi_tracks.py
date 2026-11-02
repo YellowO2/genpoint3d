@@ -1,6 +1,7 @@
 # Kubric's challenges/movi/movi_def_worker.py (Apache-2.0, The Kubric Authors),
-# unchanged up to its end, with two additions marked "[genpoint3d]": a --tracks
-# flag, and before kb.done() the 3D point tracks written in the layout our
+# unchanged up to its end, with additions marked "[genpoint3d]": a spin for
+# each thrown object, 0-2 rolling balls or cylinders, their flags and --tracks,
+# and before kb.done() the 3D point tracks written in the layout our
 # reader takes (genpoint3d/prepare/KubricSequenceDataset.py). The scene --
 # objects, throws, materials, camera, physics -- is MOVi's own; clip length,
 # object counts and camera mode are its existing flags.
@@ -86,6 +87,9 @@ parser.set_defaults(save_state=False, frame_end=24, frame_rate=12,
                     resolution=256)
 # [genpoint3d]
 parser.add_argument("--tracks", type=int, default=2048, help="point tracks to sample")
+parser.add_argument("--max_spin", type=float, default=10.0, help="largest spin at a throw, rad/s")
+parser.add_argument("--min_num_rolling_objects", type=int, default=0)
+parser.add_argument("--max_num_rolling_objects", type=int, default=2)
 FLAGS = parser.parse_args()
 
 # --- Common setups & resources
@@ -285,7 +289,36 @@ for i in range(num_dynamic_objects):
                   [obj.position[0], obj.position[1], 0])
   obj.metadata["is_dynamic"] = True
   logging.info("    Added %s at %s", obj.asset_id, obj.position)
+  # [genpoint3d] a spin at the throw, about a random axis: thrown things turn,
+  # and turning surfaces are what MOVi's spinless throws rarely show.
+  axis = rng.normal(size=3)
+  obj.angular_velocity = tuple(axis / np.linalg.norm(axis) * rng.uniform(0., FLAGS.max_spin))
 
+
+# [genpoint3d] Rolling objects: a ball or a cylinder on its side, set on the
+# floor and pushed, spinning as it rolls so it does not skid at the start.
+num_rolling = rng.randint(FLAGS.min_num_rolling_objects, FLAGS.max_num_rolling_objects + 1)
+for i in range(num_rolling):
+  shape = rng.choice(["sphere", "cylinder"])
+  size = rng.uniform(0.6, 1.4)
+  obj = kubasic.create(asset_id=shape, scale=size / 2)
+  obj.material = kb.PrincipledBSDFMaterial(color=kb.random_hue_color(rng=rng), roughness=0.6)
+  if shape == "cylinder":
+    obj.quaternion = kb.Quaternion(axis=[1, 0, 0], degrees=90)      # on its side
+  obj.metadata["is_dynamic"] = True
+  scene += obj
+  kb.move_until_no_overlap(obj, simulator, spawn_region=[(-4, -4, size / 2), (4, 4, size / 2 + 0.05)],
+                           rng=rng)
+  speed = rng.uniform(1., 4.)
+  heading = -np.array(obj.position[:2]) + rng.uniform(-2., 2., size=2)
+  heading = heading / (np.linalg.norm(heading) + 1e-8)
+  if shape == "cylinder":
+    # Laid on its side its axis is along world y, so it can only roll along x.
+    heading = np.array([np.sign(rng.uniform(-1., 1.)), 0.])
+  obj.velocity = (*(heading * speed), 0.)
+  # Rolling without slipping: spin (v / r) about up x heading.
+  obj.angular_velocity = (-heading[1] * speed / (size / 2), heading[0] * speed / (size / 2), 0.)
+  logging.info("    Rolling %s at %s", shape, obj.position)
 
 
 if FLAGS.save_state:
