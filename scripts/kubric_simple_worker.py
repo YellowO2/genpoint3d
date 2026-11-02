@@ -8,10 +8,11 @@ Runs inside the Kubric container (it needs bpy and kubric), one scene per call:
 The scene is simpler and longer than MOVi: 1-3 objects (scanned GSO objects,
 sometimes a plain sphere, cube or cylinder) on a floor under an HDRI dome, a
 fixed camera, 48-96 frames at 12 fps. Every object is fully in view in the
-first frame. Some fall from a height at the start; the others rest on the
-floor and are tossed up at a later frame, so there is something happening
-through the whole clip. Tosses and drops get sideways velocity and spin, and
-some are aimed at another object so they collide.
+first frame. As in MOVi, every object is thrown at frame 0 from its own height
+above the floor, with a sideways velocity roughly toward the middle and
+sometimes a spin, and from then on only the physics moves it (PyBullet, with
+MOVi's friction and bounciness): falls land at different times, objects bounce,
+tumble and knock into each other, then settle.
 
 Output, the zbww/tapip3d-kubric layout read by
 genpoint3d/prepare/KubricSequenceDataset.py:
@@ -20,7 +21,7 @@ genpoint3d/prepare/KubricSequenceDataset.py:
                                        matrix_world, depth_range
     <job-dir>/frames/{t:03d}.png       RGB frame t
     <job-dir>/frames/{t:03d}_depth.png distance from the camera, 16 bit over depth_range
-    <job-dir>/metadata.json            flags, seed, assets and the launch events
+    <job-dir>/metadata.json            flags, seed, assets and the throws
 
 The point tracks are a numpy port of track_points() in Kubric's
 challenges/point_tracking/dataset.py (the TAP-Vid Kubric code): query points on
@@ -103,8 +104,7 @@ background_hdri = hdri_source.create(asset_id=hdri_id)
 scene.metadata["background"] = hdri_id
 renderer._set_ambient_light_hdri(background_hdri.filename)
 
-floor_friction = rng.uniform(0.3, 0.6)
-floor_restitution = rng.uniform(0.5, 0.8)
+floor_friction, floor_restitution = 0.3, 0.5   # MOVi's defaults
 dome = kubasic.create(asset_id="dome", name="dome", friction=floor_friction,
                       restitution=floor_restitution, static=True, background=True)
 scene += dome
@@ -135,8 +135,7 @@ def new_object():
     obj.scale = size / np.max(obj.bounds[1] - obj.bounds[0])
     obj.metadata["asset_id"] = obj.asset_id
   obj.metadata["size"] = size
-  obj.friction = rng.uniform(0.3, 0.7)
-  obj.restitution = rng.uniform(0.4, 0.8)
+  obj.friction, obj.restitution = 0.5, 0.5     # MOVi's
   return obj
 
 
@@ -148,62 +147,23 @@ def random_spin():
   return tuple(axis / np.linalg.norm(axis) * rng.uniform(2., 9.))
 
 
-def sideways(obj, others, speed):
-  """A horizontal velocity: toward another object half the time (to make a
-  collision likely), else in a random direction."""
-  if others and rng.uniform() < 0.5:
-    target = np.array(others[rng.randint(len(others))].position)
-    d = (target - np.array(obj.position))[:2]
-  else:
-    d = rng.normal(size=2)
-  d = d / (np.linalg.norm(d) + 1e-8) * speed
-  return np.array([d[0], d[1], 0.])
-
-
 num_objects = rng.randint(FLAGS.min_objects, FLAGS.max_objects + 1)
-# The first object always falls at the start; each other one falls at the start
-# too, or rests on the floor and is tossed up later.
-falls = [True] + [bool(rng.uniform() < 0.4) for _ in range(num_objects - 1)]
-
-resting = []
-for is_falling in falls:
-  if not is_falling:
-    obj = new_object()
-    scene += obj
-    kb.move_until_no_overlap(obj, simulator, spawn_region=[(-2.5, -2.5, 0.2), (2.5, 2.5, 1.5)],
-                             rng=rng)
-    resting.append(obj)
-if resting:
-  simulator.run(frame_start=-60, frame_end=0)  # let them settle on the floor
-  for obj in resting:
-    obj.velocity = (0., 0., 0.)
-    obj.angular_velocity = (0., 0., 0.)
-
-falling = []
-for is_falling in falls:
-  if is_falling:
-    obj = new_object()
-    scene += obj
-    kb.move_until_no_overlap(obj, simulator, spawn_region=[(-2., -2., 1.5), (2., 2., 3.5)],
-                             rng=rng)
-    falling.append(obj)
-objects = falling + resting
-
+# As MOVi's dynamic objects (challenges/movi/movi_def_worker.py), only nearer
+# the camera: each starts above the floor at its own height, so they land at
+# different times, thrown at frame 0 roughly toward the middle, and from then
+# on nothing moves them but the physics -- gravity, the floor and each other.
+objects = []
+for _ in range(num_objects):
+  obj = new_object()
+  scene += obj
+  kb.move_until_no_overlap(obj, simulator, spawn_region=[(-2., -2., 0.5), (2., 2., 4.)], rng=rng)
+  objects.append(obj)
 events = []
-for obj in falling:
-  others = [o for o in objects if o is not obj]
-  obj.velocity = tuple(sideways(obj, others, rng.uniform(0., 2.)))
+for obj in objects:
+  obj.velocity = tuple(rng.uniform((-2., -2., 0.), (2., 2., 0.)) - 0.6 * np.array([*obj.position[:2], 0.]))
   obj.angular_velocity = random_spin()
-  events.append({"object": obj.metadata["asset_id"], "frame": 0, "kind": "drop",
+  events.append({"object": obj.metadata["asset_id"], "frame": 0, "kind": "throw",
                  "velocity": list(obj.velocity), "spin": list(obj.angular_velocity)})
-
-# Tosses for the resting objects, spread over the clip, plus sometimes a second
-# toss of any object late in the clip.
-toss_frames = sorted(int(f) for f in rng.randint(int(0.15 * T), int(0.7 * T) + 1, size=len(resting)))
-tosses = [(f, obj) for f, obj in zip(toss_frames, resting)]
-if rng.uniform() < 0.5 and T >= 40:
-  tosses.append((int(rng.randint(int(0.6 * T), T - 12)), objects[rng.randint(len(objects))]))
-tosses.sort(key=lambda x: x[0])
 
 
 # --- Camera: fixed, looking at the middle of the floor from 6-9 units away,
@@ -231,26 +191,9 @@ else:
 logging.info("Camera at %s after %d tries", scene.camera.position, attempt + 1)
 
 
-# --- Simulate in pieces, one per toss. After each run Kubric resets PyBullet to
-# the state at its last frame, so the toss is applied there and the next run
-# starts from that same frame.
-logging.info("Simulating %d frames with %d objects, tosses at %s", T, len(objects),
-             [f for f, _ in tosses])
-start = 0
-collisions = []
-for frame, obj in tosses:
-  if frame > start:
-    _, c = simulator.run(frame_start=start, frame_end=frame)
-    collisions += c
-    start = frame
-  others = [o for o in objects if o is not obj]
-  obj.velocity = tuple(sideways(obj, others, rng.uniform(0.5, 2.5)) +
-                       np.array([0., 0., rng.uniform(3., 6.)]))
-  obj.angular_velocity = random_spin()
-  events.append({"object": obj.metadata["asset_id"], "frame": frame, "kind": "toss",
-                 "velocity": list(obj.velocity), "spin": list(obj.angular_velocity)})
-_, c = simulator.run(frame_start=start, frame_end=scene.frame_end)
-collisions += c
+# --- Simulate: one run, physics only.
+logging.info("Simulating %d frames with %d objects", T, len(objects))
+_, collisions = simulator.run(frame_start=0, frame_end=scene.frame_end)
 
 
 # --- Render
