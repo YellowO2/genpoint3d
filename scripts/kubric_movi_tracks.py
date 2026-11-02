@@ -1,6 +1,7 @@
 # Kubric's challenges/movi/movi_def_worker.py (Apache-2.0, The Kubric Authors),
 # unchanged up to its end, with additions marked "[genpoint3d]": a spin for
-# each thrown object, 0-2 rolling balls or cylinders, their flags and --tracks,
+# each thrown object, 0-2 rolling balls or cylinders, their flags, --tracks and
+# --samples_per_pixel,
 # and before kb.done() the 3D point tracks written in the layout our
 # reader takes (genpoint3d/prepare/KubricSequenceDataset.py). The scene --
 # objects, throws, materials, camera, physics -- is MOVi's own; clip length,
@@ -87,6 +88,7 @@ parser.set_defaults(save_state=False, frame_end=24, frame_rate=12,
                     resolution=256)
 # [genpoint3d]
 parser.add_argument("--tracks", type=int, default=2048, help="point tracks to sample")
+parser.add_argument("--samples_per_pixel", type=int, default=64, help="MOVi's 64; 32 at 256 px")
 parser.add_argument("--max_spin", type=float, default=10.0, help="largest spin at a throw, rad/s")
 parser.add_argument("--min_num_rolling_objects", type=int, default=0)
 parser.add_argument("--max_num_rolling_objects", type=int, default=2)
@@ -100,7 +102,8 @@ if motion_blur > 0.0:
   logging.info(f"Using motion blur strength {motion_blur}")
 
 simulator = PyBullet(scene, scratch_dir)
-renderer = Blender(scene, scratch_dir, use_denoising=True, samples_per_pixel=64,
+renderer = Blender(scene, scratch_dir, use_denoising=True,  # [genpoint3d] samples from a flag
+                   samples_per_pixel=FLAGS.samples_per_pixel,
                    motion_blur=motion_blur)
 kubasic = kb.AssetSource.from_manifest(FLAGS.kubasic_assets)
 gso = kb.AssetSource.from_manifest(FLAGS.gso_assets)

@@ -8,7 +8,7 @@
 #
 #PBS -N kubric_movi
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
-#PBS -l walltime=02:05:00
+#PBS -l walltime=03:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
@@ -38,7 +38,7 @@ for i in $(seq $FIRST $((FIRST + N - 1))); do
   scratch=$(mktemp -d -p ${TMPDIR:-/tmp} kubric.XXXX)
   apptainer exec --nv --bind $ROOT --pwd $ROOT/genpoint3d $SIF python3 $ROOT/genpoint3d/scripts/kubric_movi_tracks.py \
     --job-dir $OUT/$id --scratch_dir $scratch --seed $i --resolution $RES --frame_end $frames \
-    --camera $camera --min_num_static_objects 0 --max_num_static_objects 4
+    --camera $camera --min_num_static_objects 0 --max_num_static_objects 4 --samples_per_pixel ${SPP:-32}
   rm -rf $scratch
   echo "clip $id: $frames frames, $camera camera, $(( $(date +%s) - t0 )) s"
 done
