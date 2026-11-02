@@ -99,6 +99,7 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         group_oracle: bool = False,
         group_vis_bias: bool = False,
+        hidden_blank: bool = False,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -423,7 +424,10 @@ class PointDiT(nn.Module):
         self.visibility = visibility
         if visibility:
             self.vis_weight = nn.Parameter(torch.zeros(dim))
-            self.vis_bias = nn.Parameter(torch.zeros(()))
+            # With `hidden_blank` the head decides which points lose their image
+            # from round 2 on, so it starts out calling every point seen
+            # (sigmoid 0.95): nothing is blanked until it has learned better.
+            self.vis_bias = nn.Parameter(torch.full((), 3.0 if hidden_blank else 0.0))
 
         # [visibility fed back] with `vis_feedback` the regression's next
         # iteration is given the logit this head gave on the one before, as
@@ -432,6 +436,13 @@ class PointDiT(nn.Module):
         # by one vector, a linear from 1 number to `dim`; zeros made without
         # the random generator, like the head, so step 0 is the model
         # without it.
+        # [hidden points blanked] `hidden_blank`: from the second refinement
+        # round on, a point the head called hidden in a frame gets no image
+        # there, as a forecast frame gets none (`regress._blank_hidden`): one
+        # path for hidden points and forecasting.
+        if hidden_blank and not visibility:
+            raise ValueError("hidden_blank uses the visibility head's calls: needs visibility")
+        self.hidden_blank = hidden_blank
         if vis_feedback and not visibility:
             raise ValueError("vis_feedback feeds the visibility head back, which needs visibility")
         self.vis_feedback = vis_feedback

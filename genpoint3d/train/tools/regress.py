@@ -169,6 +169,25 @@ def _group_error(emb: torch.Tensor, groups: torch.Tensor) -> torch.Tensor:
     return (p + n) / 2
 
 
+def _blank_hidden(cond: dict, logits: torch.Tensor, start: int, end: int, num_frames: int) -> dict:
+    """`cond` for the next round of a model built with `hidden_blank`: in the
+    window's frames `start` to `end`, each point the visibility head (logits
+    (B, end - start, N)) calls hidden gets no image, exactly as a forecast
+    frame gets none -- a hidden point is carried by the rest of the scene, not
+    matched to whatever covers it. The clip's frame 0, the query, keeps its
+    image."""
+    B, _, N = logits.shape
+    vm = cond.get("visual_mask")
+    if vm is None:
+        vm = logits.new_ones(B, num_frames, dtype=torch.bool)
+    full = (vm[..., None].expand(B, num_frames, N) if vm.dim() == 2 else vm).clone()
+    seen = logits.detach() > 0
+    if start == 0:
+        seen[:, 0] = True
+    full[:, start:end] &= seen
+    return {**cond, "visual_mask": full}
+
+
 def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
     """(B, T, N) zeros for the first iteration's fed-back visibility, or None
     for a model that is not given it."""
@@ -311,17 +330,21 @@ def regress_loss(
         at = {} if len(spans) == 1 else {"frames": (start, end)}
         prev = _no_logits(model, x1_w)
         rot = {}
+        blank = getattr(model, "hidden_blank", False)
+        c = cond
         for i in range(iters):
             k = _clock(i, iters, B, x1.device)
             vis_loss = x1.new_zeros(())
-            if visible_w is None and prev is None:
-                step = model(g.detach(), k, anchor, **at, **rot, **cond)
+            if visible_w is None and prev is None and not blank:
+                step = model(g.detach(), k, anchor, **at, **rot, **c)
             else:
-                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot, **cond)
+                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot, **c)
                 if visible_w is not None:
                     vis_loss = share * w[i] * visibility_error(logits, visible_w)
                 if prev is not None:
                     prev = logits.detach()
+                if blank:
+                    c = _blank_hidden(cond, logits, start, end, T)
             g = model.settle(g.detach() + _integrate(step, param), anchor, i)
             rot = _turn(model)
             loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
@@ -403,17 +426,21 @@ def refine(
         prev = _no_logits(model, g)
         logits = None
         rot = {}
+        blank = getattr(model, "hidden_blank", False)
+        c = cond
         if rounds is not None:
             if not rounds:
                 rounds.extend(whole.clone() for _ in range(iters + 1))
             rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
         for i in range(iters):
             out = model(g, _clock(i, iters, B, anchor.device), anchor,
-                        visibility=visibility or prev is not None, vis_prev=prev, **at, **rot, **cond)
-            if visibility or prev is not None:
+                        visibility=visibility or prev is not None or blank, vis_prev=prev, **at, **rot, **c)
+            if visibility or prev is not None or blank:
                 out, logits = out
             if prev is not None:
                 prev = logits
+            if blank:
+                c = _blank_hidden(cond, logits, start, end, num_frames)
             g = _pin(model.settle(g + _integrate(out, param), anchor, i), kx0)
             rot = _turn(model)
             if carry:
