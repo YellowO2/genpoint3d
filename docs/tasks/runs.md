@@ -414,3 +414,12 @@ though they stay about twice as far off as points never hidden. Points never
 hidden also drift, 0.34 to 1.0 px over the clip: smaller, but real. By frame
 16 about a third of the seen moving point-frames are returned ones. Hidden
 points are the large error, growing to 8 px.
+
+Hidden points' images blanked wherever they are truly hidden (`--hide-hidden`,
+the forecast frames' blank, scoring only): hidden points get worse, not better.
+Spin up 10: hidden 21.8 to 41.7 px, returned 82.9 to 132.9; slide hidden 2.2 to
+9.6; seen points unchanged. The match a hidden point gets is not what bends
+the ball: it helps (its 3D neighbourhood still holds the turning front of the
+same ball). With no image the model falls back on what it does for forecast
+frames, which carries the points worse. Hidden points and forecasting share
+one missing ability: moving a point from what the rest of its object does.
