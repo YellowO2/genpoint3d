@@ -233,7 +233,9 @@ def main() -> int:
         clips = split.val[: args.clips]
     method = targs.get("method", "flow")
     fine, fine_xyz = targs.get("fine", 0), bool(targs.get("fine_xyz", 0))
-    ds = ClipDataset(clips, targs["points"], resample=False,
+    # As many points as are drawn, not only as many as the run trained with:
+    # a clip's first points are often all of one object.
+    ds = ClipDataset(clips, max(targs["points"], args.points), resample=False,
                      norm_mode=targs.get("norm_mode", "median"),
                      target=targs.get("target", "absolute"),
                      fix_idcard=bool(targs.get("fix_idcard", 0)),
