@@ -423,3 +423,12 @@ the ball: it helps (its 3D neighbourhood still holds the turning front of the
 same ball). With no image the model falls back on what it does for forecast
 frames, which carries the points worse. Hidden points and forecasting share
 one missing ability: moving a point from what the rest of its object does.
+
+## Forecasting a bounce in plain view (fyP, `scripts/drop_test.pbs`)
+
+A ball dropped from 1.2 m drifting sideways, landing at frame 15 and bouncing
+back up (`render_ball.py --only drop`, 3 clips, 25-31 ball points each); frames
+12-23 blank. Moving points' forecast APD: fyP 0.119, "stops where last seen"
+0.020, "keeps its last speed" 0.222. The model forecasts a falling ball worse
+than carrying on at its last speed, before the bounce even comes: it has not
+learned simple falling, let alone the impact. Not only Kubric's unseen shapes.
