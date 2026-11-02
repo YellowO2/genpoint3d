@@ -1,0 +1,25 @@
+#!/bin/bash
+# Build Kubric's container image (kubricdockerhub/kubruntu) as an Apptainer
+# SIF in ~/scratch/containers, on a compute node's local disk, where the build
+# is faster than on Lustre and survives a dropped login session.
+#
+#   qsub scripts/kubric_pull.pbs
+#
+#PBS -N kubric_pull
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -l walltime=01:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/kubric_pull.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+module load apptainer/1.5.0
+T=${TMPDIR:-/tmp}/kubric_pull_$$
+mkdir -p $T $ROOT/containers
+export APPTAINER_CACHEDIR=$ROOT/containers/cache APPTAINER_TMPDIR=$T
+apptainer pull $T/kubruntu.sif docker://kubricdockerhub/kubruntu
+mv $T/kubruntu.sif $ROOT/containers/kubruntu.sif
+ls -la $ROOT/containers/kubruntu.sif
+echo "=== KUBRIC PULL DONE ==="
