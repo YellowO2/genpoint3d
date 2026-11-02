@@ -41,6 +41,29 @@ with each other, so a turning surface is never seen turning as a whole.
 4. Visibility. For every point and frame, whether it is seen: where to add
    points, which frame evidence a point trusts, and TAPVid-3D's AJ.
 
+## First version, agreed 3 Nov
+
+1. Points: one per patch of a frame where no existing point explains it, so
+   each point has its own first-seen frame, pinned there (the anchor) instead
+   of frame 0; seen once, it exists in every frame. Surfaces never seen
+   (imagined points, the set loss) come after this works.
+2. One mechanism for every frame without evidence: a hidden point, a forecast
+   frame and a frame before a point was first seen all get no image and are
+   carried by the rest of the scene (`--hidden-blank`).
+3. Two passes over the clip's windows, with an input saying which way time
+   runs: forward, then backward, so later frames inform earlier ones (late
+   points get their past) without a window large enough to hold both. Four
+   refinement rounds a window in all: forward round 1 matches every point,
+   makes the large jump and predicts visibility; forward round 2 refines with
+   hidden points blanked; backward round 1 fills the past and refines with
+   what came later; backward round 2 polishes. Trained on clips run both ways,
+   the direction input telling the physics apart (a bounce loses height
+   forward and gains it backward).
+4. Training data: Kubric clips longer and with more turning (MOVi's own worker,
+   a spin at each throw, rolling objects, 48-96 frames; `scripts/kubric_movi*`),
+   a portion of PointOdyssey (long clips, people and animals, real camera
+   paths), mixed with the current Kubric.
+
 ## Still to settle
 
 - What a point is matched against. Frame 0's look only (now); then the latest
