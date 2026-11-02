@@ -20,7 +20,8 @@
 #PBS -o /home/users/ntu/yhuang01/kubric_simple.log
 
 set -euo pipefail
-ROOT=$HOME/scratch
+# The real path: ~/scratch is a link, which the container cannot follow.
+ROOT=$(readlink -f $HOME/scratch)
 cd $ROOT/genpoint3d
 exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
 module load apptainer/1.5.0
@@ -39,7 +40,7 @@ for i in $(seq $FIRST $((FIRST + N - 1))); do
   t0=$(date +%s)
   # Blender writes its raw renders to the scratch dir; keep that off the home quota.
   scratch=$(mktemp -d -p ${TMPDIR:-/tmp} kubric.XXXX)
-  apptainer exec --nv --bind $ROOT $SIF python3 scripts/kubric_simple_worker.py \
+  apptainer exec --nv --bind $ROOT --pwd $ROOT/genpoint3d $SIF python3 $ROOT/genpoint3d/scripts/kubric_simple_worker.py \
     --job-dir $OUT/$id --scratch_dir $scratch --seed $i --resolution $RES --use_gpu $ARGS
   rm -rf $scratch
   echo "clip $id: $(( $(date +%s) - t0 )) s"
