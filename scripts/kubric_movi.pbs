@@ -1,0 +1,45 @@
+#!/bin/bash
+# Render Kubric clips with 3D point tracks: MOVi's own scenes
+# (scripts/kubric_movi_tracks.py), longer and with fewer resting objects.
+# Per clip, from its seed: 48-96 frames, a fixed or a gliding camera (MOVi's
+# fixed_random and linear_movement), 0-4 resting and 1-3 thrown objects.
+#
+#   qsub -v N=3,FIRST=0,RES=256 scripts/kubric_movi.pbs
+#
+#PBS -N kubric_movi
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=02:05:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/kubric_movi.log
+
+set -euo pipefail
+# The real path: ~/scratch is a link, which the container cannot follow.
+ROOT=$(readlink -f $HOME/scratch)
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load apptainer/1.5.0
+
+N=${N:-1}
+FIRST=${FIRST:-0}
+RES=${RES:-256}
+OUT=${OUT:-$ROOT/kubric_movi_$RES}
+SIF=$ROOT/containers/kubruntu.sif
+mkdir -p $OUT
+
+for i in $(seq $FIRST $((FIRST + N - 1))); do
+  id=$(printf %06d $i)
+  if [ -f $OUT/$id/$id.npy ]; then echo "skip $id"; continue; fi
+  frames=$(( 48 + (i * 7919) % 49 ))
+  cams=(fixed_random linear_movement)
+  camera=${cams[$(( (i * 104729) % 2 ))]}
+  t0=$(date +%s)
+  scratch=$(mktemp -d -p ${TMPDIR:-/tmp} kubric.XXXX)
+  apptainer exec --nv --bind $ROOT --pwd $ROOT/genpoint3d $SIF python3 $ROOT/genpoint3d/scripts/kubric_movi_tracks.py \
+    --job-dir $OUT/$id --scratch_dir $scratch --seed $i --resolution $RES --frame_end $frames \
+    --camera $camera --min_num_static_objects 0 --max_num_static_objects 4
+  rm -rf $scratch
+  echo "clip $id: $frames frames, $camera camera, $(( $(date +%s) - t0 )) s"
+done
+echo "=== KUBRIC MOVI DONE ==="
