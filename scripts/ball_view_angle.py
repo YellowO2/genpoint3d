@@ -36,6 +36,10 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--raw", required=True, help="the rendered clips, with the ball's centre")
+p.add_argument("--hide-hidden", action="store_true",
+               help="a diagnostic that reads the truth: blank each point's image wherever it "
+                    "is truly hidden (evaluate.py --ablate hide-hidden), so a hidden point gets "
+                    "no match rather than a wrong one")
 args = p.parse_args()
 
 ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
@@ -53,7 +57,7 @@ predictor = Predictor(model, ScoreSettings(
     loss_type=targs.get("loss_type", "l21"), method=targs.get("method", "regress"),
     refine_iters=targs.get("refine_iters", 4), param=targs.get("param", "position"),
     carry=bool(targs.get("carry", 0)), window=targs.get("window", 0), overlap=targs.get("overlap", 0),
-    reach=targs.get("reach", "hold")))
+    reach=targs.get("reach", "hold"), hide_hidden=args.hide_hidden))
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():
@@ -84,7 +88,7 @@ with torch.no_grad():
             m = m.clone()
             m[0] = False
             errs[name].append(err[m].cpu())
-print(f"{Path(args.cache).name} | {args.ckpt}")
+print(f"{Path(args.cache).name} | {args.ckpt}" + (" | hidden points' images blanked" if args.hide_hidden else ""))
 print(f"  {'class':>9} {'point-frames':>13} {'median px':>10} {'within 4 px':>12}")
 for name in names:
     e = torch.cat(errs[name]) if errs[name] else torch.zeros(0)
