@@ -47,7 +47,7 @@ MOTIONS = {
 # The drop: from this height above resting on the floor, under a gravity that
 # makes it land at frame LAND, so the bounce falls in a forecast's frames
 # 12-23; each bounce keeps BOUNCE of the speed.
-DROP_HEIGHT, LAND, BOUNCE = 1.2, 15, 0.6
+DROP_HEIGHT, LAND, BOUNCE = 0.6, 15, 0.6
 
 
 def drop_heights() -> list[float]:
@@ -96,7 +96,10 @@ def render(name, axis, deg, vel, seed, out):
     fwd = torch.linalg.cross(up, torch.tensor([1.0, 0, 0], dtype=torch.float64))        # along the floor, away
     floor_point = torch.tensor([0.0, 0, 3.6], dtype=torch.float64)
     floor_point = floor_point - (floor_point @ up) * up - 2.2 * up    # the floor 2.2 m below the camera
-    start = floor_point + R_BALL * up - 1.2 * torch.tensor([1.0, 0, 0], dtype=torch.float64) * (vel[0] > 0)
+    # A sliding or rolling ball starts left of centre; a dropped one less far,
+    # so all of it is in view from frame 0 while it is still high.
+    shift = 0.4 if name == "drop" else 1.2
+    start = floor_point + R_BALL * up - shift * torch.tensor([1.0, 0, 0], dtype=torch.float64) * (vel[0] > 0)
     # Waves of several sizes, down to a few centimetres, so a patch of the
     # ball has detail a matcher can lock onto, as Kubric's scanned textures do.
     scale = torch.tensor([3.0, 8.0, 20.0, 45.0], dtype=torch.float64)[None, :, None]

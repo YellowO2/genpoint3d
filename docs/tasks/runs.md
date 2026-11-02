@@ -426,9 +426,10 @@ one missing ability: moving a point from what the rest of its object does.
 
 ## Forecasting a bounce in plain view (fyP, `scripts/drop_test.pbs`)
 
-A ball dropped from 1.2 m drifting sideways, landing at frame 15 and bouncing
-back up (`render_ball.py --only drop`, 3 clips, 25-31 ball points each); frames
-12-23 blank. Moving points' forecast APD: fyP 0.119, "stops where last seen"
-0.020, "keeps its last speed" 0.222. The model forecasts a falling ball worse
-than carrying on at its last speed, before the bounce even comes: it has not
-learned simple falling, let alone the impact. Not only Kubric's unseen shapes.
+A ball dropped from 0.6 m drifting sideways, landing at frame 15 and bouncing
+back up (`render_ball.py --only drop`), frames 12-23 blank. (A first version
+started the ball mostly out of the frame, 27 points on a sliver; its numbers
+are dropped.) One clip, 206 ball points: moving points seen 0.967; forecast
+fyP 0.273, "stops where last seen" 0.048, "keeps its last speed" 0.291. The
+model forecasts a plain fall and bounce a little worse than carrying on at
+its last speed; no sign of having learned falling or the bounce.
