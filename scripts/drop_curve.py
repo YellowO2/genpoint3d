@@ -34,7 +34,7 @@ targs = ckpt["args"]
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 clips = sorted(Path(args.cache).glob("*.pt"))
 level = bool(targs.get("level", 0))
-ds = ClipDataset(clips, 1000, resample=False, norm_mode=targs.get("norm_mode", "median"),
+ds = ClipDataset(clips, 3000, resample=False, norm_mode=targs.get("norm_mode", "median"),
                  target=targs.get("target", "displacement"), fix_idcard=bool(targs.get("fix_idcard", 0)),
                  frames=Path(args.frames_cache), features=True, depth=True, level=level)
 first = torch.load(clips[0], weights_only=False, mmap=True)
@@ -53,7 +53,8 @@ with torch.no_grad():
     pred = predictor(batch)
     b = pred.batch
     gt, pr = to_metres(b["traj"].float(), b)[0].cpu(), to_metres(pred.tracks.float(), b)[0].cpu()
-moving = (gt - gt[:1]).norm(dim=-1).amax(0) > 0.1                      # the dropped object's points
+# The dropped object's points, handed to the model at frame 0 and seen there.
+moving = ((gt - gt[:1]).norm(dim=-1).amax(0) > 0.1) & (b["query_t"][0].cpu() == 0) & b["visibility"][0, 0].cpu().bool()
 h_gt = ((gt[:, moving] - gt[:1, moving]) @ up).mean(1).numpy()
 h_pr = ((pr[:, moving] - gt[:1, moving]) @ up).mean(1).numpy()
 fall = 0.5 * 9.81 * (np.arange(len(h_gt)) / 12.0) ** 2
