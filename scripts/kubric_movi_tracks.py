@@ -92,6 +92,9 @@ parser.add_argument("--samples_per_pixel", type=int, default=64, help="MOVi's 64
 parser.add_argument("--max_spin", type=float, default=10.0, help="largest spin at a throw, rad/s")
 parser.add_argument("--min_num_rolling_objects", type=int, default=0)
 parser.add_argument("--max_num_rolling_objects", type=int, default=2)
+parser.add_argument("--drop_test", action="store_true",
+                    help="one ball dropped from rest DROP_HEIGHT up, a camera 10 m back seeing "
+                         "the whole fall; with no other objects (the object-count flags at 0)")
 FLAGS = parser.parse_args()
 
 # --- Common setups & resources
@@ -274,6 +277,19 @@ dome.friction = FLAGS.floor_friction
 dome.restitution = FLAGS.floor_restitution
 
 
+
+# [genpoint3d] The drop test: free fall under the simulator's gravity, in
+# full view, then the bounces.
+DROP_HEIGHT = 3.0
+if FLAGS.drop_test:
+  scene.camera.position = (0., -10., 1.6)
+  scene.camera.look_at((0., 0., 1.6))
+  # A scanned object, so its surface has texture to track, about 1 m across.
+  ball = gso.create(asset_id=rng.choice(active_split))
+  ball.scale = 1.0 / np.max(ball.bounds[1] - ball.bounds[0])
+  ball.position = (0., 0., DROP_HEIGHT)
+  ball.metadata["is_dynamic"] = True
+  scene += ball
 
 # Add DYNAMIC objects
 num_dynamic_objects = rng.randint(FLAGS.min_num_dynamic_objects,

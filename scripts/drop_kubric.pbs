@@ -1,0 +1,53 @@
+#!/bin/bash
+# The Kubric drop test end to end: render one object dropped from rest
+# (kubric_movi_tracks.py --drop_test), cut to 48 frames, cache it as training
+# clips are, then for each checkpoint the forecast fall height by frame
+# (scripts/drop_curve.py) and a movie of truth against forecast.
+#
+#   qsub -v CKPTS="outputs/fyP_prev_template/best.pt outputs/fzJ_physics_data/best.pt" scripts/drop_kubric.pbs
+#
+#PBS -N drop_kubric
+#PBS -l select=1:ncpus=8:ngpus=1:mem=48gb
+#PBS -l walltime=00:45:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/drop_kubric.log
+
+set -euo pipefail
+ROOT=$(readlink -f $HOME/scratch)
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+D=$ROOT/drop_kubric
+SEED=${SEED:-7}
+if [ ! -d $D/cache ]; then
+  module load apptainer/1.5.0
+  scratch=$(mktemp -d -p ${TMPDIR:-/tmp} kubric.XXXX)
+  apptainer exec --nv --bind $ROOT --pwd $ROOT/genpoint3d $ROOT/containers/kubruntu.sif \
+    python3 $ROOT/genpoint3d/scripts/kubric_movi_tracks.py --job-dir $D/raw/000000 --scratch_dir $scratch \
+    --seed $SEED --resolution 256 --frame_end 48 --drop_test --samples_per_pixel 32 \
+    --min_num_static_objects 0 --max_num_static_objects 0 --min_num_dynamic_objects 0 \
+    --max_num_dynamic_objects 0 --min_num_rolling_objects 0 --max_num_rolling_objects 0
+  rm -rf $scratch
+  module unload apptainer/1.5.0
+  module load python/3.11.7-gcc11
+  module load cuda/12.2.2
+  source $ROOT/venvs/fyp/bin/activate
+  python scripts/crop_raw.py --src $D/raw --dst $D/raw48 --frames 48 --min-moving 20
+  python -m genpoint3d.prepare.main --root $D/raw48 --out $D/cache --features --image-size 384 \
+    --points 500 --query-stride 1
+  python scripts/cache_frames.py --src $D/cache --raw $D/raw48 --dst $D/frames --res 384 --workers 8
+else
+  module load python/3.11.7-gcc11
+  module load cuda/12.2.2
+  source $ROOT/venvs/fyp/bin/activate
+fi
+for CKPT in ${CKPTS:?}; do
+  python scripts/drop_curve.py --ckpt $CKPT --cache $D/cache --frames-cache $D/frames --cutoff 2 \
+    2>&1 | grep -v "Warn\|warn"
+  name=$(basename $(dirname $CKPT))
+  python scripts/render_tracks.py --ckpt $CKPT --cache $D/cache --frames-cache $D/frames \
+    --clip 000000 --points 1000 --batch 1 --eval-cutoff 2 --out $ROOT/renders/drop_kubric_$name \
+    2>&1 | grep "APD" || true
+done
+echo "=== DROP KUBRIC DONE ==="
