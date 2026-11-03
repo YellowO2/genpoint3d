@@ -50,6 +50,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fzG | fyZ (fyT's weights + visibility fed back) with each window's new frames starting at the point's speed over the shared frames instead of held at frame 15's position (`--reach continue`), in training and scoring (g1, 1,000 steps) | moving hidden and forecast above fyZ; on the ball, hidden points keep turning past frame 16 | at 250 / 500 / 750 / 1,000: seen moving 0.923 / 0.928 / 0.930 / 0.931, moving hidden 0.674 / 0.687 / 0.695 / 0.695, forecast moving 0.368 / 0.377 / 0.381 / 0.382, all 0.864 / 0.872 / 0.873 / 0.873; standard scoring: all 0.915, non-visible 0.549, forecast 0.614 / moving 0.364 | level with fyZ / fyT: the handover is not what costs hidden points on Kubric; forecasting a little worse |
 | fzH | fyT's weights, 3 refinement rounds instead of 4, the visibility head trained (`--vis-loss 1`, nothing fed back) (g1, 1,000 steps) | the reference for fzI; 3 rounds from now on | at 250 / 500: seen moving 0.915 / 0.921, moving hidden 0.670 / 0.680, forecast moving 0.382 / 0.389, all 0.864 / 0.869; 7.1-7.4 s/step (4 rounds: 9-11); stopped at ~550 | level with the 4-round runs at the same steps (fyZ 0.678 / 0.689 hidden, 0.923 / 0.928 seen): 3 rounds lose nothing, about 30% faster |
 | fzI | fzH with hidden points blanked from round 2 on, as forecast frames are (`--hidden-blank 1`): one path for hidden points and forecasting | moving hidden above fzH; the ball's hidden points keep its shape better | at 250 / 500: seen moving 0.916 / 0.921, moving hidden 0.665 / 0.670, forecast moving 0.381 / 0.389, all 0.863 / 0.872; visibility head right on 89% of hidden point-frames; 7.4 s/step; stopped at ~550. Spin up 10 (one clip, median px, fzH / fzI): seen facing 0.95 / 0.85, edge 1.72 / 1.54, hidden 19.8 / 22.2, returned 79 / 92 | no gain: hidden points a little worse on Kubric and the ball, seen ones a little better. Carried as forecasts, hidden points are only as good as the forecast, which the drop test shows is weak; the path stays (one mechanism), the forecasting itself is what to fix |
+| fzJ | fzI (3 rounds, hidden points blanked) trained on the new Kubric clips only: MOVi's own worker with a spin at each throw and rolling balls and cylinders (`scripts/kubric_movi_tracks.py`), cut to 48 frames, 240 of 518 kept (`scripts/crop_raw.py`, at least 150 moving tracks seen in frame 0), 500 points, batch 1, forecast from frame 24 at validation (g1, 1,000 steps) | the drop clip forecast above "keeps its last speed"; on spin up 10 the hidden points nearer the truth than fzI's | | is missing physics and turning in the training data what holds forecasting and hidden points back |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
@@ -435,3 +436,12 @@ are dropped.) One clip, 206 ball points: moving points seen 0.967; forecast
 fyP 0.273, "stops where last seen" 0.048, "keeps its last speed" 0.291. The
 model forecasts a plain fall and bounce a little worse than carrying on at
 its last speed; no sign of having learned falling or the bounce.
+
+## Overnight, 3 Nov (queued on NSCC)
+
+The 512 Kubric clips rendered (4.7 min each at 256 px, 32 samples); 240 kept.
+Queued in a chain: caching them (DINOv3, frames), fzJ, then for fzJ and fzI
+each: the drop test (re-rendered, the ball in view), the view-angle check on
+spin up 10, and the standard scoring (val, and forecast from frame 12).
+PointOdyssey's sample (3.3 GB) and val (20.4 GB) are downloaded to
+~/scratch/pointodyssey, not yet unpacked.
