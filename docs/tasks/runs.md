@@ -54,7 +54,7 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fzK | fzJ with 2 forward rounds and then a backward pass over the windows, 2 rounds each, the model told which way time runs (`--refine-iters 2 --back-iters 2`); still every point queried at frame 0 (g1, 1,000 steps) | above fzJ on hidden and forecast | not run | cancelled before it started: fzL against fzJ answers whether the design helps on the same clips, and fzK's sweeps (ffbb) were not fzL's (fbfb), so it would not have split the credit cleanly |
 | fzL | fzJ's clips with points from every frame: the same clips cached with each point's query the first of frames 0, 8, 16, ... it is seen in (`--query-stride 8`), its template, pin and steps there, a window holding the points first seen by its end, and the four rounds a window as alternating sweeps, forward, back, forward, back (`--schedule fbfb`): each sweep starts from what the one before left, so later frames inform earlier ones twice and late points get their past from the first backward sweep -- the first version of the scene-points design (g1, 1,000 steps) | above fzK; late points tracked back to the start | val (its own clips, forecast from 24) at 250 / 500 / 750 / 1,000: seen moving 0.443 / 0.487 / 0.523 / 0.525, moving hidden 0.096 / 0.110 / 0.120 / 0.125, forecast moving 0.161 / 0.213 / 0.259 / 0.265; 16 s/step. Fall test (forecast from 3) moving 0.104 (fzJ 0.106). Spin up 10 median px: facing 0.97, edge 2.28, hidden 30.6, returned 60.1 (fzI 0.74 / 1.64 / 25.8 / 91.4). Standard Kubric: all 0.857, non-visible 0.417; forecast 0.585, moving 0.334 (fzI 0.913 / 0.519; 0.623 / 0.377) | no gain on falls; returned points on the ball nearer (60 px against 91), everything else worse, and Kubric scores well down: trained on the 216 new clips alone, it lost some of what Kubric taught. Points joined only every 8th frame. Next: points at any frame (fzN) and the clips mixed with Kubric |
 | fzM | fzJ with every clip levelled: turned about the frame-0 camera so up is always -y (`--level 1`, each clip's up from Kubric's cameras, `scripts/add_up.py`), gravity one fixed direction instead of one each clip's camera tilt sets (g1, 1,000 steps) | the fall test above fzJ's 0.106 | | does knowing which way is down let the model forecast falls; the true up here, an estimate on real video |
-| fzN | fzL with points joining at exactly the frame they are first seen (`--query-stride 1`, not rounded to every 8th frame), the matcher reading each point's template in its own frame in one pass (g1, 1,000 steps) | as fzL or above, at fzL's speed or better | | the design as intended: a point joins the frame it appears |
+| fzN | fzL with points joining at exactly the frame they are first seen (`--query-stride 1`, not rounded to every 8th frame), the matcher reading each point's template in its own frame in one pass, and each point's group vector (`--group-feedback 16 --group-loss 1 --feedback-scale 10`) carried through every window and sweep (g1, 1,000 steps) | as fzL or above, at fzL's speed or better | | the design as intended: a point joins the frame it appears |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
@@ -466,3 +466,11 @@ at frame 0 fall, bounce and tumble in the forecast, under Kubric's physics.
 The models forecast real falls about twice as well as either guess, so
 something of falling is learned, but at a low level; 1,000 steps on 216 clips
 of physics did not move it at all.
+
+Code cut on 3 Nov, the experiments recorded above: the rigid fit and all
+around it (`--rigid-fit`, `--fit-rounds`, `--rot-match`, `--fit-input`,
+`--fit-loss`), the whole-frame grid (`--grid-cmp`, `--grid-window`,
+`--fine-prev-skip`), the true-groups and hidden-pull diagnostics
+(`--group-oracle`, `--group-vis-bias`), the window-start option (`--reach`),
+`--back-iters` (the schedule does it), and the step tracker. Checkpoints that
+used them no longer load.
