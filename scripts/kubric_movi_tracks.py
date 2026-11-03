@@ -93,7 +93,7 @@ parser.add_argument("--max_spin", type=float, default=10.0, help="largest spin a
 parser.add_argument("--min_num_rolling_objects", type=int, default=0)
 parser.add_argument("--max_num_rolling_objects", type=int, default=2)
 parser.add_argument("--drop_test", action="store_true",
-                    help="one object dropped from rest DROP_HEIGHT up, a camera 7 m back seeing "
+                    help="one object dropped from rest DROP_HEIGHT up, a camera 8 m off looking down, seeing "
                          "the whole fall; with no other objects (the object-count flags at 0)")
 FLAGS = parser.parse_args()
 
@@ -282,8 +282,10 @@ dome.restitution = FLAGS.floor_restitution
 # full view, then the bounces.
 DROP_HEIGHT = 3.0
 if FLAGS.drop_test:
-  scene.camera.position = (0., -7., 1.8)
-  scene.camera.look_at((0., 0., 1.6))
+  # As MOVi films its scenes: about 8 m off, looking down at the floor, the
+  # drop in view from its top to the floor.
+  scene.camera.position = (0., -6.5, 5.)
+  scene.camera.look_at((0., 0., 1.2))
   # A scanned object, so its surface has texture to track, 1.5 m across.
   ball = gso.create(asset_id=rng.choice(active_split))
   ball.scale = 1.5 / np.max(ball.bounds[1] - ball.bounds[0])

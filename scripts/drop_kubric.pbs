@@ -43,11 +43,13 @@ if [ ! -d $D/cache ]; then
   python scripts/cache_frames.py --src $D/cache --raw $D/raw48 --dst $D/frames --res 384 --workers 8
 fi
 for CKPT in ${CKPTS:?}; do
-  python scripts/drop_curve.py --ckpt $CKPT --cache $D/cache --frames-cache $D/frames --cutoff 2 \
-    2>&1 | grep -v "Warn\|warn"
+  for C in ${CUTOFFS:-5 2}; do
+    python scripts/drop_curve.py --ckpt $CKPT --cache $D/cache --frames-cache $D/frames --cutoff $C \
+      2>&1 | grep -v "Warn\|warn"
+  done
   name=$(basename $(dirname $CKPT))
   python scripts/render_tracks.py --ckpt $CKPT --cache $D/cache --frames-cache $D/frames \
-    --clip 000000 --points 1000 --batch 1 --eval-cutoff 2 --out $ROOT/renders/drop_kubric_$name \
+    --clip 000000 --points 1000 --batch 1 --eval-cutoff ${CUTOFFS%% *} --out $ROOT/renders/drop_kubric_$name \
     2>&1 | grep "APD" || true
 done
 echo "=== DROP KUBRIC DONE ==="
