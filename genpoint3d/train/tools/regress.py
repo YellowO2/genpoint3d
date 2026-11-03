@@ -254,7 +254,8 @@ def regress_loss(
     with their weights the step error, the rigid pairs' gap error, the group
     vectors' error against `groups`, and the visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
-    at once (one round in memory) and the loss comes back detached."""
+    at once (one round in memory) and the loss comes back detached. The dict
+    also holds the tracks and visibility logits, as `refine` gives them."""
     run = Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, cond)
     w = [gamma ** (run.R - 1 - i) for i in range(run.R)]
     w = [v / sum(w) for v in w]
@@ -284,7 +285,8 @@ def regress_loss(
         vis_total = vis_total + vis_loss
     if backward is None:
         total = total + vis_weight * vis_total
-    return total, {"loss": total.detach(), "visibility": vis_total.detach()}
+    return total, {"loss": total.detach(), "visibility": vis_total.detach(), "tracks": run.whole,
+                   "logits": run.vis if model.visibility else None}
 
 
 @torch.no_grad()
