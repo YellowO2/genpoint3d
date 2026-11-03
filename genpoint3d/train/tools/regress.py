@@ -4,8 +4,8 @@ The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
 e.g. "fbfb", one round a window each; empty is `iters` rounds forward). Each
 round the model gives a velocity per frame, summed from each point's fixed
-frame (`_integrate`), and the point is held at its known position in its
-query frame (`_pin`). A point gets no image where it has no evidence: before
+frame (`_integrate`), and the point is held at its anchor in its query
+frame (`_pin`). A point gets no image where it has no evidence: before
 its query frame, and where the visibility head calls it hidden
 (`_blank_hidden`).
 """
@@ -78,12 +78,13 @@ def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: b
     return alive, at, inside
 
 
-def _pin(g: torch.Tensor, known_x0: torch.Tensor, at: torch.Tensor, inside: torch.Tensor) -> torch.Tensor:
-    """Hold each point whose query frame is in the window at its known position there."""
+def _pin(g: torch.Tensor, at: torch.Tensor, inside: torch.Tensor) -> torch.Tensor:
+    """Hold each point whose query frame is in the window at its anchor
+    there: a displacement of zero."""
     if not bool(inside.any()):
         return g
     idx = at[:, None, :, None].expand(-1, 1, -1, 3)
-    held = torch.where(inside[:, None, :, None], known_x0[:, None].to(g.dtype), g.gather(1, idx))
+    held = torch.where(inside[:, None, :, None], 0.0, g.gather(1, idx))
     return g.scatter(1, idx, held)
 
 
@@ -137,8 +138,8 @@ class Sweeps:
     visibility logits and each point's last group vector."""
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, iters: int, schedule: str,
-                 window: int, overlap: int, known_x0: torch.Tensor, cond: dict) -> None:
-        self.model, self.anchor, self.T, self.known_x0, self.cond = model, anchor, T, known_x0, cond
+                 window: int, overlap: int, cond: dict) -> None:
+        self.model, self.anchor, self.T, self.cond = model, anchor, T, cond
         self.plan = _schedule(iters, schedule)
         self.R = sum(n for _, n in self.plan)
         self.spans = _windows(T, window, overlap)
@@ -178,7 +179,7 @@ class Sweeps:
                         c = _blank_hidden(self.cond, logits, start, end, T, N)
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive)
-                    g = _pin(g, self.known_x0, at, inside)
+                    g = _pin(g, at, inside)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 if logits is not None:
                     self.vis[:, start:end] = logits.detach()
@@ -230,7 +231,6 @@ def regress_loss(
     model: nn.Module,
     x1: torch.Tensor,
     anchor: torch.Tensor,
-    known_x0: torch.Tensor,
     mask: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
     iters: int = 4,
@@ -255,7 +255,7 @@ def regress_loss(
     vectors' error against `groups`, and the visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
     at once (one round in memory) and the loss comes back detached."""
-    run = Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, known_x0, cond)
+    run = Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, cond)
     w = [gamma ** (run.R - 1 - i) for i in range(run.R)]
     w = [v / sum(w) for v in w]
     share = 1 / len(run.spans)
@@ -288,12 +288,11 @@ def regress_loss(
 
 
 @torch.no_grad()
-def refine(model: nn.Module, anchor: torch.Tensor, num_frames: int, known_x0: torch.Tensor,
-           iters: int = 4, window: int = 0, overlap: int = 0, schedule: str = "",
+def refine(model: nn.Module, anchor: torch.Tensor, num_frames: int, iters: int = 4, window: int = 0, overlap: int = 0, schedule: str = "",
            **cond) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """The tracks (B, T, N, 3) and, with a visibility head, the logits (B, T,
     N) of each frame's last window."""
-    run = Sweeps(model, anchor, num_frames, iters, schedule, window, overlap, known_x0, cond)
+    run = Sweeps(model, anchor, num_frames, iters, schedule, window, overlap, cond)
     for _ in run:
         pass
     return run.whole, run.vis if model.visibility else None

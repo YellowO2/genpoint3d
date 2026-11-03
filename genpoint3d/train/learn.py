@@ -5,7 +5,7 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, fine_inputs, hidden_weight, known_frame0, random_cutoff, rigid_groups, rigid_pairs,
+    apd_weight, fine_inputs, hidden_weight, random_cutoff, rigid_groups, rigid_pairs,
     to_device, visual_mask,
 )
 from genpoint3d.train.tools.regress import regress_loss
@@ -33,7 +33,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         # Back-propagated a round at a time, divided by accum so the
         # accumulated gradient is the effective batch's mean.
-        loss, parts = regress_loss(model, traj, anchor, known_frame0(b), mask=mask, weight=w,
+        loss, parts = regress_loss(model, traj, anchor, mask=mask, weight=w,
                                    iters=settings.refine_iters, backward=1 / settings.accum,
                                    window=settings.window, overlap=settings.overlap,
                                    schedule=settings.schedule, **extra,

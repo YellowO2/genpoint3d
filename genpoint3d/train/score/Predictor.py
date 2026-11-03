@@ -4,7 +4,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, to_device, visual_mask
 from genpoint3d.train.tools.regress import refine, regress_loss
 
 
@@ -33,14 +33,13 @@ class Predictor:
             in_view = vis.bool().clone()
             in_view[:, 0] = True
             shown = vm[..., None] & in_view
-        kx0 = known_frame0(b)
         cond = dict(context=b["context"], visual_mask=shown, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
                     **fine_inputs(model, b, j.amp))
         how = dict(iters=j.refine_iters, window=j.window, overlap=j.overlap, schedule=j.schedule)
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
-            loss, _ = regress_loss(model, traj, anchor, kx0, mask=vis, **how, **cond)
-            tracks, logits = refine(model, anchor, traj.shape[1], kx0, **how, **cond)
+            loss, _ = regress_loss(model, traj, anchor, mask=vis, **how, **cond)
+            tracks, logits = refine(model, anchor, traj.shape[1], **how, **cond)
         return Prediction(batch=b, visual_mask=vm, tracks=tracks, loss=loss.item(), visibility=logits)
 
     def done(self) -> None:

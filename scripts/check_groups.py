@@ -23,7 +23,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import _to_camera_t, motion_px
 from genpoint3d.train.tools.regress import Sweeps
 
@@ -47,7 +47,7 @@ with torch.no_grad():
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b))
         sweeps = Sweeps(model, b["anchor"], b["traj"].shape[1], rs.refine_iters, rs.schedule, rs.window,
-                        rs.overlap, known_frame0(b), cond)
+                        rs.overlap, cond)
         for _ in sweeps:
             pass
         emb = sweeps.groups.float()  # each point's last

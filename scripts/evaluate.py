@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.main import score
-from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, error_and_motion, motion_px, motion_table, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
@@ -34,7 +34,7 @@ def per_frame_apd(run: Run, loader, device) -> list[float]:
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b, amp))
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            pred, _ = refine(model, b["anchor"], traj.shape[1], known_frame0(b), iters=s.refine_iters,
+            pred, _ = refine(model, b["anchor"], traj.shape[1], iters=s.refine_iters,
                              window=s.window, overlap=s.overlap, schedule=s.schedule, **cond)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
         e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
