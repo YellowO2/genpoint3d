@@ -1,7 +1,7 @@
 #!/bin/bash
 # How well a --rigid-fit run's groups match the truth (scripts/check_groups.py).
 #
-#   qsub -v CKPT=outputs/fyV_fit_rounds/best.pt,CACHE=fit_check/tuV/val scripts/check_groups.pbs
+#   qsub -v CKPT=outputs/<a --group-feedback run>/best.pt,CACHE=fit_check/tuV/val scripts/check_groups.pbs
 #
 #PBS -N check_groups
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb

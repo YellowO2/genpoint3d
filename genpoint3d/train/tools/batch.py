@@ -145,7 +145,7 @@ def rigid_pairs(b: dict) -> torch.Tensor:
 def rigid_groups(b: dict, tol: float = 0.02) -> torch.Tensor:
     """(B, N, N) bool: the pairs of points whose distance never strays more
     than `tol` metres from its frame-0 value, moving or not -- the pairs that
-    move as one, which a rigid-fit model's vectors should put together. Two
+    move as one, which a group-feedback model's vectors should put together. Two
     still points count: they move alike. A point pairs with itself."""
     p = to_metres(b["traj"], b)
     d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)
@@ -193,9 +193,6 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
             raise ValueError("this finder reads each cell's depth, and the batch has "
                              "none: load the clips with depth (--fine-xyz 1)")
         out["fine_xyz"] = _cell_xyz(b["depth"].float(), proj)
-    if model.grid_cmp:
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            out["grid"] = model.grid_comparison(fmap.detach().float(), proj.float(), out["fine_xyz"])
     if model.flow_patch:
         if b.get("flow") is None:
             raise ValueError("this model reads the optical flow around each guess, and the "
@@ -203,9 +200,6 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
         out["fine_flow"] = b["flow"].float()
     if b.get("query_t") is not None:
         out["query_t"] = b["query_t"]
-    if getattr(model, "group_oracle", False):
-        # A diagnostic that reads the truth (`--group-oracle`).
-        out["group_pairs"] = rigid_groups(b)
     return out
 
 

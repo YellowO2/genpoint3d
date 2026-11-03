@@ -43,7 +43,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                   anchor_frame0: bool = False, scaling: str = "median",
                   method: str = "flow", refine_iters: int = 4,
                   param: str = "position", carry: bool = False, window: int = 0,
-                  overlap: int = 0, reach: str = "hold", schedule: str = "") -> list[float]:
+                  overlap: int = 0, schedule: str = "") -> list[float]:
     """APD for each frame index separately: APD3D over every visible point
     that moves (more than 4 px), with no rescale -- the points the tracking
     is about, and where it falls off through the clip.
@@ -76,7 +76,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                 pred = refine(model, anchor, num_frames=traj.shape[1],
                               iters=refine_iters, known_x0=kx0, param=param,
                               carry=carry, window=window, overlap=overlap, rounds=rounds,
-                              reach=reach, schedule=schedule, **cond)
+                              schedule=schedule, **cond)
             else:
                 pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                                    generator=gen, known_x0=kx0, **cond)
@@ -269,9 +269,6 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="best.pt or ckpt.pt from a run")
     p.add_argument("--cache", required=True, help="cache DIRECTORY to score")
-    p.add_argument("--fit-rounds", type=int, default=None,
-                   help="a --rigid-fit run scored with its fit placing the points in this many "
-                        "rounds instead of the number it trained with (0: never)")
     p.add_argument("--flow-cache", default=None,
                    help="optical flow of --cache's clips (scripts/cache_flow.py), for a --flow-patch run")
     p.add_argument("--frames-cache", default=None,
@@ -330,10 +327,6 @@ def main() -> int:
                    help="regress, CNN-only models: also track an S x S grid of "
                         "helper points over frame 0 and score the queries only "
                         "(TAPIP3D's test-time support grid uses 16)")
-    p.add_argument("--reach", default=None, choices=["hold", "continue"],
-                   help="regress in windows: each window's new frames start held "
-                        "where the point last was, or carrying on at its speed over "
-                        "the frames shared with the window before; default as trained")
     p.add_argument("--per-frame", action="store_true",
                    help="also report APD per frame index, which separates a bad"
                         " start from accumulating drift")
@@ -370,9 +363,6 @@ def main() -> int:
     model = build_model(Settings(**targs), feat_dim, has_feats).to(device)
     model.load_state_dict(ckpt["model"])
     print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
-    if args.fit_rounds is not None:
-        model.fit_rounds = args.fit_rounds
-        print(f"the fit places the points in the first {args.fit_rounds} rounds", flush=True)
     if args.fine_weights:
         # A diagnostic: the trained model with its finder put back to other
         # weights (e.g. TAPIP3D's own), everything else as trained.
@@ -412,11 +402,10 @@ def main() -> int:
           f" | norm {targs.get('norm_mode', 'median')}"
           f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
 
-    reach = args.reach or targs.get("reach", "hold")
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
                               anchor_frame0, args.scaling, method,
                               refine_iters, param, carry, window, overlap,
-                              reach, targs.get("schedule", "")) if args.per_frame else None
+                              targs.get("schedule", "")) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
     judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
                             anchor_frame0=anchor_frame0, loss_type=loss_type,
@@ -425,7 +414,7 @@ def main() -> int:
                             method=method, refine_iters=refine_iters, param=param, carry=carry,
                             window=window, overlap=overlap,
                             cutoff=args.eval_cutoff, samples=args.samples,
-                            support=args.support, reach=reach, schedule=targs.get("schedule", ""))
+                            support=args.support, schedule=targs.get("schedule", ""))
     m = score(model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

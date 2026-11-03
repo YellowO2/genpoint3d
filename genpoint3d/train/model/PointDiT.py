@@ -85,20 +85,11 @@ class PointDiT(nn.Module):
         fine_prev: bool = False,
         flow_patch: int = 0,
         depth_head: bool = False,
-        rigid_fit: int = 0,
-        fit_rounds: int = 2,
-        rot_match: bool = False,
-        fit_input: bool = False,
-        grid_cmp: int = 0,
-        grid_window: int = 16,
-        fine_prev_skip: bool = False,
         fine_xyz: bool = False,
         visibility: bool = False,
         vis_feedback: bool = False,
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
-        group_oracle: bool = False,
-        group_vis_bias: bool = False,
         hidden_blank: bool = False,
         bidirectional: bool = False,
         motion_waves: bool = False,
@@ -338,59 +329,6 @@ class PointDiT(nn.Module):
         if fine:
             self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
             self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
-        # [rigid fit] after RAFT-3D's rigid-motion embeddings and Dense-SE3
-        # (docs/tasks/rigid-motion-2026-10-30.md): every point also says a
-        # `rigid_fit`-wide vector (its soft group: points whose vectors are
-        # close move as one rigid piece) and a confidence per frame. In the
-        # first `fit_rounds` refinement rounds, `settle` then places each point
-        # by the rigid motion that best carries its group from frame 0 to where
-        # the model says they are; the rounds after refine from there. The fit
-        # carries the large motion and the turn, which the guess alone gets
-        # wrong; the last rounds the sub-pixel detail, which the fit is too
-        # coarse for (runs.md, fyU at its gate held open).
-        self.rigid_fit, self.fit_rounds, self.rot_match = rigid_fit, fit_rounds, rot_match
-        # With `fit_input`, the rigid state is carried from round to round, as
-        # RAFT-3D carries its rigid motions and SpatialTrackerV2 its dynamic
-        # probability and confidence: each round every point is also given
-        # what the last round's fit said -- where it put the point (as an
-        # offset from the guess), how its surface has turned since frame 0,
-        # its group vector and its confidence -- and decides itself how far to
-        # follow, and says a new group and confidence from there. A placed fit
-        # is coarser than a guess that is already close (runs.md, fyV by
-        # distance moved), so with this the fit usually places nothing
-        # (`fit_rounds` 0). Zero at first.
-        self.fit_input = fit_input
-        if fit_input:
-            if not rigid_fit:
-                raise ValueError("the carried rigid state comes from the rigid fit, which needs rigid_fit")
-            self.fit_proj = zero_init(nn.Linear(99 + 6 + rigid_fit + 1, dim, bias=False), almost=False)
-        self._group = self._fitted = None
-        if rigid_fit:
-            self.group_emb = nn.Linear(dim, rigid_fit)
-            self.group_conf = zero_init(nn.Linear(dim, 1), almost=False)
-        # [grid comparison] frame t-1 against frame t over the whole frame
-        # (docs/tasks/scene-points-2026-10-31.md): at a fixed `grid_cmp` x
-        # `grid_cmp` grid of cells, the finder's comparison of each cell's
-        # neighbourhood in t-1 with the same spot's in t, made once per clip
-        # (`grid_comparison`, from `fine_inputs`). Every point then reads the
-        # `grid_window` cells nearest its guess, each round, by a cross-
-        # attention per block: how the whole surface around it is changing,
-        # not only the few cells around itself -- a point on the hidden back of
-        # a turning ball can read the visible side turning. The blocks start at
-        # zero, so a model starts as it would without.
-        self.grid_cmp, self.grid_window = grid_cmp, grid_window
-        if fine_prev_skip:
-            if not (fine and self.fine.prev):
-                raise ValueError("fine_prev_skip leaves out the frame-before comparison, which needs fine_prev")
-            self.fine.prev_skip = True
-        if grid_cmp:
-            if not (fine and self.fine.neigh):
-                raise ValueError("the grid comparison is the 3D neighbourhood finder's (fine, neigh)")
-            w = self.fine.out_dim // (2 if self.fine.prev else 1)
-            self.grid_proj = nn.Linear(w + 99, dim)
-            self.grid_blocks = nn.ModuleList(
-                CrossBlock(dim, num_heads, mlp_mult, cond_dim, locality=False, correlate=False)
-                for _ in range(depth))
         # [depth head] every cell of the CNN's map says its log depth, from the
         # pixels alone: dense supervision of what the matcher reads. Trained
         # by `tools/depth.py`'s loss; the forward pass never calls it.
@@ -514,13 +452,6 @@ class PointDiT(nn.Module):
         # back visibility that it is hidden. Zeros before the first round, and
         # both inputs start at zero, so step 0 is the model without it.
         self.group_feedback = group_feedback
-        # `group_oracle`, a diagnostic: the attention bias uses the truth's
-        # pairs that move as one (`batch.rigid_groups`, handed in as
-        # `group_pairs`) in place of the vectors' affinity, so whether the
-        # points use a right grouping is tested apart from learning one.
-        if group_oracle and not group_feedback:
-            raise ValueError("group_oracle replaces group_feedback's affinity: needs group_feedback")
-        self.group_oracle = group_oracle
         self._emb = None
         if group_feedback:
             if virtual:
@@ -528,22 +459,12 @@ class PointDiT(nn.Module):
             self.group_out = nn.Linear(dim, group_feedback)
             self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
             self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
-        # `group_vis_bias`: a second bias, per block and head, on the same
-        # affinity times how sure the model is that the querying point is
-        # hidden and the other one seen in that frame (both from the fed-back
-        # visibility): a hidden point can lean on its seen group-mates harder
-        # than the plain bias lets every point lean on all of them.
-        if group_vis_bias and not (group_feedback and vis_feedback):
-            raise ValueError("group_vis_bias reads the fed-back groups and visibility: needs both")
-        self.group_vis_bias = group_vis_bias
-        if group_vis_bias:
-            self.group_hid_bias = nn.Parameter(torch.zeros(depth, num_heads))
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
-                         rot, query_t):
+                         query_t):
         """The finder's comparison, (B, T, N, out_dim): each point's neighbourhood
         in the window's frames (`fine_map`, uv, pos) against its template, read
         in its own query frame of the clip (`clip_*`, `query_t` (B, N); None is
@@ -560,8 +481,7 @@ class PointDiT(nn.Module):
                 places = ({} if fine_xyz is None else
                           dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale))
                 return self.fine(fine_map, clip_map[:, 0], uv, uv0, **places)
-            places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float(),
-                          rot=rot if self.rot_match else None)
+            places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float())
         return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, **places)
 
     def _upsample(self, context: torch.Tensor, patch_xyz: torch.Tensor):
@@ -611,78 +531,6 @@ class PointDiT(nn.Module):
             context, _ = self._upsample(context, patch_xyz)
         with torch.autocast(device_type=context.device.type, enabled=False):
             return self._cosine(context.float(), id_card.float())
-
-    def settle(self, g: torch.Tensor, anchor: torch.Tensor, i: int) -> torch.Tensor:
-        """g (B, T, N, 3), the guess after refinement round i's correction, in
-        the target's units -> in the first `fit_rounds` rounds, each point
-        where its soft group's rigid motion puts it; after them, g.
-
-        For each point i and frame t: the rotation R and shift that best carry
-        the frame-0 positions of every point j onto their guessed positions at
-        t, each weighted by its confidence at t and by the affinity
-        2 sigmoid(-|v_i - v_j|^2) of the two points' vectors (RAFT-3D's).
-        Point i's fitted position is its own frame-0 position carried by that
-        motion. The rotation is found without a gradient: an SVD's backward is
-        unstable when the points are nearly collinear. The gradient still
-        reaches the vectors and the confidences through the weighted centres.
-        The fit is made every round, for the losses that train it
-        (`regress_loss`'s fit_weight and group_weight). A model built without
-        `rigid_fit` returns g.
-        """
-        if not self.rigid_fit:
-            return g
-        if self._group is None:
-            raise ValueError("settle follows a forward pass of this model")
-        emb, conf = self._group
-        self._group = None
-        with torch.autocast(device_type=g.device.type, enabled=False):
-            pos = self._lookup_pos(g.float(), anchor.float())                    # (B, T, N, 3)
-            x0 = anchor.float()[:, None]                                         # (B, 1, N, 3)
-            a = 2 * torch.sigmoid(-_sq_dist(emb))                                # (B, N, N)
-            W = a[:, None] * torch.sigmoid(conf)[:, :, None, :]                  # (B, T, i, j)
-            tot = W.sum(-1, keepdim=True).clamp_min(1e-9)
-            c0, ct = (W @ x0) / tot, (W @ pos) / tot                             # (B, T, N, 3)
-            with torch.no_grad():
-                A = x0[:, :, None] - c0[:, :, :, None]                           # (B, T, i, j, 3)
-                Bm = pos[:, :, None] - ct[:, :, :, None]
-                U, _, Vh = torch.linalg.svd(torch.einsum("btij,btijx,btijy->btixy", W, A, Bm))
-                flip = torch.ones_like(U[..., 0])
-                flip[..., 2] = torch.det(Vh.transpose(-1, -2) @ U.transpose(-1, -2)).sign()
-                R = Vh.transpose(-1, -2) @ torch.diag_embed(flip) @ U.transpose(-1, -2)
-            fit = self._target_units(torch.einsum("btixy,btiy->btix", R, x0 - c0) + ct, anchor.float())
-            # The rotation goes to the next round's matcher (`rot_match`), and
-            # all of it to the next round's input (`fit_input`).
-            self._fitted = (fit, emb, R, conf)
-            return fit.to(g.dtype) if i < self.fit_rounds else g
-
-    @torch.no_grad()
-    def grid_comparison(self, fmap: torch.Tensor, proj: torch.Tensor, xyz: torch.Tensor) -> tuple:
-        """fmap (B, T, C, h, w), proj (B, T, 3, 4), xyz (B, T, 3, h, w) ->
-        (features (B, T, G, W), cells (B, T, G, 3)) at a `grid_cmp` square grid:
-        each cell's neighbourhood in frame t-1 against the same spot's in t,
-        by the finder's comparison (its frame-0 half: the template is t-1);
-        zeros at frame 0. A cell is where the depth puts its pixel in each
-        frame. Made once per clip, without a gradient: the rounds read it."""
-        B, T = fmap.shape[:2]
-        S = self.grid_cmp
-        c = (torch.arange(S, device=fmap.device, dtype=torch.float32) + 0.5) / S
-        gy, gx = torch.meshgrid(c, c, indexing="ij")
-        uv = torch.stack([gx, gy], -1).reshape(1, 1, S * S, 2).expand(B, T, -1, -1)
-        hh, ww = xyz.shape[-2:]
-        cell = (uv * uv.new_tensor([ww, hh]) - 0.125).round().long()
-        cells = xyz.float().permute(0, 1, 3, 4, 2)[torch.arange(B)[:, None, None], torch.arange(T)[None, :, None],
-                                                   cell[..., 1].clamp(0, hh - 1), cell[..., 0].clamp(0, ww - 1)]
-        w = self.fine.out_dim // (2 if self.fine.prev else 1)
-        feat = fmap.new_zeros(B, T, S * S, w, dtype=torch.float32)
-        if T > 1:
-            M = B * (T - 1)
-            cmp = self.fine(fmap[:, 1:].reshape(M, 1, *fmap.shape[2:]), fmap[:, :-1].reshape(M, *fmap.shape[2:]),
-                            uv[:, 1:].reshape(M, 1, S * S, 2), uv[:, :-1].reshape(M, S * S, 2),
-                            xyz=xyz[:, 1:].reshape(M, 1, *xyz.shape[2:]).float(),
-                            xyz0=xyz[:, :-1].reshape(M, *xyz.shape[2:]).float(),
-                            pos=cells[:, 1:].reshape(M, 1, S * S, 3), pos0=cells[:, :-1].reshape(M, S * S, 3))
-            feat[:, 1:] = cmp[..., :w].float().reshape(B, T - 1, S * S, w)
-        return feat, cells
 
     def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
         """flow (B, T, 2, h, w), uv (B, T, N, 2) the guess in [0, 1] ->
@@ -791,13 +639,9 @@ class PointDiT(nn.Module):
         fine_proj: torch.Tensor | None = None,
         fine_xyz: torch.Tensor | None = None,
         fine_flow: torch.Tensor | None = None,
-        rot: torch.Tensor | None = None,
-        fit_hint: torch.Tensor | None = None,
-        grid: tuple | None = None,
         visibility: bool = False,
         vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
-        group_pairs: torch.Tensor | None = None,
         direction: torch.Tensor | None = None,
         query_t: torch.Tensor | None = None,
         alive: torch.Tensor | None = None,
@@ -827,18 +671,6 @@ class PointDiT(nn.Module):
         fine_xyz:    (B, T, 3, h, w) each CNN cell's 3D position, `anchor`'s
                                      space, from its depth. Required with
                                      `fine_map` for a finder with `fine_xyz`.
-        rot:         (B, T, N, 3, 3) how each point's surface has turned since
-                                     frame 0, from the last round's fit, for a
-                                     model built with `rot_match`; None in the
-                                     first round
-        grid:        (features (B, T, G, W), cells (B, T, G, 3)) the grid
-                                     comparison (`grid_comparison`), for a
-                                     model built with `grid_cmp`
-        fit_hint:    the last round's rigid state, for a model built with
-                                     `fit_input`, None in the first round:
-                                     (fit (B, T, N, 3) where it put each point,
-                                     in `x`'s units; rot (B, T, N, 3, 3); group
-                                     vectors (B, N, E); confidences (B, T, N))
         fine_flow:   (B, T, 2, h, w) at each CNN cell, how it moved since the
                                      frame before, as a fraction of the frame
                                      (0 at frame 0). Required by a model built
@@ -861,10 +693,6 @@ class PointDiT(nn.Module):
         alive:       (B, N) bool     the points this window has: a point first
                                      seen after it is left out of the attention
                                      between points. None: all of them.
-        group_pairs: (B, N, N) bool  the truth's pairs that move as one, in
-                                     place of the vectors' affinity; given
-                                     exactly to a model built with
-                                     `group_oracle`.
         frames:      (start, end)    the clip's frames `x` covers, one window
                                      of a longer clip; the visual arguments
                                      are still the whole clip's, and its
@@ -886,8 +714,6 @@ class PointDiT(nn.Module):
             context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow = (
                 None if t is None else t[:, cut]
                 for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow))
-            if grid is not None:
-                grid = (grid[0][:, cut], grid[1][:, cut])
         # Every image reading below is per point once it has been looked up
         # (the match, the cost volume, the finder, the distances), so a mask
         # per point blanks it exactly. The feature map itself is shared by a
@@ -942,24 +768,6 @@ class PointDiT(nn.Module):
             if point_mask is not None:
                 window = window * point_mask.reshape(B * T, -1, 1)
 
-        # [grid comparison] each frame's cells as tokens, blanked where the
-        # frame has no image; the cells nearest each guess as a window.
-        grid_ctx = grid_win = None
-        if self.grid_cmp:
-            if grid is None:
-                raise ValueError("a model built with grid_cmp is given the grid comparison")
-            if self.virtual:
-                raise ValueError("the grid comparison is read by the points, not by virtual tokens")
-            feat, cells = grid
-            tok = self.grid_proj(torch.cat([feat.float(), _posenc(cells.float())], -1))
-            if frame_mask is not None:
-                tok = tok * frame_mask[..., None, None]
-            grid_ctx = tok.reshape(B * T, -1, self.dim)
-            with torch.no_grad():
-                gd = torch.cdist(pos.float().reshape(B * T, N, 3), cells.float().reshape(B * T, -1, 3))
-                near = gd.topk(min(self.grid_window, gd.shape[-1]), dim=-1, largest=False).indices
-                grid_win = torch.full_like(gd, -CrossBlock.FAR).scatter(-1, near, 0.0)
-
         # --- [cost volume] support window vs the neighbourhood of the estimate ---
         cv = None
         if self.costvol and dist2 is not None:
@@ -1008,7 +816,7 @@ class PointDiT(nn.Module):
                 # neighbourhood reads them scene-normalised instead, about
                 # unit spread, the scale TAPIP3D's encoding is built for.
             fine = self._fine_at_queries(fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos,
-                                         anchor, rot, query_t)
+                                         anchor, query_t)
             if point_mask is not None:
                 fine = fine * point_mask[..., None]
             if bool(self.flow_patch) != (fine_flow is not None):
@@ -1173,22 +981,6 @@ class PointDiT(nn.Module):
                 h = h + self.match_more(match[..., 5:])
         if fine is not None:
             h = h + self.fine_tok(fine).to(h.dtype)
-        if self.fit_input:
-            if fit_hint is None:
-                off = torch.zeros_like(x, dtype=torch.float32)
-                rot6 = torch.eye(3, device=dev)[:, :2].T.reshape(6).expand(B, T, N, 6)
-                emb = torch.zeros(B, T, N, self.rigid_fit, device=dev)
-                conf = torch.zeros(B, T, N, 1, device=dev)
-            else:
-                fit, R, v, c = fit_hint
-                off = fit.float() - x.float()
-                # The first two columns of the rotation: continuous, unlike
-                # angles, and enough to fix it.
-                rot6 = R[..., :, :2].transpose(-1, -2).reshape(B, T, N, 6).float()
-                emb = v.float()[:, None].expand(B, T, N, -1)
-                conf = c.float()[..., None]
-            state = torch.cat([_posenc(off), rot6, emb, conf], -1)
-            h = h + self.fit_proj(state.to(h.dtype))
         if flow is not None:
             h = h + self.flow_tok(flow).to(h.dtype)
         if self.vis_feedback != (vis_prev is not None):
@@ -1209,18 +1001,10 @@ class PointDiT(nn.Module):
             v = (group_prev.float() if group_prev is not None
                  else torch.zeros(B, N, self.group_feedback, device=dev))
             h = h + self.feedback_scale * self.group_in(v.to(h.dtype))[:, None]
-            if self.group_oracle != (group_pairs is not None):
-                raise ValueError("group_pairs is given exactly when the model was built with group_oracle")
-            a = group_pairs.float() if group_pairs is not None else 2 * torch.sigmoid(-_sq_dist(v))  # (B, N, N)
+            a = 2 * torch.sigmoid(-_sq_dist(v))                                  # (B, N, N)
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
-            hid = None
-            if self.group_vis_bias:
-                seen = torch.sigmoid(vis_prev.float()).reshape(B * T, N)
-                hid = a * ((1 - seen)[:, :, None] * seen[:, None, :])[:, None]          # (B*T, 1, N, N)
-            biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]
-                       + (0 if hid is None else hid * self.feedback_scale * self.group_hid_bias[d][:, None, None])
-                       ).to(h.dtype) + (0 if bb_d is None else bb_d)
-                      for d, bb_d in enumerate(biases)]
+            biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
+                      + (0 if bb_d is None else bb_d) for d, bb_d in enumerate(biases)]
 
         if alive is not None:
             # Points first seen after this window are not in it: no point reads them.
@@ -1250,7 +1034,7 @@ class PointDiT(nn.Module):
                   if self.causal else None)
 
         # --- [4] blocks ---
-        seen_blocks, seen_grid = [], []
+        seen_blocks = []
         cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth
         for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
                                                   cross_blocks, biases):
@@ -1287,23 +1071,15 @@ class PointDiT(nn.Module):
                                   dist2=dist2, corr=corr, noise=noise, window=window)
                     seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
                 h = seen
-            if grid_ctx is not None:
-                gb = self.grid_blocks[len(seen_grid)]
-                seen_grid.append(None)
-                h = gb(h, cs, grid_ctx.to(h.dtype), window=grid_win)
             h = h.view(B, T, Nt, -1)
         h = h[:, :, :N]                                               # the virtual tokens go no further
 
         # --- [5] head ---
         h = self.out_norm(h)
         if self.group_feedback:
-            # One vector per point for the window, as `rigid_fit`'s below.
+            # One vector per point for the window: which rigid piece a point
+            # is on does not change with time.
             self._emb = self.group_out(h).float().mean(1)
-        if self.rigid_fit:
-            # Kept for `settle`, which the refinement calls on this pass's
-            # guess straight after it. One group per point for the whole
-            # window: which piece a point is on does not change with time.
-            self._group = (self.group_emb(h).float().mean(1), self.group_conf(h).float()[..., 0])
         if not visibility:
             return self.out(h)
         if not self.visibility:

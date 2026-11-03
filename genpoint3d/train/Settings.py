@@ -272,11 +272,6 @@ class Settings(argparse.Namespace):
                             "(`regress._windows`).")
         p.add_argument("--overlap", type=int, default=4, metavar="F",
                        help="frames each window shares with the one before it.")
-        p.add_argument("--reach", default="hold", choices=["hold", "continue"],
-                       help="--window: each window's new frames start held where the "
-                            "point last was, or carrying on at its speed over the "
-                            "frames shared with the window before (`regress._reach`); "
-                            "in training and scoring.")
         p.add_argument("--fine-neigh", type=int, default=0, metavar="K",
                        help="--fine-xyz only: replace the finder's 7x7 window "
                             "with TAPIP3D's lookup, the K cells nearest the guess "
@@ -289,47 +284,14 @@ class Settings(argparse.Namespace):
                             "turning surface has changed less from than from frame 0 "
                             "(FineFinder._before), started as a copy of the frame-0 "
                             "comparison.")
-        p.add_argument("--rigid-fit", type=int, default=0, metavar="E",
-                       help="regress only: every point also says an E-wide vector (its "
-                            "soft group) and a confidence, and in the first --fit-rounds "
-                            "rounds is placed where the rigid motion of its group puts it "
-                            "(RAFT-3D's rigid-motion embeddings; PointDiT.settle). 0 off.")
-        p.add_argument("--rot-match", type=int, default=0, choices=[0, 1],
-                       help="--rigid-fit with --fine-neigh: each round, the matcher turns "
-                            "frame 0's neighbourhood by the rotation the last round's fit "
-                            "found before comparing (FineFinder._neighbourhoods).")
-        p.add_argument("--grid-cmp", type=int, default=0, metavar="S",
-                       help="--fine-neigh: compare frame t-1 with frame t at an S x S grid of "
-                            "cells over the whole frame, once per clip, and let every point read "
-                            "the --grid-window cells nearest its guess each round (PointDiT."
-                            "grid_comparison). 0 off.")
-        p.add_argument("--grid-window", type=int, default=16, metavar="K")
-        p.add_argument("--fine-prev-skip", type=int, default=0, choices=[0, 1],
-                       help="--fine-prev: do not make the per-point frame-before comparison; "
-                            "zeros fill its place, so a run trained with it loads. A test of "
-                            "--grid-cmp in its place.")
-        p.add_argument("--fit-input", type=int, default=0, choices=[0, 1],
-                       help="--rigid-fit: the rigid state is carried from round to round: "
-                            "each round every point is also given the last round's fit "
-                            "(where it put the point, how its surface turned, its group "
-                            "vector and confidence) and chooses how far to follow; usually "
-                            "with --fit-rounds 0.")
-        p.add_argument("--fit-rounds", type=int, default=2, metavar="K",
-                       help="--rigid-fit: the refinement rounds the fit places the points in; "
-                            "the rounds after refine from there.")
         p.add_argument("--group-loss", type=float, default=0.0, metavar="W",
-                       help="--rigid-fit or --group-feedback: the points' vectors are also "
+                       help="--group-feedback: the points' vectors are also "
                             "scored against the pairs the truth shows moving as one, weighted W.")
         p.add_argument("--feedback-scale", type=float, default=1.0, metavar="S",
                        help="--vis-feedback / --group-feedback: what the fed-back "
                             "visibility and groups add is multiplied by S, so their "
                             "zero-started weights reach a useful size in a short run "
                             "(PointDiT, visibility fed back). 1: every run before it.")
-        p.add_argument("--group-oracle", type=int, default=0, choices=[0, 1],
-                       help="--group-feedback, a diagnostic that reads the truth: the "
-                            "attention bias uses the true pairs that move as one in "
-                            "place of the vectors' affinity, in training and scoring. "
-                            "0 off.")
         p.add_argument("--schedule", default="", metavar="SWEEPS",
                        help="regress in windows: the sweeps over the windows one round a "
                             "letter, f forward and b backward, e.g. fbfb (regress._schedule); "
@@ -341,18 +303,11 @@ class Settings(argparse.Namespace):
                        help="regress, with --vis-loss: from the second refinement round on, "
                             "each point the visibility head calls hidden in a frame gets no "
                             "image there, as a forecast frame gets none. 0 off.")
-        p.add_argument("--group-vis-bias", type=int, default=0, choices=[0, 1],
-                       help="--group-feedback with --vis-feedback: a second attention "
-                            "bias towards group-mates, scaled by how hidden the point is "
-                            "and how seen the other one is in that frame. 0 off.")
         p.add_argument("--group-feedback", type=int, default=0, metavar="E",
                        help="regress only, with --group-loss: every point also says an "
                             "E-wide group vector, fed back to the next round into its "
                             "token and as an attention bias towards points with close "
                             "vectors (PointDiT, groups fed back). 0 off.")
-        p.add_argument("--fit-loss", type=float, default=0.0, metavar="W",
-                       help="--rigid-fit only: the fitted positions are also scored "
-                            "like the guess in every round, weighted W.")
         p.add_argument("--depth-loss", type=float, default=0.0, metavar="W",
                        help="--fine only: a small head on the CNN's map also says the "
                             "depth of every cell of every frame, from the pixels alone, "
@@ -444,25 +399,14 @@ class Settings(argparse.Namespace):
         if settings.window and (settings.method != "regress" or settings.carry
                                 or not 0 < settings.overlap < settings.window):
             p.error("--window is regress only, replaces --carry, and needs 0 < --overlap < --window")
-        if settings.grid_cmp and not (settings.fine and settings.fine_neigh):
-            p.error("--grid-cmp uses the 3D neighbourhood finder: needs --fine 1 and --fine-neigh K")
-        if settings.fit_input and not settings.rigid_fit:
-            p.error("--fit-input hands each point the rigid fit's position: needs --rigid-fit E")
-        if settings.rot_match and not (settings.rigid_fit and settings.fine_neigh):
-            p.error("--rot-match turns the 3D neighbourhood by the fit's rotation: needs "
-                    "--rigid-fit E and --fine-neigh K")
         if settings.schedule and (settings.method != "regress" or not settings.window):
             p.error("--schedule sweeps over the windows: needs --method regress and --window W")
         if settings.hidden_blank and (settings.vis_loss <= 0 or settings.method != "regress"):
             p.error("--hidden-blank uses the visibility head's calls: needs --vis-loss W, in --method regress")
         if settings.group_feedback and (settings.group_loss <= 0 or settings.method != "regress"):
             p.error("--group-feedback trains its vectors by --group-loss W, in --method regress")
-        if settings.fit_loss and not settings.rigid_fit:
-            p.error("--fit-loss trains the rigid fit: needs --rigid-fit E")
-        if settings.group_loss and not (settings.rigid_fit or settings.group_feedback):
-            p.error("--group-loss trains group vectors: needs --rigid-fit E or --group-feedback E")
-        if settings.rigid_fit and settings.method != "regress":
-            p.error("--rigid-fit settles each refinement's guess: --method regress")
+        if settings.group_loss and not settings.group_feedback:
+            p.error("--group-loss trains the group vectors: needs --group-feedback E")
         if settings.depth_loss and not settings.fine:
             p.error("--depth-loss is a head on the finder's CNN: needs --fine 1")
         if settings.flow_patch and not (settings.fine and settings.flow_cache):

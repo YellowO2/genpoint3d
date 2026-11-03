@@ -3,7 +3,7 @@
 # them as the model reads them with their true depth (scripts/tapvid3d_cache.py),
 # and score each run on each motion apart (scripts/evaluate.py --per-frame).
 #
-#   qsub -v CKPTS="outputs/fyT_dense_reference/best.pt outputs/fyV_fit_rounds/best.pt" scripts/ball_test.pbs
+#   qsub -v CKPTS="outputs/fyT_dense_reference/best.pt" scripts/ball_test.pbs
 #
 #PBS -N ball_test
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb

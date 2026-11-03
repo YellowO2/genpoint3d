@@ -1,4 +1,4 @@
-"""How well a --rigid-fit or --group-feedback run's groups match the truth, by
+"""How well a --group-feedback run's groups match the truth, by
 how far points move.
 
 For every pair of points, the run's affinity 2 sigmoid(-|v_i - v_j|^2) (above
@@ -13,7 +13,7 @@ close to the point's own motion. And the other way round: of the points that
 truly move with it to 2 cm, the share the run puts with it ("found"), which a
 run grouping each point with almost nothing would fail.
 
-  python scripts/check_groups.py --ckpt outputs/fyV_fit_rounds/best.pt --cache <val dir> \\
+  python scripts/check_groups.py --ckpt outputs/<a --group-feedback run>/best.pt --cache <val dir> \\
       --frames-cache <frames> [--points 500]
 """
 
@@ -59,7 +59,7 @@ with torch.no_grad():
         refine(model, b["anchor"], num_frames=b["traj"].shape[1], iters=targs.get("refine_iters", 4),
                known_x0=known_frame0(b) if targs.get("anchor_frame0") else None, param=targs.get("param", "position"),
                window=targs.get("window", 0), overlap=targs.get("overlap", 0), **cond)
-        emb = (model._emb if getattr(model, "group_feedback", 0) else model._fitted[1]).float()  # the last window's
+        emb = model._emb.float()  # the last window's
         a = 2 * torch.sigmoid(-(emb[:, :, None] - emb[:, None]).pow(2).sum(-1))
         same = a > 0.5
         gt = to_metres(b["traj"].float(), b)

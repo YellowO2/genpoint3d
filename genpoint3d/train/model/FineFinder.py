@@ -132,10 +132,6 @@ class FineFinder(nn.Module):
         # weights above draw what they draw without it; `copy_prev` starts it
         # as the frame-0 comparison once that has its weights.
         self.prev = prev
-        # A test of the whole-frame grid in its place (PointDiT `grid_cmp`): the
-        # frame-before comparison is not made, and zeros fill its half, so a
-        # model trained with it still loads. Set by `--fine-prev-skip`.
-        self.prev_skip = False
         if prev:
             if not neigh:
                 raise ValueError("the frame-before comparison is the 3D neighbourhood's (neigh)")
@@ -241,8 +237,7 @@ class FineFinder(nn.Module):
     def forward(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
                 uv0: torch.Tensor, xyz: torch.Tensor | None = None,
                 xyz0: torch.Tensor | None = None, pos: torch.Tensor | None = None,
-                pos0: torch.Tensor | None = None, rot: torch.Tensor | None = None,
-                query_t: torch.Tensor | None = None) -> torch.Tensor:
+                pos0: torch.Tensor | None = None, query_t: torch.Tensor | None = None) -> torch.Tensor:
         """
         fmap  (B, T, C, h, w)  from `encode`, the frames being tracked
         fmap0 (B, C, h, w)     the clip's frame 0, where the query is: the
@@ -254,10 +249,6 @@ class FineFinder(nn.Module):
         xyz0  (B, 3, h, w)     the same for frame 0
         pos   (B, T, N, 3)     the current guess in 3D, in the same units
         pos0  (B, N, 3)        the query point in 3D, likewise (`neigh` only)
-        rot   (B, T, N, 3, 3)  how each point's surface has turned since frame 0
-                               (`PointDiT.settle`'s fit), or None: frame 0's
-                               neighbourhood is turned by it before the two
-                               are compared (`neigh` only)
         query_t (B, N) long    each point's own template frame: `fmap0` is then
                                the clip's maps (B, Tq, C, h, w) and `xyz0` its
                                positions (B, Tq, 3, h, w), and each point's
@@ -272,10 +263,8 @@ class FineFinder(nn.Module):
                              "and only that one does")
         if bool(self.neigh) != (pos0 is not None):
             raise ValueError("pos0 is given exactly to a finder built with neigh")
-        if rot is not None and not self.neigh:
-            raise ValueError("turning frame 0's neighbourhood is the 3D neighbourhood's (neigh)")
-        if query_t is not None and (not self.neigh or rot is not None):
-            raise ValueError("a template per point is built for the 3D neighbourhood, unturned")
+        if query_t is not None and not self.neigh:
+            raise ValueError("a template per point is built for the 3D neighbourhood (neigh)")
         if self.neigh and query_t is None:
             # One template frame for every point: a clip of that one frame.
             fmap0, xyz0 = fmap0[:, None], xyz0[:, None]
@@ -289,7 +278,7 @@ class FineFinder(nn.Module):
             if self.neigh:
                 fn = self._neighbourhoods
                 part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut],
-                        None if rot is None else rot[cut], None if query_t is None else query_t[cut])
+                        query_t[cut])
             else:
                 fn = self._correlate
                 part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut],
@@ -303,8 +292,7 @@ class FineFinder(nn.Module):
     # ---------------------------------------------- the 3D neighbourhood
     def _neighbourhoods(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
                         uv0: torch.Tensor, xyz: torch.Tensor, xyz0: torch.Tensor, pos: torch.Tensor,
-                        pos0: torch.Tensor, rot: torch.Tensor | None = None,
-                        query_t: torch.Tensor | None = None) -> torch.Tensor:
+                        pos0: torch.Tensor, query_t: torch.Tensor) -> torch.Tensor:
         """TAPIP3D's lookup (`knn_feature_4d_optimized.py`): at each level, the
         K cells nearest the current guess IN 3D, against the K cells nearest
         the query point in frame 0 plus the query's own feature, compared by
@@ -379,20 +367,10 @@ class FineFinder(nn.Module):
             cur_off = cur_x - pos[:, :, :, None]
             enc = self.posenc_mlps[lvl]
             y = cur_f + enc(_posenc(cur_off))                                # (b, T, N, k, D)
-            if rot is None:
-                x = sup_f + enc(_posenc(sup_off))                            # (b, N, k+1, D)
-                x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)
-            else:
-                # Frame 0's neighbourhood turned the way the surface has
-                # turned since, so a turned surface is compared with its own
-                # shape as it faces now. The rotation is the same in these
-                # units: the clip is brought to unit spread by one scale.
-                turned = torch.einsum("btnxy,bnky->btnkx", rot.float(), sup_off)
-                x = (sup_f[:, None] + enc(_posenc(turned))).flatten(0, 2)    # (b T N, k+1, D)
+            x = sup_f + enc(_posenc(sup_off))                                # (b, N, k+1, D)
+            x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)
             out.append(self.transformers[lvl](x, y.flatten(0, 2)).reshape(b, T, N, -1))
-            if self.prev and self.prev_skip:
-                out_prev.append(out[-1].new_zeros(out[-1].shape))
-            elif self.prev:
+            if self.prev:
                 out_prev.append(self._before(f, x_cells, pick, before, uv, pos, hl, wl, s, enc,
                                              self.prev_transformers[lvl], y))
         return torch.cat(out + out_prev, dim=-1)

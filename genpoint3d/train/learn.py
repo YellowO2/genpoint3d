@@ -33,9 +33,8 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     mask, w = hidden_weight(vis, w, settings.hidden_loss)
     kx0 = known_frame0(b) if settings.anchor_frame0 else None
     rigid = dict(pairs=rigid_pairs(b), rigid_weight=settings.rigid_loss) if settings.rigid_loss else {}
-    if settings.group_loss or settings.fit_loss:
-        rigid.update(group_weight=settings.group_loss, fit_weight=settings.fit_loss,
-                     groups=rigid_groups(b) if settings.group_loss else None)
+    if settings.group_loss:
+        rigid.update(group_weight=settings.group_loss, groups=rigid_groups(b))
     # With --vis-loss, what the visibility head should say: every frame,
     # hidden and forecast ones included, whatever --hidden-loss is.
     seen = {}
@@ -84,7 +83,6 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
                                        iters=settings.refine_iters, backward=1 / settings.accum,
                                        param=settings.param, carry=bool(settings.carry),
                                        window=settings.window, overlap=settings.overlap,
-                                       reach=settings.reach,
                                        schedule=settings.schedule,
                                        vel_weight=settings.vel_loss,
                                        acc_weight=settings.acc_loss, **rigid,
