@@ -195,11 +195,13 @@ def _integrate_at(step: torch.Tensor, param: str, at: torch.Tensor) -> torch.Ten
     return torch.where(t > a, c - c_a, torch.where(t < a, c_a1 - before, torch.zeros_like(c)))
 
 
-def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: bool, device):
+def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: bool, device,
+                   every: bool = False):
     """Per window, from each point's query frame (`cond["query_t"]` (B, N);
     none means frame 0) and the frames with an image (`cond["visual_mask"]`):
     `alive` (B, N), the points the window has -- on the forward pass those
-    first seen by its end, on the backward pass all of them, either way only
+    first seen by its end (`every`: all of them, once a backward sweep has
+    given late points their past), on the backward pass all of them, either way only
     points whose query frame has its image; `at` (B, N), the frame each
     point's steps run from (`_integrate_at`): its query frame when that is in
     the window, else the window's first frame forward and its last backward;
@@ -212,7 +214,7 @@ def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: b
     if vm is not None:
         seen = (vm[..., None].expand(-1, -1, N) if vm.dim() == 2 else vm).gather(1, q[:, None])[:, 0]
     inside = (q >= start) & (q < end)
-    alive = seen if backward else seen & (q < end)
+    alive = seen if backward or every else seen & (q < end)
     at = torch.where(inside, q - start, torch.full_like(q, end - start - 1 if backward else 0))
     return alive, at, inside
 
@@ -238,6 +240,19 @@ def _pin_at(g: torch.Tensor, known_x0: Optional[torch.Tensor], at: torch.Tensor,
     held = g.gather(1, idx)
     held = torch.where(inside[:, None, :, None], known_x0[:, None].to(g.dtype), held)
     return g.scatter(1, idx, held)
+
+
+def _schedule(iters: int, back_iters: int, schedule: str) -> list[tuple[str, int]]:
+    """The sweeps over the windows, in order, each ("f" forward or "b"
+    backward, rounds a window). `schedule` spells them one round a letter,
+    e.g. "fbfb": forward, back, forward, back, each sweep starting from where
+    the one before left every frame. Empty: `iters` forward, then
+    `back_iters` backward."""
+    if schedule:
+        if set(schedule) - {"f", "b"} or schedule[0] != "f":
+            raise ValueError(f"a schedule is f and b, starting with f: {schedule!r}")
+        return [(c, 1) for c in schedule]
+    return [("f", iters)] + ([("b", back_iters)] if back_iters else [])
 
 
 def _check_backward(model: nn.Module, back_iters: int) -> None:
@@ -352,6 +367,7 @@ def regress_loss(
     fit_weight: float = 0.0,
     reach: str = "hold",
     back_iters: int = 0,
+    schedule: str = "",
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -397,6 +413,8 @@ def regress_loss(
               window is scored on its own frames, and the windows' losses are
               averaged.
 
+    schedule: the sweeps one round a letter, e.g. "fbfb" (`_schedule`); when
+              given, `iters` and `back_iters` are not used.
     back_iters: after the forward pass over the windows, a backward pass over
               them from the clip's end to its start, this many rounds a
               window, each from where the forward pass left it, the model told
@@ -412,116 +430,122 @@ def regress_loss(
     """
     if window and carry:
         raise ValueError("windows and carry both restart the later frames: use one")
-    _check_backward(model, back_iters)
+    _check_backward(model, back_iters or "b" in schedule)
     B, T = x1.shape[:2]
-    R = iters + back_iters
+    R = sum(n for _, n in _schedule(iters, back_iters, schedule))
     w = [gamma ** (R - 1 - i) for i in range(R)]
     w = [v / sum(w) for v in w]
     spans = _windows(T, window, overlap)
-    share = 1 / (len(spans) * (2 if back_iters else 1))
+    share = 1 / (len(spans) * len(_schedule(iters, back_iters, schedule)))
 
     whole = _pin(torch.zeros_like(x1), known_x0)
     total = vis_total = x1.new_zeros(())
     seen_all = None
     done = 0
-    for start, end in spans:
-        whole = _reach(whole, done, end, start, reach)
-        g, x1_w = whole[:, start:end], x1[:, start:end]
-        mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
-        alive, at_q, inside = _window_points(cond, B, x1.shape[2], start, end, False, x1.device)
-        mask_w, pairs_w = _alive_only(mask_w, pairs, alive, g)
-        kx0 = known_x0
-        at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-        prev = _no_logits(model, x1_w)
-        rot = {}
-        blank = getattr(model, "hidden_blank", False)
-        c = cond
-        fwd = _direction(model, 1.0, B, x1.device)
-        for i in range(iters):
-            k = _clock(i, R, B, x1.device)
-            vis_loss = x1.new_zeros(())
-            if visible_w is None and prev is None and not blank:
-                step = model(g.detach(), k, anchor, **at, **rot, **fwd, **c)
-            else:
-                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot,
-                                     **fwd, **c)
-                if visible_w is not None:
-                    vis_loss = share * w[i] * visibility_error(logits, visible_w)
-                if prev is not None:
-                    prev = logits.detach()
+    r0 = 0
+    for sweep, n in _schedule(iters, back_iters, schedule):
+        if sweep == "f":
+            for start, end in spans:
+                whole = _reach(whole, done, end, start, reach)
+                g, x1_w = whole[:, start:end], x1[:, start:end]
+                mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
+                alive, at_q, inside = _window_points(cond, B, x1.shape[2], start, end, False, x1.device,
+                                                     every=r0 > 0)
+                mask_w, pairs_w = _alive_only(mask_w, pairs, alive, g)
+                kx0 = known_x0
+                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
+                prev = _no_logits(model, x1_w)
+                rot = {}
+                blank = getattr(model, "hidden_blank", False)
+                c = cond if seen_all is None or not blank else _blank_hidden(cond, seen_all[:, start:end], start, end, T)
+                fwd = _direction(model, 1.0, B, x1.device)
+                for i in range(r0, r0 + n):
+                    k = _clock(i, R, B, x1.device)
+                    vis_loss = x1.new_zeros(())
+                    if visible_w is None and prev is None and not blank:
+                        step = model(g.detach(), k, anchor, **at, **rot, **fwd, **c)
+                    else:
+                        step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot,
+                                             **fwd, **c)
+                        if visible_w is not None:
+                            vis_loss = share * w[i] * visibility_error(logits, visible_w)
+                        if prev is not None:
+                            prev = logits.detach()
+                        if blank:
+                            c = _blank_hidden(cond, logits, start, end, T)
+                    g = torch.where(alive[:, None, :, None],
+                                    model.settle(g.detach() + _integrate_at(step, param, at_q), anchor, i), g.detach())
+                    rot = _turn(model)
+                    loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
+                    if vel_weight:
+                        loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
+                    if acc_weight:
+                        loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
+                    if rigid_weight:
+                        loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs_w, loss_type)
+                    if fit_weight:
+                        loss = loss + w[i] * fit_weight * masked_error(model._fitted[0], x1_w, mask_w, weight_w, loss_type)
+                    if group_weight:
+                        emb = model._emb if getattr(model, "group_feedback", 0) else model._fitted[1]
+                        loss = loss + w[i] * group_weight * _group_error(emb, groups)
+                    loss = share * loss
+                    if backward is not None:
+                        # Out of autocast, where the training loop's own backward runs.
+                        with torch.autocast(device_type=x1.device.type, enabled=False):
+                            ((loss + vis_weight * vis_loss) * backward).backward()
+                        loss, vis_loss = loss.detach(), vis_loss.detach()
+                    total = total + loss
+                    vis_total = vis_total + vis_loss
+                    g = _pin_at(g, kx0, at_q, inside)
+                    if carry:
+                        g = _carry(g.detach(), i, iters)
+                whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
                 if blank:
-                    c = _blank_hidden(cond, logits, start, end, T)
-            g = torch.where(alive[:, None, :, None],
-                            model.settle(g.detach() + _integrate_at(step, param, at_q), anchor, i), g.detach())
-            rot = _turn(model)
-            loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
-            if vel_weight:
-                loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
-            if acc_weight:
-                loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
-            if rigid_weight:
-                loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs_w, loss_type)
-            if fit_weight:
-                loss = loss + w[i] * fit_weight * masked_error(model._fitted[0], x1_w, mask_w, weight_w, loss_type)
-            if group_weight:
-                emb = model._emb if getattr(model, "group_feedback", 0) else model._fitted[1]
-                loss = loss + w[i] * group_weight * _group_error(emb, groups)
-            loss = share * loss
-            if backward is not None:
-                # Out of autocast, where the training loop's own backward runs.
-                with torch.autocast(device_type=x1.device.type, enabled=False):
-                    ((loss + vis_weight * vis_loss) * backward).backward()
-                loss, vis_loss = loss.detach(), vis_loss.detach()
-            total = total + loss
-            vis_total = vis_total + vis_loss
-            g = _pin_at(g, kx0, at_q, inside)
-            if carry:
-                g = _carry(g.detach(), i, iters)
-        whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
-        if blank:
-            if seen_all is None:
-                seen_all = logits.new_zeros(B, T, logits.shape[-1])
-            seen_all[:, start:end] = logits.detach()
-        done = end
-
-    for start, end in (reversed(spans) if back_iters else ()):
-        g, x1_w = whole[:, start:end], x1[:, start:end]
-        mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
-        alive, at_q, inside = _window_points(cond, B, x1.shape[2], start, end, True, x1.device)
-        mask_w, pairs_w = _alive_only(mask_w, pairs, alive, g)
-        kx0 = known_x0
-        at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-        blank = getattr(model, "hidden_blank", False)
-        # Hidden points stay blanked from the forward pass's last call on.
-        c = _blank_hidden(cond, seen_all[:, start:end], start, end, T) if blank else cond
-        bwd = _direction(model, -1.0, B, x1.device)
-        for j in range(back_iters):
-            i = iters + j
-            vis_loss = x1.new_zeros(())
-            out = model(g.detach(), _clock(i, R, B, x1.device), anchor, visibility=model.visibility,
-                        **at, **bwd, **c)
-            step, logits = out if model.visibility else (out, None)
-            if visible_w is not None:
-                vis_loss = share * w[i] * visibility_error(logits, visible_w)
-            if blank:
-                c = _blank_hidden(cond, logits, start, end, T)
-            g = torch.where(alive[:, None, :, None], g.detach() + _integrate_at(step, param, at_q), g.detach())
-            loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
-            if vel_weight:
-                loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
-            if acc_weight:
-                loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
-            if rigid_weight:
-                loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs_w, loss_type)
-            loss = share * loss
-            if backward is not None:
-                with torch.autocast(device_type=x1.device.type, enabled=False):
-                    ((loss + vis_weight * vis_loss) * backward).backward()
-                loss, vis_loss = loss.detach(), vis_loss.detach()
-            total = total + loss
-            vis_total = vis_total + vis_loss
-            g = _pin_at(g, kx0, at_q, inside)
-        whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
+                    if seen_all is None:
+                        seen_all = logits.new_zeros(B, T, logits.shape[-1])
+                    seen_all[:, start:end] = logits.detach()
+                done = end
+        else:
+            for start, end in reversed(spans):
+                g, x1_w = whole[:, start:end], x1[:, start:end]
+                mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
+                alive, at_q, inside = _window_points(cond, B, x1.shape[2], start, end, True, x1.device)
+                mask_w, pairs_w = _alive_only(mask_w, pairs, alive, g)
+                kx0 = known_x0
+                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
+                blank = getattr(model, "hidden_blank", False)
+                # Hidden points stay blanked from the forward pass's last call on.
+                c = _blank_hidden(cond, seen_all[:, start:end], start, end, T) if blank else cond
+                bwd = _direction(model, -1.0, B, x1.device)
+                for i in range(r0, r0 + n):
+                    vis_loss = x1.new_zeros(())
+                    out = model(g.detach(), _clock(i, R, B, x1.device), anchor, visibility=model.visibility,
+                                **at, **bwd, **c)
+                    step, logits = out if model.visibility else (out, None)
+                    if visible_w is not None:
+                        vis_loss = share * w[i] * visibility_error(logits, visible_w)
+                    if blank:
+                        c = _blank_hidden(cond, logits, start, end, T)
+                    g = torch.where(alive[:, None, :, None], g.detach() + _integrate_at(step, param, at_q), g.detach())
+                    loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
+                    if vel_weight:
+                        loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
+                    if acc_weight:
+                        loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
+                    if rigid_weight:
+                        loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs_w, loss_type)
+                    loss = share * loss
+                    if backward is not None:
+                        with torch.autocast(device_type=x1.device.type, enabled=False):
+                            ((loss + vis_weight * vis_loss) * backward).backward()
+                        loss, vis_loss = loss.detach(), vis_loss.detach()
+                    total = total + loss
+                    vis_total = vis_total + vis_loss
+                    g = _pin_at(g, kx0, at_q, inside)
+                whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
+                if blank and logits is not None:
+                    seen_all[:, start:end] = logits.detach()
+        r0 += n
 
     if backward is None:
         total = total + vis_weight * vis_total
@@ -543,6 +567,7 @@ def refine(
     rounds: Optional[list] = None,
     reach: str = "hold",
     back_iters: int = 0,
+    schedule: str = "",
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -565,74 +590,82 @@ def refine(
     """
     if window and carry:
         raise ValueError("windows and carry both restart the later frames: use one")
-    _check_backward(model, back_iters)
+    _check_backward(model, back_iters or "b" in schedule)
     B, N, _ = anchor.shape
-    R = iters + back_iters
+    R = sum(n for _, n in _schedule(iters, back_iters, schedule))
     spans = _windows(num_frames, window, overlap)
     whole = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
     seen = whole.new_zeros(B, num_frames, N) if visibility else None
     seen_all = None
     done = 0
-    for start, end in spans:
-        whole = _reach(whole, done, end, start, reach)
-        g = whole[:, start:end]
-        alive, at_q, inside = _window_points(cond, B, N, start, end, False, anchor.device)
-        kx0 = known_x0
-        at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-        prev = _no_logits(model, g)
-        logits = None
-        rot = {}
-        blank = getattr(model, "hidden_blank", False)
-        c = cond
-        fwd = _direction(model, 1.0, B, anchor.device)
-        if rounds is not None:
-            if not rounds:
-                rounds.extend(whole.clone() for _ in range(R + 1))
-            rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
-        for i in range(iters):
-            out = model(g, _clock(i, R, B, anchor.device), anchor,
-                        visibility=visibility or prev is not None or blank, vis_prev=prev, **at, **rot,
-                        **fwd, **c)
-            if visibility or prev is not None or blank:
-                out, logits = out
-            if prev is not None:
-                prev = logits
-            if blank:
-                c = _blank_hidden(cond, logits, start, end, num_frames)
-            g = torch.where(alive[:, None, :, None],
-                            _pin_at(model.settle(g + _integrate_at(out, param, at_q), anchor, i), kx0, at_q, inside), g)
-            rot = _turn(model)
-            if carry:
-                g = _carry(g, i, iters)
-            if rounds is not None:
-                rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
-        whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
-        if visibility:
-            seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
-        if blank:
-            if seen_all is None:
-                seen_all = logits.new_zeros(B, num_frames, N)
-            seen_all[:, start:end] = logits
-        done = end
-    for start, end in (reversed(spans) if back_iters else ()):
-        g = whole[:, start:end]
-        alive, at_q, inside = _window_points(cond, B, N, start, end, True, anchor.device)
-        kx0 = known_x0
-        at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-        blank = getattr(model, "hidden_blank", False)
-        c = _blank_hidden(cond, seen_all[:, start:end], start, end, num_frames) if blank else cond
-        bwd = _direction(model, -1.0, B, anchor.device)
-        for j in range(back_iters):
-            i = iters + j
-            want = visibility or blank
-            out = model(g, _clock(i, R, B, anchor.device), anchor, visibility=want, **at, **bwd, **c)
-            out, logits = out if want else (out, None)
-            if blank:
-                c = _blank_hidden(cond, logits, start, end, num_frames)
-            g = torch.where(alive[:, None, :, None], _pin_at(g + _integrate_at(out, param, at_q), kx0, at_q, inside), g)
-            if rounds is not None:
-                rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
-        whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
-        if visibility:
-            seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
+    r0 = 0
+    for sweep, n in _schedule(iters, back_iters, schedule):
+        if sweep == "f":
+            for start, end in spans:
+                whole = _reach(whole, done, end, start, reach)
+                g = whole[:, start:end]
+                alive, at_q, inside = _window_points(cond, B, N, start, end, False, anchor.device,
+                                                     every=r0 > 0)
+                kx0 = known_x0
+                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
+                prev = _no_logits(model, g)
+                logits = None
+                rot = {}
+                blank = getattr(model, "hidden_blank", False)
+                c = cond if seen_all is None or not blank else _blank_hidden(cond, seen_all[:, start:end], start, end, num_frames)
+                fwd = _direction(model, 1.0, B, anchor.device)
+                if rounds is not None:
+                    if not rounds:
+                        rounds.extend(whole.clone() for _ in range(R + 1))
+                    rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
+                for i in range(r0, r0 + n):
+                    out = model(g, _clock(i, R, B, anchor.device), anchor,
+                                visibility=visibility or prev is not None or blank, vis_prev=prev, **at, **rot,
+                                **fwd, **c)
+                    if visibility or prev is not None or blank:
+                        out, logits = out
+                    if prev is not None:
+                        prev = logits
+                    if blank:
+                        c = _blank_hidden(cond, logits, start, end, num_frames)
+                    g = torch.where(alive[:, None, :, None],
+                                    _pin_at(model.settle(g + _integrate_at(out, param, at_q), anchor, i), kx0, at_q, inside), g)
+                    rot = _turn(model)
+                    if carry:
+                        g = _carry(g, i, iters)
+                    if rounds is not None:
+                        rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
+                whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
+                if visibility:
+                    seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
+                if blank:
+                    if seen_all is None:
+                        seen_all = logits.new_zeros(B, num_frames, N)
+                    seen_all[:, start:end] = logits
+                done = end
+        else:
+            for start, end in reversed(spans):
+                g = whole[:, start:end]
+                alive, at_q, inside = _window_points(cond, B, N, start, end, True, anchor.device)
+                kx0 = known_x0
+                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
+                blank = getattr(model, "hidden_blank", False)
+                c = _blank_hidden(cond, seen_all[:, start:end], start, end, num_frames) if blank else cond
+                bwd = _direction(model, -1.0, B, anchor.device)
+                for i in range(r0, r0 + n):
+                    want = visibility or blank
+                    out = model(g, _clock(i, R, B, anchor.device), anchor, visibility=want, **at, **bwd, **c)
+                    out, logits = out if want else (out, None)
+                    if blank:
+                        c = _blank_hidden(cond, logits, start, end, num_frames)
+                    g = torch.where(alive[:, None, :, None], _pin_at(g + _integrate_at(out, param, at_q), kx0, at_q, inside), g)
+                    if rounds is not None:
+                        rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
+                whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
+                if blank and logits is not None:
+                    seen_all[:, start:end] = logits.detach()
+                if visibility:
+                    seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
+        r0 += n
+
     return (whole, seen) if visibility else whole

@@ -43,7 +43,8 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                   anchor_frame0: bool = False, scaling: str = "median",
                   method: str = "flow", refine_iters: int = 4,
                   param: str = "position", carry: bool = False, window: int = 0,
-                  overlap: int = 0, reach: str = "hold", back_iters: int = 0) -> list[float]:
+                  overlap: int = 0, reach: str = "hold", back_iters: int = 0,
+                  schedule: str = "") -> list[float]:
     """APD for each frame index separately: APD3D over every visible point
     that moves (more than 4 px), with no rescale -- the points the tracking
     is about, and where it falls off through the clip.
@@ -76,7 +77,7 @@ def per_frame_apd(model, loader, device, steps: int, amp: bool,
                 pred = refine(model, anchor, num_frames=traj.shape[1],
                               iters=refine_iters, known_x0=kx0, param=param,
                               carry=carry, window=window, overlap=overlap, rounds=rounds,
-                              reach=reach, back_iters=back_iters, **cond)
+                              reach=reach, back_iters=back_iters, schedule=schedule, **cond)
             else:
                 pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
                                    generator=gen, known_x0=kx0, **cond)
@@ -416,7 +417,8 @@ def main() -> int:
     per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
                               anchor_frame0, args.scaling, method,
                               refine_iters, param, carry, window, overlap,
-                              reach, targs.get("back_iters", 0)) if args.per_frame else None
+                              reach, targs.get("back_iters", 0),
+                              targs.get("schedule", "")) if args.per_frame else None
     # One set of scoring rules for the intact score and every ablation of it.
     judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
                             anchor_frame0=anchor_frame0, loss_type=loss_type,
@@ -425,7 +427,8 @@ def main() -> int:
                             method=method, refine_iters=refine_iters, param=param, carry=carry,
                             window=window, overlap=overlap,
                             cutoff=args.eval_cutoff, samples=args.samples,
-                            support=args.support, reach=reach, back_iters=targs.get("back_iters", 0))
+                            support=args.support, reach=reach, back_iters=targs.get("back_iters", 0),
+                            schedule=targs.get("schedule", ""))
     m = score(model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

@@ -70,7 +70,7 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     group_oracle=bool(a("group_oracle", 0)),
                     group_vis_bias=bool(a("group_vis_bias", 0)),
                     hidden_blank=bool(a("hidden_blank", 0)),
-                    bidirectional=a("back_iters", 0) > 0,
+                    bidirectional=a("back_iters", 0) > 0 or "b" in a("schedule", ""),
                     motion_waves=bool(a("motion_waves", 0)),
                     buddies=bool(a("buddies", 0)),
                     buddy_bias=bool(a("buddy_bias", 0)),
