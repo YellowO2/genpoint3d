@@ -547,37 +547,27 @@ class PointDiT(nn.Module):
         """The finder's comparison, (B, T, N, out_dim): each point's neighbourhood
         in the window's frames (`fine_map`, uv, pos) against its template, read
         in its own query frame of the clip (`clip_*`, `query_t` (B, N); None is
-        frame 0 for every point). Points that share a query frame are compared
-        together, padded to the largest such group, so the cost stays one pass
-        over the points however many query frames there are."""
-        B, T, N = uv.shape[:3]
+        frame 0 for every point), every point in one pass."""
+        with torch.autocast(device_type=uv.device.type, enabled=False):
+            if query_t is None:
+                uv0, _ = project(anchor.float()[:, None], clip_proj[:, :1].float())
+                uv0 = uv0[:, 0]
+            else:
+                proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
+                uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]          # (B, N, 2)
+            if fine_xyz is None:
+                places = {}
+            elif self.fine.neigh:
+                places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(),
+                              rot=rot if self.rot_match else None,
+                              xyz0=(clip_xyz[:, 0] if query_t is None else clip_xyz).float())
+            else:
+                if query_t is not None:
+                    raise ValueError("a template per point is built for the 3D-neighbourhood finder")
+                places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale)
         if query_t is None:
-            query_t = torch.zeros(B, N, dtype=torch.long, device=uv.device)
-        out = None
-        for t in query_t.unique().tolist():
-            m = query_t == t                                                       # (B, N)
-            count = m.sum(1)
-            K = int(count.max())
-            idx = torch.argsort((~m).int(), dim=1, stable=True)[:, :K]             # (B, K) the group first
-            valid = torch.arange(K, device=uv.device)[None] < count[:, None]      # (B, K)
-            take = lambda v, d: v.gather(d, idx.view(B, *([1] * (d - 1)), K, *([1] * (v.dim() - d - 1)))
-                                         .expand(*v.shape[:d], K, *v.shape[d + 1:]))
-            a = take(anchor.float(), 1)                                            # (B, K, 3)
-            with torch.autocast(device_type=uv.device.type, enabled=False):
-                uv0, _ = project(a[:, None], clip_proj[:, t:t + 1].float())
-                if fine_xyz is None:
-                    places = {}
-                elif self.fine.neigh:
-                    places = dict(xyz=fine_xyz.float(), xyz0=clip_xyz[:, t].float(), pos=take(pos, 2),
-                                  pos0=a, rot=None if (rot is None or not self.rot_match) else take(rot, 2))
-                else:
-                    places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=take(pos, 2) / self.traj_scale)
-            f = self.fine(fine_map, clip_map[:, t], take(uv, 2), uv0[:, 0], **places)   # (B, T, K, D)
-            if out is None:
-                out = f.new_zeros(B, T, N, f.shape[-1])
-            f = f * valid[:, None, :, None].to(f.dtype)
-            out.scatter_add_(2, idx[:, None, :, None].expand_as(f), f)
-        return out
+            return self.fine(fine_map, clip_map[:, 0], uv, uv0, **places)
+        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, **places)
 
     def _upsample(self, context: torch.Tensor, patch_xyz: torch.Tensor):
         """(B, T, P, F) features and (B, T, P, 3) positions -> the same on a

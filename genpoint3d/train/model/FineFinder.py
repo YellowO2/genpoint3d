@@ -241,7 +241,8 @@ class FineFinder(nn.Module):
     def forward(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
                 uv0: torch.Tensor, xyz: torch.Tensor | None = None,
                 xyz0: torch.Tensor | None = None, pos: torch.Tensor | None = None,
-                pos0: torch.Tensor | None = None, rot: torch.Tensor | None = None) -> torch.Tensor:
+                pos0: torch.Tensor | None = None, rot: torch.Tensor | None = None,
+                query_t: torch.Tensor | None = None) -> torch.Tensor:
         """
         fmap  (B, T, C, h, w)  from `encode`, the frames being tracked
         fmap0 (B, C, h, w)     the clip's frame 0, where the query is: the
@@ -257,6 +258,12 @@ class FineFinder(nn.Module):
                                (`PointDiT.settle`'s fit), or None: frame 0's
                                neighbourhood is turned by it before the two
                                are compared (`neigh` only)
+        query_t (B, N) long    each point's own template frame: `fmap0` is then
+                               the clip's maps (B, Tq, C, h, w) and `xyz0` its
+                               positions (B, Tq, 3, h, w), and each point's
+                               template is read in its frame of them, all points
+                               compared in one pass (`neigh` only). `uv0` and
+                               `pos0` are then each point's in its own frame.
 
         returns (B, T, N, out_dim)
         """
@@ -267,6 +274,8 @@ class FineFinder(nn.Module):
             raise ValueError("pos0 is given exactly to a finder built with neigh")
         if rot is not None and not self.neigh:
             raise ValueError("turning frame 0's neighbourhood is the 3D neighbourhood's (neigh)")
+        if query_t is not None and (not self.neigh or rot is not None):
+            raise ValueError("a template per point is built for the 3D neighbourhood, unturned")
         out = []
         # As many clips at a time as hold `chunk` points between them, so a
         # clip with more points is not more memory per piece.
@@ -276,7 +285,7 @@ class FineFinder(nn.Module):
             if self.neigh:
                 fn = self._neighbourhoods
                 part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut],
-                        None if rot is None else rot[cut])
+                        None if rot is None else rot[cut], None if query_t is None else query_t[cut])
             else:
                 fn = self._correlate
                 part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut],
@@ -290,7 +299,8 @@ class FineFinder(nn.Module):
     # ---------------------------------------------- the 3D neighbourhood
     def _neighbourhoods(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
                         uv0: torch.Tensor, xyz: torch.Tensor, xyz0: torch.Tensor, pos: torch.Tensor,
-                        pos0: torch.Tensor, rot: torch.Tensor | None = None) -> torch.Tensor:
+                        pos0: torch.Tensor, rot: torch.Tensor | None = None,
+                        query_t: torch.Tensor | None = None) -> torch.Tensor:
         """TAPIP3D's lookup (`knn_feature_4d_optimized.py`): at each level, the
         K cells nearest the current guess IN 3D, against the K cells nearest
         the query point in frame 0 plus the query's own feature, compared by
@@ -311,10 +321,14 @@ class FineFinder(nn.Module):
         # From frame 0's alone, which every clip sees; TAPIP3D uses the whole
         # window, which a forecast would leak through.
         xyz, xyz0, pos, pos0 = xyz.float(), xyz0.float(), pos.float(), pos0.float()
-        mean = xyz0.mean(dim=(2, 3))                                        # (b, 3)
-        std = (xyz0 - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
+        first = xyz0 if query_t is None else xyz0[:, 0]                     # the clip's frame 0
+        mean = first.mean(dim=(2, 3))                                       # (b, 3)
+        std = (first - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
         xyz = (xyz - mean[:, None, :, None, None]) / std[:, None, None, None, None]
-        xyz0 = (xyz0 - mean[:, :, None, None]) / std[:, None, None, None]
+        if query_t is None:
+            xyz0 = (xyz0 - mean[:, :, None, None]) / std[:, None, None, None]
+        else:
+            xyz0 = (xyz0 - mean[:, None, :, None, None]) / std[:, None, None, None, None]
         pos = (pos - mean[:, None, None]) / std[:, None, None, None]
         pos0 = (pos0 - mean[:, None]) / std[:, None, None]
         # The frame before each frame, the first standing in for its own.
@@ -323,30 +337,44 @@ class FineFinder(nn.Module):
         for lvl in range(self.levels):
             s = 2 ** lvl
             pool = lambda t: F.avg_pool2d(t, s, stride=s) if lvl else t
-            f, f0 = pool(fmap.flatten(0, 1)), pool(fmap0)
+            f = pool(fmap.flatten(0, 1))
             hl, wl = f.shape[-2:]
             # The cells' positions are picked, not averaged: an average of a
             # rim cell and the wall behind it is a point in mid-air.
             pick_xyz = lambda t: F.interpolate(t, size=(hl, wl), mode="nearest-exact")
-            x, x0 = pick_xyz(xyz.flatten(0, 1)), pick_xyz(xyz0)
+            x = pick_xyz(xyz.flatten(0, 1))
             f = f.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, C)      # (b, T, P, C)
             x = x_cells = x.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, 3)  # (b, T, P, 3)
-            f0_cells = f0.flatten(2).transpose(1, 2)                        # (b, P, C)
-            x0 = x0.flatten(2).transpose(1, 2)                              # (b, P, 3)
             k = min(self.neigh, hl * wl)
             with torch.no_grad():
                 near = torch.cdist(pos, x).topk(k, dim=-1, largest=False).indices      # (b, T, N, k)
-                near0 = torch.cdist(pos0, x0).topk(k, dim=-1, largest=False).indices
             pick = lambda t, i: t.gather(-2, i.flatten(-2)[..., None].expand(*i.shape[:-2], -1, t.shape[-1])
                                          ).unflatten(-2, i.shape[-2:])
             cur_f, cur_x = pick(f, near), pick(x, near)                     # (b, T, N, k, .)
-            sup_f, sup_x = pick(f0_cells, near0), pick(x0, near0)          # (b, N, k, .)
-            # The query's own feature, sampled where it is, leads the support.
             at = (q - (s - 1) / 2) / s
-            grid = 2 * at / at.new_tensor([wl - 1, hl - 1]) - 1
-            own = F.grid_sample(f0.float(),
-                                grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
-            sup_f = torch.cat([own[:, :, None].to(sup_f.dtype), sup_f], dim=2)
+            grid = 2 * at / at.new_tensor([wl - 1, hl - 1]) - 1             # (b, N, 2)
+
+            def support(f0, x0):
+                """The template in one map, (b, C, hl, wl) features and (b, P, 3)
+                positions: the K cells nearest each query point, led by the
+                query's own feature sampled where it is. (b, N, k + 1, C), (b, N, k, 3)."""
+                with torch.no_grad():
+                    near0 = torch.cdist(pos0, x0).topk(k, dim=-1, largest=False).indices
+                sf, sx = pick(f0.flatten(2).transpose(1, 2), near0), pick(x0, near0)
+                own = F.grid_sample(f0.float(), grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
+                return torch.cat([own[:, :, None].to(sf.dtype), sf], dim=2), sx
+
+            if query_t is None:
+                sup_f, sup_x = support(pool(fmap0), pick_xyz(xyz0).flatten(2).transpose(1, 2))
+            else:
+                # Each point's template from its own frame: the support built in
+                # every query frame there is, each point keeping its own.
+                sup_f = sup_x = None
+                for t in query_t.unique().tolist():
+                    sf, sx = support(pool(fmap0[:, t]), pick_xyz(xyz0[:, t]).flatten(2).transpose(1, 2))
+                    m = (query_t == t)[:, :, None, None]
+                    sup_f = sf if sup_f is None else torch.where(m, sf, sup_f)
+                    sup_x = sx if sup_x is None else torch.where(m, sx, sup_x)
             # Normalised after the sampling and the pooling, as TAPIP3D has it.
             sup_f, cur_f = self.in_norm(sup_f), self.in_norm(cur_f)
             sup_off = torch.cat([torch.zeros_like(sup_x[:, :, :1]), sup_x - pos0[:, :, None]], dim=2)
