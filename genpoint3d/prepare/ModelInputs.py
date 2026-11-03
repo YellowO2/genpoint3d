@@ -27,6 +27,7 @@ class ModelInputs:
     # --- query pointers (stage 3) ---
     query_uv: torch.Tensor    # (N, 2) pixel location in each point's query frame
     query_t: torch.Tensor     # (N,) int64 each point's query frame
+    up: torch.Tensor          # (3,) which way is up, in the frame-0 camera
 
     num_context_frames: int   # T_C -- frames with visual conditioning
     norm: NormStats

@@ -338,6 +338,9 @@ class Settings(argparse.Namespace):
                        help="regress in windows: the sweeps over the windows one round a "
                             "letter, f forward and b backward, e.g. fbfb (regress._schedule); "
                             "given, it replaces --refine-iters and --back-iters.")
+        p.add_argument("--level", type=int, default=0, choices=[0, 1],
+                       help="turn every clip so up is the same axis (-y), gravity one fixed "
+                            "direction (ClipDataset level); the cache needs each clip's up.")
         p.add_argument("--hidden-blank", type=int, default=0, choices=[0, 1],
                        help="regress, with --vis-loss: from the second refinement round on, "
                             "each point the visibility head calls hidden in a frame gets no "

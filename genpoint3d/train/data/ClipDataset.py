@@ -1,5 +1,6 @@
 """Turn one cached clip into a normalised, subsampled training sample."""
 
+import dataclasses
 import math
 from pathlib import Path
 
@@ -37,8 +38,15 @@ class ClipDataset(Dataset):
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
                  norm_mode: str = "median", target: str = "absolute",
                  fix_idcard: bool = True, frames: Path | None = None,
-                 features: bool = True, depth: bool = False, flow: Path | None = None):
+                 features: bool = True, depth: bool = False, flow: Path | None = None,
+                 level: bool = False):
         self.clips, self.num_points, self.resample = clips, num_points, resample
+        # Level the scene: turn the frame-0 camera frame about its origin so
+        # that up is -y in every clip (the camera's own up, once levelled),
+        # positions, patch positions and cameras together. Gravity is then one
+        # fixed direction, not one each clip tilts its own way. Needs the
+        # clip's `up`; distances, and so every score, are unchanged.
+        self.level = level
         # The RGB frames, for the relative finder: a directory from
         # `scripts/cache_frames.py` (checked by `frames_dir`) holding one uint8 array per clip, named
         # like the clip. Every frame is served, in order and untouched --
@@ -90,6 +98,8 @@ class ClipDataset(Dataset):
 
         # traj_scale=1.0 leaves both in scene-normalised units, so the offset
         # below is subtracted before the target is scaled, not after.
+        if self.level:
+            clip = _levelled(clip)
         n = clip.norm(self.norm_mode, traj_scale=1.0)
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
         # Patch positions share the ANCHOR's normalisation, not the target's:
@@ -223,3 +233,24 @@ class ClipDataset(Dataset):
                 raise SystemExit(f"depth in {d} is {got[0]}x{got[1]} cells, --fine-res {res}"
                                  f" needs {res // 4}x{res // 4}")
         return d
+
+
+def _levelled(clip: CachedClip) -> CachedClip:
+    """The clip turned about the frame-0 camera's centre, by the smallest
+    rotation that takes its `up` to -y: tilt and roll gone, heading kept."""
+    if clip.up is None:
+        raise ValueError(f"clip {clip.seq_id} has no up direction to level by: re-cache it, "
+                         "or add it with scripts/add_up.py")
+    u = clip.up.float() / clip.up.float().norm()
+    t = torch.tensor([0.0, -1.0, 0.0])
+    v, c = torch.linalg.cross(u, t), float(u @ t)
+    K = torch.tensor([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+    R = torch.eye(3) + K + K @ K / (1.0 + c)                        # takes u to t
+    turn = lambda p: None if p is None else p.float() @ R.T
+    E = None
+    if clip.extrinsics is not None:
+        Rh = torch.eye(4)
+        Rh[:3, :3] = R
+        E = clip.extrinsics.float() @ Rh.T                          # levelled -> cam_t
+    return dataclasses.replace(clip, traj=turn(clip.traj), anchor=turn(clip.anchor),
+                               patch_xyz=turn(clip.patch_xyz), extrinsics=E, up=t)

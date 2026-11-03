@@ -18,7 +18,8 @@ class Loaders:
         how_data = dict(norm_mode=settings.norm_mode, target=settings.target,
                         fix_idcard=bool(settings.fix_idcard), frames=clips.frames,
                         features=clips.has_feats, depth=bool(settings.fine_xyz or settings.depth_loss),
-                        flow=Path(settings.flow_cache) if settings.flow_patch else None)
+                        flow=Path(settings.flow_cache) if settings.flow_patch else None,
+                        level=bool(settings.level))
         self.train = DataLoader(
             ClipDataset(clips.train, settings.points, **how_data),
             batch_size=settings.batch, shuffle=True, num_workers=settings.workers,

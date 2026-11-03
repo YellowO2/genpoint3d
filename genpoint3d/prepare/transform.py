@@ -44,6 +44,12 @@ def _relative_extrinsics(extrinsics: torch.Tensor) -> torch.Tensor:
     return extrinsics @ torch.linalg.inv(extrinsics[0])[None]
 
 
+def up_in_frame0(extrinsics_world: torch.Tensor) -> torch.Tensor:
+    """(3,) Kubric's up, world +z, in the frame-0 camera frame: (T, 4, 4)
+    world->cam_t extrinsics, OpenCV axes."""
+    return extrinsics_world[0, :3, :3] @ torch.tensor([0.0, 0.0, 1.0])
+
+
 def _to_frame0(points_world: torch.Tensor, extrinsics: torch.Tensor) -> torch.Tensor:
     """(..., 3) world points -> (..., 3) in the frame-0 camera frame."""
     e0 = extrinsics[0]
@@ -147,6 +153,7 @@ def transform(
         visibility=visibility,
         query_uv=query_uv,
         query_t=query_t,
+        up=up_in_frame0(extrinsics_world),
         num_context_frames=num_context_frames,
         norm=norm,
     )
