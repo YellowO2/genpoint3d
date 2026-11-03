@@ -447,3 +447,20 @@ each: the drop test (re-rendered, the ball in view), the view-angle check on
 spin up 10, and the standard scoring (val, and forecast from frame 12).
 PointOdyssey's sample (3.3 GB) and val (20.4 GB) are downloaded to
 ~/scratch/pointodyssey, not yet unpacked.
+
+## Forecasting falls on held-out Kubric clips (`scripts/fall_test.pbs`)
+
+The 24 val clips of our Kubric set, frames 3-47 with no image: objects thrown
+at frame 0 fall, bounce and tumble in the forecast, under Kubric's physics.
+
+| | forecast, moving | forecast, all | seen moving (frames 0-2) |
+|---|---|---|---|
+| "stops where last seen" | 0.047 | | |
+| "keeps its last speed" | 0.057 | | |
+| fyP (best, old data) | 0.107 | 0.498 | 0.773 |
+| fzI (3 rounds, hidden blank, old data) | 0.106 | 0.469 | 0.763 |
+| fzJ (fzI trained on these clips' training split) | 0.106 | 0.499 | 0.770 |
+
+The models forecast real falls about twice as well as either guess, so
+something of falling is learned, but at a low level; 1,000 steps on 216 clips
+of physics did not move it at all.
