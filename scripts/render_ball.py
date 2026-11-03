@@ -1,6 +1,5 @@
 """A textured ball that spins, rolls or slides over a textured floor: a clean
-test of tracking points on a turning surface. And one that drops and bounces
-("drop"), a clean test of forecasting an impact whose shape is in plain view.
+test of tracking points on a turning surface.
 
 Ray-traced in plain PyTorch, so every pixel's surface point, and every tracked
 point's true position, comes from the motion itself: no physics engine, no
@@ -41,31 +40,7 @@ MOTIONS = {
     "spin_side_10": ((1, 0, 0), 10.0, (0.0, 0.0)),
     "spin_side_20": ((1, 0, 0), 20.0, (0.0, 0.0)),
     "roll": ((0, 0, 1), None, (0.06, 0.0)),     # turns as it travels: no slipping
-    "drop": ((0, 1, 0), 0.0, (0.03, 0.0)),      # falls from DROP_HEIGHT under real gravity and bounces
 }
-
-# The drop: from this height above resting on the floor, under real gravity
-# at the clips' 12 frames a second (metres, like the rest of the scene), each
-# bounce keeping BOUNCE of the speed. It lands within half a second, so a
-# forecast from frame 3 holds the fall and one from frame 12 the bounces.
-DROP_HEIGHT, GRAVITY, FPS, BOUNCE = 0.8, 9.81, 12, 0.6
-
-
-def drop_heights() -> list[float]:
-    """The ball's height above resting on the floor at each frame, in fine
-    steps between frames so the bounce lands where it should."""
-    sub = 100
-    dt = 1.0 / (FPS * sub)
-    h, v, out = DROP_HEIGHT, 0.0, []
-    for _ in range(T):
-        out.append(h)
-        for _ in range(sub):
-            v -= GRAVITY * dt
-            h += v * dt
-            if h < 0:
-                h, v = -h, -v * BOUNCE
-    return out
-
 
 def rotation(axis, angle):
     a = torch.tensor(axis, dtype=torch.float64)
@@ -100,10 +75,7 @@ def render(name, axis, deg, vel, seed, out):
     fwd = torch.linalg.cross(up, torch.tensor([1.0, 0, 0], dtype=torch.float64))        # along the floor, away
     floor_point = torch.tensor([0.0, 0, 3.6], dtype=torch.float64)
     floor_point = floor_point - (floor_point @ up) * up - 2.2 * up    # the floor 2.2 m below the camera
-    # A sliding or rolling ball starts left of centre; a dropped one less far,
-    # so all of it is in view from frame 0 while it is still high.
-    shift = 0.4 if name == "drop" else 1.2
-    start = floor_point + R_BALL * up - shift * torch.tensor([1.0, 0, 0], dtype=torch.float64) * (vel[0] > 0)
+    start = floor_point + R_BALL * up - 1.2 * torch.tensor([1.0, 0, 0], dtype=torch.float64) * (vel[0] > 0)
     # Waves of several sizes, down to a few centimetres, so a patch of the
     # ball has detail a matcher can lock onto, as Kubric's scanned textures do.
     scale = torch.tensor([3.0, 8.0, 20.0, 45.0], dtype=torch.float64)[None, :, None]
@@ -118,8 +90,6 @@ def render(name, axis, deg, vel, seed, out):
         spin_axis = torch.tensor(axis, dtype=torch.float64)
         step = math.radians(deg)
     centres = [start + v * t for t in range(T)]
-    if name == "drop":
-        centres = [c + h * up for c, h in zip(centres, drop_heights())]
     rots = [rotation(spin_axis.tolist(), step * t) for t in range(T)]
 
     ys, xs = torch.meshgrid(torch.arange(H, dtype=torch.float64) + 0.5, torch.arange(W, dtype=torch.float64) + 0.5, indexing="ij")

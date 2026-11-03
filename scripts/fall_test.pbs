@@ -1,0 +1,34 @@
+#!/bin/bash
+# Forecasting falls under Kubric's real physics: score checkpoints on the
+# held-out val clips of our Kubric set (scripts/kubric_movi.pbs, cut to 48
+# frames), frames 3 on with no image -- objects thrown at frame 0 fall, bounce
+# and tumble in the forecast. The val split is the one training holds out.
+#
+#   qsub -v CKPTS="outputs/fyP_prev_template/best.pt outputs/fzJ_physics_data/best.pt" scripts/fall_test.pbs
+#
+#PBS -N fall_test
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=01:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/fall_test.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+
+V=$ROOT/fall_test/val
+python scripts/split_dir.py --cache $ROOT/${CACHE:-cache/kubric_movi48q} --split val --n 1000 \
+  --val-frac 0.1 --seed 0 --out $V
+for CKPT in ${CKPTS:?}; do
+  echo "########## $CKPT"
+  python scripts/evaluate.py --ckpt "$CKPT" --cache $V --frames-cache $ROOT/cache/kubric_movi48_frames384 \
+    --points 500 --batch 1 --eval-cutoff ${CUTOFF:-3} 2>&1 \
+    | grep -E "apd_moving_obs |apd_moving_fut |apd_moving_stop_fut |apd_moving_cv_fut |apd_fut " || true
+done
+echo "=== FALL TEST DONE ==="
