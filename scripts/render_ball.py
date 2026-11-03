@@ -41,25 +41,29 @@ MOTIONS = {
     "spin_side_10": ((1, 0, 0), 10.0, (0.0, 0.0)),
     "spin_side_20": ((1, 0, 0), 20.0, (0.0, 0.0)),
     "roll": ((0, 0, 1), None, (0.06, 0.0)),     # turns as it travels: no slipping
-    "drop": ((0, 1, 0), 0.0, (0.03, 0.0)),      # falls from DROP_HEIGHT and bounces (`drop_heights`)
+    "drop": ((0, 1, 0), 0.0, (0.03, 0.0)),      # falls from DROP_HEIGHT under real gravity and bounces
 }
 
-# The drop: from this height above resting on the floor, under a gravity that
-# makes it land at frame LAND, so the bounce falls in a forecast's frames
-# 12-23; each bounce keeps BOUNCE of the speed.
-DROP_HEIGHT, LAND, BOUNCE = 0.6, 15, 0.6
+# The drop: from this height above resting on the floor, under real gravity
+# at the clips' 12 frames a second (metres, like the rest of the scene), each
+# bounce keeping BOUNCE of the speed. It lands within half a second, so a
+# forecast from frame 3 holds the fall and one from frame 12 the bounces.
+DROP_HEIGHT, GRAVITY, FPS, BOUNCE = 0.8, 9.81, 12, 0.6
 
 
 def drop_heights() -> list[float]:
-    """The ball's height above resting on the floor at each frame."""
-    a = 2 * DROP_HEIGHT / LAND ** 2
+    """The ball's height above resting on the floor at each frame, in fine
+    steps between frames so the bounce lands where it should."""
+    sub = 100
+    dt = 1.0 / (FPS * sub)
     h, v, out = DROP_HEIGHT, 0.0, []
     for _ in range(T):
         out.append(h)
-        v -= a
-        h += v
-        if h < 0:
-            h, v = -h * BOUNCE, -v * BOUNCE
+        for _ in range(sub):
+            v -= GRAVITY * dt
+            h += v * dt
+            if h < 0:
+                h, v = -h, -v * BOUNCE
     return out
 
 

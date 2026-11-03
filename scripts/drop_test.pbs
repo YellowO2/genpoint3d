@@ -1,7 +1,7 @@
 #!/bin/bash
-# Can a run forecast a ball's bounce? Render the dropping ball (render_ball.py
-# --only drop), cache it, and score with frames 12-23 blank: the bounce falls
-# at frame 15, inside the forecast.
+# Can a run forecast a ball's fall and bounce under real gravity? Render the
+# dropping ball (render_ball.py --only drop), cache it, and score the forecast
+# from frame 3 (the fall, then the bounces) and from frame 12 (the bounces).
 #
 #   qsub -v CKPT=outputs/fyP_prev_template/best.pt scripts/drop_test.pbs
 #
@@ -28,6 +28,9 @@ if [ ! -d $B/cache ]; then
     --depth-suffix .depth.npy
   mkdir -p $B/q0 && ln -sf $B/cache/*_q000_f.pt $B/q0/
 fi
-python scripts/evaluate.py --ckpt ${CKPT:?} --cache $B/q0 --frames-cache $B/frames --points 1000 \
-  --batch 1 --eval-cutoff 12 2>&1 | grep -E "apd_moving_obs|apd_moving_fut|apd_moving_stop_fut|apd_moving_cv_fut|apd_fut " || true
+for C in 3 12; do
+  echo "## forecast from frame $C"
+  python scripts/evaluate.py --ckpt ${CKPT:?} --cache $B/q0 --frames-cache $B/frames --points 1000 \
+    --batch 1 --eval-cutoff $C 2>&1 | grep -E "apd_moving_obs|apd_moving_fut|apd_moving_stop_fut|apd_moving_cv_fut|apd_fut " || true
+done
 echo "=== DROP TEST DONE ==="
