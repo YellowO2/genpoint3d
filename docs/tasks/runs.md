@@ -475,3 +475,26 @@ around it (`--rigid-fit`, `--fit-rounds`, `--rot-match`, `--fit-input`,
 (`--group-oracle`, `--group-vis-bias`), the window-start option (`--reach`),
 `--back-iters` (the schedule does it), and the step tracker. Checkpoints that
 used them no longer load.
+
+## Design audit, 4 Nov (an independent read of the code against the design)
+
+Bugs found and fixed (`ff7cc56`):
+
+- Every run with `--hidden-blank` (fzI, fzJ, fzL, fzM, fzN, fzO) blanked every
+  point in the new frames of each window after the first, on the first
+  forward sweep: the visibility store started at 0, read as "hidden". Those
+  runs tracked frames 16+ blind on their first pass at every step. Their
+  results, and the conclusions drawn from them (hidden blanking no gain, the
+  physics data no help, the design no better), are not valid tests.
+- Forecast scores from fzL on counted points first seen inside the forecast,
+  which sat at their true position there: inflated. Scoring now keeps only
+  points first seen before the cutoff.
+- The per-point loss weight used depth at frame 0, wrong (even negative) for
+  points first seen later; now the query frame's, held to at least 10 cm.
+- Frames before a point is first seen were matched against its template;
+  now always blanked.
+- The tracking loss was divided by the number of sweeps a second time.
+
+Open design question: a point first seen inside a window has steps that run
+from its query frame both ways, but the model is told one direction for the
+whole window.
