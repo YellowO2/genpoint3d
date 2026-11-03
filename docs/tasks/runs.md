@@ -429,15 +429,15 @@ same ball). With no image the model falls back on what it does for forecast
 frames, which carries the points worse. Hidden points and forecasting share
 one missing ability: moving a point from what the rest of its object does.
 
-## Forecasting a bounce in plain view (fyP, `scripts/drop_test.pbs`)
+## Forecasting a bounce in plain view (withdrawn)
 
-A ball dropped from 0.6 m drifting sideways, landing at frame 15 and bouncing
-back up (`render_ball.py --only drop`), frames 12-23 blank. (A first version
-started the ball mostly out of the frame, 27 points on a sliver; its numbers
-are dropped.) One clip, 206 ball points: moving points seen 0.967; forecast
-fyP 0.273, "stops where last seen" 0.048, "keeps its last speed" 0.291. The
-model forecasts a plain fall and bounce a little worse than carrying on at
-its last speed; no sign of having learned falling or the bounce.
+The hand-made drop (`render_ball.py --only drop`) fell under about 0.8 m/s^2,
+set by "lands at frame 15", not real gravity: a model that learned Kubric's
+gravity is wrong on it by construction. Its numbers (fyP 0.273 against
+"keeps its last speed" 0.291) are withdrawn and the test removed. In its
+place `scripts/fall_test.pbs`: forecasting from frame 3 on the held-out val
+clips of our Kubric set, where thrown objects fall, bounce and tumble under
+Kubric's own physics.
 
 ## Overnight, 3 Nov (queued on NSCC)
 
