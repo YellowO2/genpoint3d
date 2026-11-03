@@ -10,87 +10,29 @@ from torch.utils.data import Dataset
 
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import sample_at
-from genpoint3d.tools.traj_scale import TRAJ_SCALE, TRAJ_SCALE_DISP
+from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
-# The name each clip's depth has beside its frames: `<clip>.depth.npy`, as
-# `scripts/cache_frames.py` writes it.
+# Each clip's depth beside its frames, as `scripts/cache_frames.py` writes it.
 DEPTH = ".depth.npy"
-# And each clip's optical flow, from `scripts/cache_flow.py`: `<clip>.flow.npy`
-# in a directory of its own.
-FLOW = ".flow.npy"
 
 
 class ClipDataset(Dataset):
-    """Serves cached clips, subsampling `num_points` of them per draw.
+    """Serves cached clips, `num_points` of their points per draw (drawn
+    afresh each time with `resample`), loaded lazily so workers stay small.
 
-    Reads from `genpoint3d.prepare`'s output rather than decoding PNGs.
-    Resampling which points are used each epoch is free augmentation and makes
-    the model robust to the point count, which the paper does deliberately.
-
-    Clips are held as PATHS and loaded in `__getitem__`, not up front. At 7.3 MB
-    per cached clip an eager load is 25 GB for 3500 clips -- and every dataloader
-    worker gets its own copy, so it OOMs the moment `--workers` is non-zero.
-    Lazily, only the clips in flight are resident. This is what makes workers
-    affordable, which is what keeps the GPU fed.
+    The target is each point's displacement from its anchor, over
+    TRAJ_SCALE_DISP. `frames` is a directory from `scripts/cache_frames.py`
+    (RGB and depth per clip; None serves neither). `level` turns each clip so
+    up is -y (`_levelled`). `query_before` C keeps only points first seen
+    before frame C: a forecast from C is scored on points it was handed.
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
-                 norm_mode: str = "median", target: str = "absolute",
-                 fix_idcard: bool = True, frames: Path | None = None,
-                 features: bool = True, depth: bool = False, flow: Path | None = None,
-                 level: bool = False, query_before: int = 0):
+                 frames: Path | None = None, level: bool = False, query_before: int = 0):
         self.clips, self.num_points, self.resample = clips, num_points, resample
-        # Level the scene: turn the frame-0 camera frame about its origin so
-        # that up is -y in every clip (the camera's own up, once levelled),
-        # positions, patch positions and cameras together. Gravity is then one
-        # fixed direction, not one each clip tilts its own way. Needs the
-        # clip's `up`; distances, and so every score, are unchanged.
-        self.level = level
-        # Scoring a forecast from frame C: only points first seen before C, the
-        # ones the model can have been handed; one first seen in the forecast
-        # would sit at its true position there, scored as a perfect forecast.
-        # 0 keeps every point.
-        self.query_before = query_before
-        # The RGB frames, for the relative finder: a directory from
-        # `scripts/cache_frames.py` (checked by `frames_dir`) holding one uint8 array per clip, named
-        # like the clip. Every frame is served, in order and untouched --
-        # nothing here crops, flips or drops frames, and which POINTS are
-        # drawn does not concern an image.
-        self.frames = frames
-        # And beside each clip's frames its depth at every CNN cell, for a
-        # finder that reads where each cell is in 3D (`--fine-xyz`).
-        self.depth = depth
-        # And a directory of each clip's optical flow between neighbouring
-        # frames, for `--flow-patch`.
-        self.flow = flow
-        # Off serves no DINOv3 feature, ID card or patch position at all, for
-        # a model that is to track from the CNN alone.
-        self.features = features
-        # The cached ID card was read with a lookup that was up to half a patch
-        # off (see `tools/feature_lookup.py`). The cache also holds frame 0's
-        # whole feature grid and the query pixels, so it is read again here
-        # rather than re-encoding 3500 clips. Off serves the cached one, only so
-        # checkpoints trained on it still evaluate as they were trained.
-        self.fix_idcard = fix_idcard
-        # The cache holds metres; normalisation happens here, so switching
-        # scheme is a flag rather than hours of reprocessing.
-        self.norm_mode = norm_mode
-        # "absolute" denoises where each point IS. "displacement" denoises how
-        # far each point has moved from ITS OWN frame-0 position.
-        #
-        # Measured per clip: absolute std 0.59, one-shared-anchor 0.49,
-        # per-point 0.08. Only per-point removes the static layout, which is
-        # 86% of an absolute target's magnitude and which the model was already
-        # told via `anchor`. MolmoMotion subtracts one shared anchor instead,
-        # but it emits coordinates as text in a single frame and needs them
-        # mutually comparable; we do not. TAPIP3D and Tesfaldet's model both
-        # use per-point displacement from the query.
-        #
-        # The layout is not lost: `anchor` stays absolute and is what spatial
-        # RoPE reads, so where points sit relative to each other is unaffected.
-        self.target = target
-        self.traj_scale = TRAJ_SCALE_DISP if target == "displacement" else TRAJ_SCALE
+        self.frames, self.level, self.query_before = frames, level, query_before
+        self.traj_scale = TRAJ_SCALE_DISP
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -105,7 +47,7 @@ class ClipDataset(Dataset):
         # below is subtracted before the target is scaled, not after.
         if self.level:
             clip = _levelled(clip)
-        n = clip.norm(self.norm_mode, traj_scale=1.0)
+        n = clip.norm(traj_scale=1.0)
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
         # Patch positions share the ANCHOR's normalisation, not the target's:
         # `traj_scale` divides only what gets denoised. A patch position has to be
@@ -113,25 +55,18 @@ class ClipDataset(Dataset):
         # so it goes through the same `n.apply`. Done here, not further down,
         # because `n` is rebound below.
         pxyz = None if clip.patch_xyz is None else n.apply(clip.patch_xyz)
-        if self.target == "displacement":
-            # Each point's own start, as the model is given it: the anchor.
-            # On Kubric that is frame 0 of the track exactly; on real video
-            # (TAPVid-3D) it is the query pixel at the estimated depth, and the
-            # true start must not reach the prediction through this offset.
-            offset = anchor[None].clone()      # (1, N, 3)
-            traj = traj - offset
-        else:
-            offset = torch.zeros_like(traj[:1])
+        # Each point's own start, as the model is given it.
+        offset = anchor[None].clone()      # (1, N, 3)
+        traj = traj - offset
         traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
         # Each point's query frame; a cache from before it had them all at 0.
         query_t = (torch.zeros(traj.shape[1], dtype=torch.long) if clip.query_t is None
                    else clip.query_t.long())
-        if self.fix_idcard and id_card is not None:
-            # Before the subsampling below, so it stays aligned with traj.
-            # `context` is (T, P, F) with P row-major, which is what `tokens()`
-            # flattens a (F, g, g) grid into. Read in each point's query frame.
+        if id_card is not None and clip.context is not None:
+            # Read again in each point's query frame with the exact lookup
+            # (`tools/feature_lookup.py`), before the subsampling.
             fixed = id_card.clone()
             for t in query_t.unique().tolist():
                 m = query_t == t
@@ -163,24 +98,14 @@ class ClipDataset(Dataset):
         # only for autocast to cast it straight back down. `to_device` restores
         # fp32 when autocast is off.
         ctx = clip.context
-        if not self.features:
-            ctx = id_card = pxyz = None
-        frames = torch.zeros(0)
+        frames = depth = torch.zeros(0)
         if self.frames is not None:
             frames = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}.npy"))
             if frames.shape[0] != traj.shape[0]:
                 raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
                                  f"for a {traj.shape[0]}-frame track")
-        depth = torch.zeros(0)
-        if self.depth:
             depth = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}{DEPTH}"))
-        flow = torch.zeros(0)
-        if self.flow is not None:
-            # The backward flow, frame t -> t-1, served at frame t: where
-            # what is at each cell now came from. Frame 0 has none: zeros.
-            back = torch.from_numpy(np.load(self.flow / f"{clip.seq_id}{FLOW}")[1])
-            flow = torch.cat([torch.zeros_like(back[:1]), back])
-        norm = clip.norm(self.norm_mode, traj_scale=self.traj_scale)
+        norm = clip.norm(traj_scale=self.traj_scale)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t,
             "context": ctx if ctx is not None else torch.zeros(0),
@@ -191,9 +116,6 @@ class ClipDataset(Dataset):
             "frames": frames,
             # (T, R / 4, R / 4) float32 z-depth in metres at each CNN cell.
             "depth": depth,
-            # (T, 2, R / 4, R / 4) float16: at frame t, how each CNN cell moved
-            # since frame t-1, as a fraction of the frame (0 at frame 0).
-            "flow": flow,
             # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
             # The benchmark's pixel thresholds are defined on a frame whose
@@ -201,47 +123,31 @@ class ClipDataset(Dataset):
             # the native intrinsics makes every threshold too tight.
             "intrinsics_256": resize_intrinsics(clip.intrinsics, clip.hw),
             "extrinsics": clip.extrinsics,
-            # (H, W) of the native frame: with the intrinsics, what says which
-            # patch a point is drawn in (`tools/batch.py`'s `match_targets`).
+            # (H, W) of the native frame.
             "hw": torch.tensor(clip.hw),
             "norm_mean": norm.mean,
             "norm_scale": norm.scale,
             "norm_traj_scale": norm.traj_scale,
-            # (1, N, 3) scene-normalised per-point origin; zeros when the
-            # target is absolute, so `to_metres` inverts both with one
-            # expression.
+            # (1, N, 3) scene-normalised per-point origin, for `to_metres`.
             "norm_offset": offset,
         }
 
     @staticmethod
-    def frames_dir(path: str | None, clips: list, res: int, depth: bool = False) -> Path:
-        """The frames cache for `clips`, checked before anything is trained on it:
-        a clip with no frames (or no depth, with `depth`), or frames at another
-        size than the model was told, should stop the run now and not at the
-        step that first draws it."""
+    def frames_dir(path: str | None, clips: list, res: int) -> Path:
+        """The frames cache for `clips`, checked before training: every clip
+        has its frames at `res` and its depth at one cell per 4 px."""
         if not path:
-            raise SystemExit("the relative finder reads RGB frames: pass --frames-cache, "
-                             "a directory from scripts/cache_frames.py")
+            raise SystemExit("pass --frames-cache, a directory from scripts/cache_frames.py")
         d = Path(path)
-        missing = [c.stem for c in clips if not (d / f"{c.stem}.npy").exists()]
-        if missing:
-            raise SystemExit(f"{len(missing)} of {len(clips)} clips have no frames in {d} "
-                             f"({' '.join(missing[:5])}{' ...' if len(missing) > 5 else ''})"
-                             " -- run scripts/cache_frames.py")
-        got = np.load(d / f"{clips[0].stem}.npy", mmap_mode="r").shape[1:3]
-        if got != (res, res):
-            raise SystemExit(f"frames in {d} are {got[0]}x{got[1]}, --fine-res is {res}")
-        if depth:
-            missing = [c.stem for c in clips if not (d / f"{c.stem}{DEPTH}").exists()]
+        for kind, suffix, size in (("frames", ".npy", res), ("depth", DEPTH, res // 4)):
+            missing = [c.stem for c in clips if not (d / f"{c.stem}{suffix}").exists()]
             if missing:
-                raise SystemExit(f"{len(missing)} of {len(clips)} clips have no depth in {d}"
-                                 f" ({' '.join(missing[:5])}{' ...' if len(missing) > 5 else ''})"
-                                 " -- run scripts/cache_frames.py again, it adds it")
-            # One depth per cell of the CNN's map, which is 4 px of the frame.
-            got = np.load(d / f"{clips[0].stem}{DEPTH}", mmap_mode="r").shape[1:3]
-            if got != (res // 4, res // 4):
-                raise SystemExit(f"depth in {d} is {got[0]}x{got[1]} cells, --fine-res {res}"
-                                 f" needs {res // 4}x{res // 4}")
+                raise SystemExit(f"{len(missing)} of {len(clips)} clips have no {kind} in {d} "
+                                 f"({' '.join(missing[:5])}{' ...' if len(missing) > 5 else ''})"
+                                 " -- run scripts/cache_frames.py")
+            got = np.load(d / f"{clips[0].stem}{suffix}", mmap_mode="r").shape[1:3]
+            if got != (size, size):
+                raise SystemExit(f"{kind} in {d} are {got[0]}x{got[1]}, --fine-res {res} needs {size}x{size}")
         return d
 
 

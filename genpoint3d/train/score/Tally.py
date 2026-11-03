@@ -7,7 +7,6 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.tools.matching import MATCH_KEYS
 from genpoint3d.train.tools.metrics import clip_mean
 
 log = logging.getLogger(__name__)
@@ -60,7 +59,7 @@ def _line(m: dict) -> str:
         line += f"  2D {m['apd_2d']:.3f} (static {m['apd_2d_static']:.3f})"
     if "apd_moving" in m:
         line += f"  MOVING {m['apd_moving']:.3f} (static {m['apd_moving_static']:.3f})"
-    return line + _hidden(m) + _forecast(m) + _match(m) + _visible(m)
+    return line + _hidden(m) + _forecast(m) + _visible(m)
 
 
 def _hidden(m: dict) -> str:
@@ -89,17 +88,6 @@ def _forecast(m: dict) -> str:
             f" cv {m['apd_cv_fut']:.3f} own {m['apd_ownstop_fut']:.3f})"
             f" mv {m['apd_moving_fut']:.3f} (stop {m['apd_moving_stop_fut']:.3f}"
             f" cv {m['apd_moving_cv_fut']:.3f} own {m['apd_moving_ownstop_fut']:.3f})")
-
-
-def _match(m: dict) -> str:
-    """The match accuracies: exact/within-one-patch over all visible points,
-    then over the moving ones; then how often the truth is within one patch
-    of any of the 5 best distinct peaks, all/moving."""
-    if "match_acc" not in m:
-        return ""
-    v = [m[k] for k in MATCH_KEYS[:4]]
-    return (f"  match {v[0]:.2f}/{v[1]:.2f} mv {v[2]:.2f}/{v[3]:.2f}"
-            f" top5 {m['match_acc_top5_near']:.2f}/{m['match_acc_top5_near_moving']:.2f}")
 
 
 def _visible(m: dict) -> str:

@@ -1,30 +1,18 @@
 """What every step does to a batch: move it, unscale it, weigh it, read it."""
 
-import math
-
 import torch
 
 from genpoint3d.train.tools.camera import image_projection, unproject
-from genpoint3d.train.tools.matching import true_patch
 from genpoint3d.train.tools.metrics import _to_camera_t
 
 
 
-def to_device(batch: dict, device, amp: bool = False) -> dict:
-    """Move a batch, and turn the empty placeholder tensors back into None.
-
-    Cached features are fp16 and are widened here. Leaving them narrow looks
-    like free memory under autocast, but autocast does not reach every module:
-    AdaRMSNorm returns `.to(x.dtype)`, so a half tensor survives into a Linear
-    holding fp32 weights and raises "mat1 and mat2 have different dtype".
-    Revisit only with a measurement, not by reasoning about autocast.
-    """
+def to_device(batch: dict, device) -> dict:
+    """Move a batch, the fp16-cached features widened to fp32: autocast does
+    not reach every module, and a half tensor meeting fp32 weights raises."""
     b = {k: v.to(device) for k, v in batch.items()}
     for k in ("context", "id_card", "patch_xyz"):
-        b[k] = None if b[k].numel() == 0 else b[k].float()
-    for k in ("frames", "depth", "flow"):
-        if k in b and b[k].numel() == 0:
-            b[k] = None
+        b[k] = b[k].float()
     return b
 
 
@@ -41,18 +29,9 @@ def random_cutoff(b: dict, min_context: int) -> torch.Tensor:
     return torch.randint(min_context, T + 1, (B,)).to(b["traj"].device)
 
 
-def visual_mask(b: dict, cutoff: torch.Tensor | None) -> torch.Tensor | None:
+def visual_mask(b: dict, cutoff: torch.Tensor | None) -> torch.Tensor:
     """(B, T) True where a frame keeps its image: the frames before each
-    clip's cutoff, every frame without one. None for a batch with nothing
-    visual in it.
-
-    Everything the model reads from a frame -- the DINOv3 features, the patch
-    positions, the match, the cost volume, the CNN's window -- is blanked
-    where this is False (`PointDiT.forward`; `scripts/check_forecast.py`
-    checks that nothing gets through).
-    """
-    if b["context"] is None and b["frames"] is None:
-        return None
+    clip's cutoff, every frame without one."""
     B, T = b["traj"].shape[:2]
     device = b["traj"].device
     if cutoff is None:
@@ -174,36 +153,15 @@ def rigid_buddies(p: torch.Tensor, tol: float = 0.02, moved: float = 0.05) -> to
 
 
 def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
-    """What the relative finder adds to a forward pass: the CNN's feature map
-    for the batch's frames, each frame's camera and, for a finder that reads
-    depth, each cell's 3D position. Empty for a model without one, or a batch
-    without frames.
-
-    The map is computed once and shared by every forward pass of the step. It
-    comes back with no graph; with `grad` it is a leaf that collects the
-    gradient of each backward pass, for `FineFinder.replay` to carry into the
-    CNN once they are all done.
-    """
-    if model.fine is None or b["frames"] is None:
-        return {} if b.get("query_t") is None else {"query_t": b["query_t"]}
+    """The matcher's inputs: the CNN's map of the batch's frames, each frame's
+    camera, each cell's 3D position and the query frames. The map has no
+    graph; with `grad` it is a leaf that gathers every backward pass's
+    gradient for `FineFinder.replay`."""
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         fmap = model.fine.encode(b["frames"])
-    proj = image_projection(b["intrinsics"], b["extrinsics"], b["hw"],
-                            b["norm_scale"], b["norm_mean"])
-    out = {"fine_map": fmap.requires_grad_(grad), "fine_proj": proj}
-    if model.fine.xyz:
-        if b["depth"] is None:
-            raise ValueError("this finder reads each cell's depth, and the batch has "
-                             "none: load the clips with depth (--fine-xyz 1)")
-        out["fine_xyz"] = _cell_xyz(b["depth"].float(), proj)
-    if model.flow_patch:
-        if b.get("flow") is None:
-            raise ValueError("this model reads the optical flow around each guess, and the "
-                             "batch has none: load the clips with --flow-cache")
-        out["fine_flow"] = b["flow"].float()
-    if b.get("query_t") is not None:
-        out["query_t"] = b["query_t"]
-    return out
+    proj = image_projection(b["intrinsics"], b["extrinsics"], b["hw"], b["norm_scale"], b["norm_mean"])
+    return {"fine_map": fmap.requires_grad_(grad), "fine_proj": proj,
+            "fine_xyz": _cell_xyz(b["depth"].float(), proj), "query_t": b["query_t"]}
 
 
 def _cell_xyz(depth: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:
@@ -220,33 +178,3 @@ def _cell_xyz(depth: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:
     uv = torch.stack(torch.meshgrid(u, v, indexing="xy"), dim=-1).reshape(1, 1, -1, 2)
     xyz = unproject(uv.expand(B, T, -1, -1), depth.flatten(2), proj.float())
     return xyz.transpose(2, 3).reshape(B, T, 3, h, w)
-
-
-def match_targets(model, b: dict, visual_mask: torch.Tensor):
-    """The match as a classification: scores, the right answer, and where
-    there is one. None for a model or a batch with no match to score.
-
-    scores  (B, T, N, P) from `PointDiT.match_scores`, with their graph
-    target  (B, T, N)    the patch the ground truth is drawn in
-    valid   (B, T, N)    the point is visible and inside the frame, the frame
-                         has its image (is before the cutoff), and it is not
-                         frame 0
-
-    Frame 0 is left out. The template is read from frame 0 at the point's own
-    pixel, so the match there is right by construction: it would add nothing to
-    the loss and would lift the accuracy by a share that says nothing about
-    finding the point again.
-
-    The target comes from the batch's metres and cameras, so it does not
-    depend on `--target` or the normalisation.
-    """
-    if b["context"] is None or b["id_card"] is None or b["patch_xyz"] is None:
-        return None
-    scores = model.match_scores(b["context"], b["id_card"], b["patch_xyz"])
-    if scores is None:
-        return None
-    target, inside = true_patch(to_metres(b["traj"], b), b["intrinsics"], b["extrinsics"],
-                                b["hw"], math.isqrt(scores.shape[-1]))
-    valid = b["visibility"] & inside & visual_mask[..., None]
-    valid[:, 0] = False
-    return scores, target, valid

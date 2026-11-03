@@ -1,51 +1,30 @@
-"""Predict how each point moves, from its current path and the video.
+"""Predict how each point moves, from its current guess and the video.
 
-THE ARCHITECTURE. Open this file to see the design.
-
-This is stages 2-5 of `docs/map.html`, in order. The transformer machinery it
-uses (RMSNorm, RoPE, Attention, ...) lives in `tools/layers.py`.
-
-    [2] tokenise     3D positions          -> tokens
-    [3] conditioning anchor + noise level  -> one vector c per (frame, point)
-    [4] blocks       temporal + spatial attention, x depth, modulated by c
-    [5] head         tokens                -> predicted velocity
-
-Stage 1 (the DINOv3 encoder) and the point-image cross-attention inside
-stage 4 arrive in step 3 of the build order. Until then the model sees no
-images at all.
+    tokens        each point's guess per frame, how it moves, and the CNN
+                  matcher's comparison of its surroundings with its template
+    conditioning  where the point started, the round, its DINOv3 id card and
+                  the matcher, one vector per (frame, point)
+    blocks        attention along each point's frames, between the points of a
+                  frame, and to the DINOv3 patches nearest its guess, x depth
+    heads         a velocity per frame, and optionally visibility and a group
+                  vector per point
 """
-
-import math
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from genpoint3d.train.model.Buddies import Buddies
-from genpoint3d.train.model.FineFinder import FineFinder, _CrossAttnBlock, _posenc
-from genpoint3d.train.model.TapUpdater import TapUpdater
-from genpoint3d.train.model.MatchHead import MatchHead
-from genpoint3d.train.tools.camera import project
+from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
+from genpoint3d.train.model.FineFinder import FineFinder, _posenc
 from genpoint3d.train.model.tools.layers import (
-    Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, bounded_exp, log_param,
-    zero_init,
+    Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
 )
-from genpoint3d.train.tools.matching import nms_peaks, nms_pool, raw_cosine
+from genpoint3d.train.tools.camera import project
 
 
 class PointDiT(nn.Module):
-    """Predicts a flow-matching velocity for `(T, N)` 3D point tokens.
-
-    Tokens live on a `(T frames) x (N points)` grid, so attention is factorised
-    into two cheap slices instead of one `T*N` blob:
-
-        temporal   (B*N, T, D)   one point across time, causally masked
-        spatial    (B*T, N, D)   all points within one frame
-
-    Without images, the conditioning is stage 3 minus its DINOv3 term: the
-    model still knows *which* point each token is (from its frame-0 position)
-    and how noisy the input is, but nothing about what the scene looks like.
-    """
+    """Tokens on a (T frames) x (N points) grid, attention factorised into
+    one point across time and all points within one frame."""
 
     def __init__(
         self,
@@ -53,416 +32,73 @@ class PointDiT(nn.Module):
         depth: int = 6,
         num_heads: int = 4,
         mlp_mult: int = 3,
-        cond_dim: int | None = None,
-        cross_attn: bool = False,
-        feat_dim: int | None = None,
-        adapter_depth: int = 1,
-        upsample: int = 1,
-        traj_scale: float = 1.0,
-        displacement: bool = False,
-        legacy_lookup: bool = False,
-        time_norm: bool = True,
-        locality: bool = True,
-        correlate: bool = True,
-        locality_mode: str = "sched",
-        locality_wide: float = 8.0,
-        cross_window: int = 0,
-        corr_mode: str = "cosine",
-        causal: bool = True,
-        costvol: bool = True,
-        cv_k: int = 16,
-        cv_support: int = 8,
-        cv_dim: int = 32,
-        match_learn: bool = False,
-        match_dim: int = 64,
-        match_topk: int = 1,
-        fine: bool = False,
-        fine_levels: int = 4,
-        fine_radius: int = 3,
-        fine_waves: int = 0,
-        fine_width: int = 64,
-        fine_neigh: int = 0,
-        fine_prev: bool = False,
-        flow_patch: int = 0,
-        depth_head: bool = False,
-        fine_xyz: bool = False,
+        feat_dim: int = 384,
+        traj_scale: float = TRAJ_SCALE_DISP,
+        cross_window: int = 49,
+        fine_neigh: int = 32,
         visibility: bool = False,
-        vis_feedback: bool = False,
+        hidden_blank: bool = False,
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
-        hidden_blank: bool = False,
         bidirectional: bool = False,
         rope_current: bool = False,
-        motion_waves: bool = False,
-        buddies: bool = False,
-        buddy_bias: bool = False,
-        virtual: int = 0,
-        updater: str = "pointdit",
     ) -> None:
         super().__init__()
-        # The conditioning width has no reason to differ from the model width,
-        # and silently defaulting it to a constant made a size-64 model try to
-        # add a 256-wide vector. Follow `dim` unless told otherwise.
-        cond_dim = cond_dim or dim
-        feat_dim = feat_dim or dim
-        self.dim, self.depth, self.num_heads = dim, depth, num_heads
-        self.cross_attn = cross_attn
-        # Off reproduces the model that scored the static baseline while ignoring
-        # which video it was given, which is the comparison this exists against.
-        # What turns the sample `x` back into a position in `patch_xyz`'s space;
-        # see `_lookup_pos`.
-        self.traj_scale, self.displacement = traj_scale, displacement
-        self.legacy_lookup = legacy_lookup
-        # Frame times in [-1, 1] for temporal RoPE; see `forward`. Off feeds the
-        # raw frame index, only so checkpoints trained that way still evaluate
-        # as they were trained.
-        self.time_norm = time_norm
-        self.locality = locality and cross_attn
-        # [window] each point's cross-attention reads only the `cross_window`
-        # patches nearest its current guess, in 3D: the CNN's window, for
-        # DINOv3. 0 reads the whole frame.
-        if cross_window and not cross_attn:
-            raise ValueError("cross_window narrows the cross-attention, which needs cross_attn")
+        self.dim, self.depth = dim, depth
+        self.traj_scale = traj_scale
         self.cross_window = cross_window
-        self.correlate = correlate and cross_attn
-        # "legacy" on either is the prior / the matching as every run up to
-        # run14 had them (docs/issues.md B1, B2), only so those checkpoints
-        # still evaluate as they were trained.
-        if (locality_mode not in ("legacy", "patch", "sched")
-                or corr_mode not in ("legacy", "cosine")):
-            raise ValueError(f"unknown mode: locality {locality_mode!r}, corr {corr_mode!r}")
-        self.patch_locality = self.locality and locality_mode in ("patch", "sched")
-        # "sched" is the patch prior with a width that follows the noise level:
-        # the lookup position is the noisy sample, 2-3 patch spacings off at
-        # k = 0 and nearly exact at k = 1, and one fixed width cannot suit both.
-        self.sched_locality = self.locality and locality_mode == "sched"
-        self.cosine = self.correlate and corr_mode == "cosine"
-        # Off lets a frame attend to later frames. Tracking has every image in
-        # hand, so bidirectional context is legitimate and is what every tracker
-        # in the benchmark table uses. The mask is NOT what keeps forecasting
-        # honest -- a masked frame already gets `null_ctx`, so it holds nothing
-        # to leak (docs/references.md:19). It exists for autoregressive rollout
-        # and diffusion forcing, neither of which is built yet.
-        self.causal = causal
-        self.costvol = costvol and cross_attn
-        self.cv_k, self.cv_support, self.cv_dim = cv_k, cv_support, cv_dim
         head_dim = dim // num_heads
 
-        # [path encoder] representing the current diffused path for the video
         self.token_proj = nn.Linear(3, dim, bias=False)
-        # [motion in] with `motion_waves` each token is also given, Fourier-
-        # encoded, how its guess moved from the frame before and to the frame
-        # after, and where the guess is in the image: TAPIP3D's updater input
-        # (`point_tracker_3d.py`, posenc 2^-2 .. 2^13), the motion a tracker
-        # reads to keep a point moving the way it moves. Positions are scene-
-        # normalised, about unit spread, the scale that encoding is built for.
-        # Zeros, so the model starts as it is without.
-        self.motion_waves = motion_waves
-        if motion_waves:
-            self.motion_proj = zero_init(nn.Linear(6 * 33 + 2 * 33, dim, bias=False), almost=False)
-        
-        # [feature adapter] trainable, unlike VisualEncoder.py which is cached frozen.
-        # Always on when there are features: the patch position is added to
-        # frame_proj's output, and W(f + p) = Wf + Wp, so the what/where balance
-        # is only learnable if a layer sits before the sum.
-        # adapter_depth > 1 puts a non-linearity between the frozen backbone and
-        # the model. The encoder is cached frozen, so a single linear map is the
-        # only thing that ever adapts DINOv3's features to tracking -- and a
-        # linear map cannot do much. Depth 1 stays a bare Linear so the
-        # parameter keeps its name and old checkpoints still load.
-        if not cross_attn:
-            self.frame_proj = None
-        elif adapter_depth <= 1:
-            self.frame_proj = nn.Linear(feat_dim, dim, bias=False)
-        else:
-            layers = [nn.Linear(feat_dim, dim, bias=False)]
-            for _ in range(adapter_depth - 1):
-                layers += [nn.GELU(), nn.Linear(dim, dim, bias=False)]
-            self.frame_proj = nn.Sequential(*layers)
-        self.patch_pos = FourierEmbedding(3, dim) if cross_attn else None
+        # How the guess moves to the frames either side, and where it is in
+        # the image, Fourier-encoded as TAPIP3D's updater reads them.
+        self.motion_proj = zero_init(nn.Linear(6 * 33 + 2 * 33, dim, bias=False), almost=False)
+        self.frame_proj = nn.Linear(feat_dim, dim, bias=False)
+        self.patch_pos = FourierEmbedding(3, dim)
+        self.id_feature_proj = nn.Linear(feat_dim, dim, bias=False)
 
-        # [feature upsampler] the paper's recipe for a finer grid: nearest
-        # interpolation, then a convolution (Gen-points sec. 3, "Visual
-        # Conditioning"). Nearest alone only repeats each patch into a block of
-        # identical cells; the conv is what lets neighbouring cells differ.
-        # Applied to the RAW features, ahead of everything, so the correlation
-        # and the locality bias see the fine grid too and not only the
-        # cross-attention. Residual and zero-initialised: at step 0 the model
-        # is exactly the un-upsampled one looking at repeated patches.
-        self.upsample = upsample if cross_attn else 1
-        if self.upsample > 1:
-            self.up_conv = nn.Conv2d(feat_dim, feat_dim, 3, padding=1)
-            nn.init.zeros_(self.up_conv.weight)
-            nn.init.zeros_(self.up_conv.bias)
-        self.id_feature_proj = nn.Linear(feat_dim, cond_dim, bias=False) if cross_attn else None
+        self.anchor_emb = FourierEmbedding(3, dim)
+        self.time_emb = FourierEmbedding(1, dim)
+        self.cond_mlp = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
 
-        # [correlation] "does this patch look like me?", computed instead of
-        # discovered. Both sides read the RAW backbone features, not the adapter's
-        # output, so matching is not entangled with the patch position that the
-        # adapter adds in.
-        if self.cosine:
-            # The score is the cosine between the two raw features, so a patch
-            # identical to the template wins before any training. What the
-            # model gets from it is the best match's OFFSET from the point's
-            # start, in the units of its own target, added to the token -- so
-            # copying it to the output is something a linear layer can do.
-            # Softmax temperature of the match's sub-patch refinement. The
-            # model is handed the offset and two confidences.
-            self.match_log_tau = log_param(0.03)
-            self.match_proj = nn.Linear(5, dim, bias=False)
-        elif self.correlate:
-            # LEGACY. Two independent random projections, so a patch identical
-            # to the template was not preferred; and both readers of the score
-            # were gated at zero, so the projections got no gradient at all.
-            self.corr_q = nn.Linear(feat_dim, dim, bias=False)
-            self.corr_k = nn.Linear(feat_dim, dim, bias=False)
-            # Where in this frame the template matches best, as a 3D position.
-            # Gated to zero at init so the model starts as the run5 model.
-            self.match_emb = FourierEmbedding(3, cond_dim)
-            self.match_gate = nn.Parameter(torch.zeros(1))
-
-        # [cost volume] CoTracker3 and genpt compare a 7x7 support WINDOW around
-        # the query against a 7x7 crop at the current estimate, then MLP the
-        # resulting 49x49 table. One similarity score per patch throws away where
-        # inside the window the match peaks and how sharply; the table keeps it.
-        # We take k nearest patches in 3D rather than a square image crop,
-        # because our estimate lives in 3D and we never project -- the same
-        # substitution TAPIP3D makes in knn_feature_4d.
-        if self.costvol:
-            # Matching happens in a narrow learned space: gathering feat_dim-wide
-            # features per (frame, point, neighbour) is 600 MB at batch 16.
-            self.cv_proj = nn.Linear(feat_dim, cv_dim, bias=False)
-            self.cv_mlp = nn.Sequential(
-                nn.Linear(cv_support * cv_k + cv_k * 3, cond_dim), nn.GELU(),
-                nn.Linear(cond_dim, cond_dim),
-            )
-            self.cv_gate = nn.Parameter(torch.zeros(1))
-
-        # [condition encoder] conditioning vector c
-        self.anchor_emb = FourierEmbedding(3, cond_dim)
-        self.time_emb = FourierEmbedding(1, cond_dim)
-        self.cond_mlp = nn.Sequential(
-            nn.Linear(cond_dim, cond_dim), nn.GELU(), nn.Linear(cond_dim, cond_dim)
-        )
-
-        # [4] DiT blocks -- temporal and spatial interleaved, `depth` times
-        self.temporal_blocks = nn.ModuleList(
-            Block(dim, num_heads, mlp_mult, cond_dim) for _ in range(depth)
-        )
-        self.spatial_blocks = nn.ModuleList(
-            Block(dim, num_heads, mlp_mult, cond_dim) for _ in range(depth)
-        )
-        self.time_rope = RoPE(head_dim, num_heads, n_axes=1)   # position = frame time
-        self.space_rope = RoPE(head_dim, num_heads, n_axes=3)  # position = query xyz
-        # `rope_current`: the attention between points encodes where each point
-        # is now -- its current guess, in this frame -- not where it was
-        # first seen, so "how near is that point" means near now: a falling
-        # point sees the floor come closer, a turning shape's points their
-        # positions as they turn. Off: the anchor, as every run before it.
+        self.temporal_blocks = nn.ModuleList(Block(dim, num_heads, mlp_mult, dim) for _ in range(depth))
+        self.spatial_blocks = nn.ModuleList(Block(dim, num_heads, mlp_mult, dim) for _ in range(depth))
+        self.time_rope = RoPE(head_dim, num_heads, n_axes=1)
+        self.space_rope = RoPE(head_dim, num_heads, n_axes=3)
+        # The attention between points encodes each point's current guess
+        # rather than where it started.
         self.rope_current = rope_current
+        self.cross_blocks = nn.ModuleList(CrossBlock(dim, num_heads, mlp_mult, dim) for _ in range(depth))
+        # What a frame with no image shows: "nothing here".
+        self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
 
-        # [4c] point-image cross-attention (a soft pick of the patches that look
-        # like the point), and the tracking/forecasting switch.
-        # A masked frame's features are replaced wholesale by `null_ctx`, which
-        # means "nothing here". One shared vector suffices because RoPE already
-        # tells the model which frame it is looking at.
-        if cross_attn:
-            self.cross_blocks = nn.ModuleList(
-                CrossBlock(dim, num_heads, mlp_mult, cond_dim,
-                           locality=self.locality, correlate=self.correlate,
-                           locality_mode=locality_mode, corr_mode=corr_mode,
-                           locality_wide=locality_wide)
-                for _ in range(depth)
-            )
-            self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
-
-        # [5] position head
         self.out_norm = RMSNorm(dim)
         self.out = zero_init(nn.Linear(dim, 3, bias=False))
 
-        # [match head] a trainable residual on the features the correlation
-        # compares, and on nothing else; see `MatchHead.py`. Built last, so every
-        # other weight is initialised exactly as it is without it, and it
-        # starts as the raw cosine: the same model at step 0.
-        if match_learn and not self.cosine:
-            raise ValueError("match_learn trains the cosine match, which needs "
-                             "cross_attn, correlate and corr_mode='cosine'")
-        self.match_head = MatchHead(feat_dim, match_dim) if match_learn else None
+        self.fine = FineFinder(neigh=fine_neigh)
+        self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, dim), almost=False)
+        self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
-        # [more candidates] the single best match is the wrong place for 30-40%
-        # of moving points, and the trunk then has nothing to recover with.
-        # With match_topk > 1 it is handed the K best DISTINCT peaks of the
-        # score map (`nms_peaks`), each described by the same five numbers, in
-        # rank order, and picks among them the way trackers do: by which one
-        # makes a consistent path through time.
-        #
-        # Together with `match_proj` this is one Linear(5 * K, dim) on the
-        # concatenation, kept as two so that the first five columns are
-        # `match_proj` under its own name and initialisation, and the rest
-        # start at zero: at step 0 the model is exactly the single-match one.
-        # Built after everything else for the same reason as the head.
-        if match_topk < 1 or (match_topk > 1 and not self.cosine):
-            raise ValueError("match_topk must be >= 1, and > 1 needs the cosine match")
-        self.match_topk = match_topk
-        if match_topk > 1:
-            self.match_more = zero_init(
-                nn.Linear(5 * (match_topk - 1), dim, bias=False), almost=False)
-
-        # [relative finder] a CNN on the RGB frames at 4 px per cell, and a
-        # 7x7 window of it around the current guess compared with a 7x7 window
-        # around the query; see `FineFinder.py`. The one part of the model that sees
-        # anything finer than a 16 px patch, and the one part that needs
-        # nothing from DINOv3: it stands with `cross_attn` off, which is the
-        # CNN-only tracker the references are.
-        #
-        # Read twice, both from zero, so step 0 is exactly the model without
-        # it. Into the conditioning, where the cost volume goes; and into the
-        # token, because the table says WHICH WAY the match lies and the
-        # conditioning can only rescale channels -- without DINOv3 a
-        # regression's first guess is all zeros, and a token of zeros has
-        # nothing to rescale. Built last, like the two above.
-        if fine and legacy_lookup:
-            raise ValueError("the relative finder projects the point's position, "
-                             "which legacy_lookup does not compute")
-        #
-        # With `fine_xyz` it also reads where each cell of the window is in
-        # 3D, from the depth map, relative to the current guess: one position
-        # per 4 px cell, where `patch_xyz` has one per 16 px patch. Zero at
-        # first too, inside the finder.
-        if fine_xyz and not fine:
-            raise ValueError("fine_xyz adds to the relative finder, which needs fine")
-        self.fine = (FineFinder(fine_levels, fine_radius, width=fine_width, xyz=fine_xyz,
-                                waves=fine_waves, neigh=fine_neigh, prev=fine_prev) if fine else None)
-        if fine:
-            self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, cond_dim), almost=False)
-            self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
-        # [depth head] every cell of the CNN's map says its log depth, from the
-        # pixels alone: dense supervision of what the matcher reads. Trained
-        # by `tools/depth.py`'s loss; the forward pass never calls it.
-        self.depth_head = None
-        if depth_head:
-            if not fine:
-                raise ValueError("the depth head reads the finder's CNN, which needs fine")
-            c = self.fine.fnet.conv3.out_channels
-            self.depth_head = nn.Sequential(nn.Conv2d(c, 64, 3, padding=1), nn.GELU(),
-                                            nn.Conv2d(64, 1, 1))
-        # [flow patch] the optical flow since the frame before at the
-        # (2R+1)^2 CNN cells around each guess, read like the finder's window:
-        # where the surface around the point moved, which a turn shows as a
-        # swirl across the patch. Zero at first, like the finder's own way in.
-        self.flow_patch = flow_patch
-        if flow_patch:
-            if not fine:
-                raise ValueError("the flow patch is read at the finder's guess, which needs fine")
-            k = (2 * flow_patch + 1) ** 2 * 2
-            r = torch.arange(-flow_patch, flow_patch + 1, dtype=torch.float32)
-            dy, dx = torch.meshgrid(r, r, indexing="ij")
-            self.register_buffer("flow_delta", torch.stack([dx, dy], -1).reshape(-1, 2), persistent=False)
-            self.flow_cond = zero_init(nn.Linear(k, cond_dim), almost=False)
-            self.flow_tok = zero_init(nn.Linear(k, dim, bias=False), almost=False)
-
-        # [visibility head] one logit per (point, frame): can the model see the
-        # point there? Not when it is occluded, out of the frame, or in a
-        # frame with no image. Read from the same final tokens as the
-        # position head, and trained apart from it (`--vis-loss`). Zeros,
-        # made without drawing from the random generator, so every other
-        # weight, and every draw after them, is as it is without it.
+        # One logit per (point, frame): can the point be seen there?
         self.visibility = visibility
         if visibility:
             self.vis_weight = nn.Parameter(torch.zeros(dim))
-            # With `hidden_blank` the head decides which points lose their image
-            # from round 2 on, so it starts out calling every point seen
-            # (sigmoid 0.95): nothing is blanked until it has learned better.
+            # With hidden_blank the head's calls blank hidden points, so it
+            # starts out calling every point seen.
             self.vis_bias = nn.Parameter(torch.full((), 3.0 if hidden_blank else 0.0))
-
-        # [visibility fed back] with `vis_feedback` the regression's next
-        # iteration is given the logit this head gave on the one before, as
-        # TAPIP3D does: a point the model thinks it cannot see can learn to
-        # stop trusting what the image shows where it is. Added to the token
-        # by one vector, a linear from 1 number to `dim`; zeros made without
-        # the random generator, like the head, so step 0 is the model
-        # without it.
-        # [hidden points blanked] `hidden_blank`: from the second refinement
-        # round on, a point the head called hidden in a frame gets no image
-        # there, as a forecast frame gets none (`regress._blank_hidden`): one
-        # path for hidden points and forecasting.
         if hidden_blank and not visibility:
             raise ValueError("hidden_blank uses the visibility head's calls: needs visibility")
         self.hidden_blank = hidden_blank
-        # [time's direction] with `bidirectional` the refinement also runs a
-        # backward sweep over the windows (`regress._schedule`), and every
-        # call is told which way time runs: +1 or -1 times one learned vector,
-        # added to the conditioning. Zeros at first. Physics is not the same
-        # both ways -- a bounce loses height forward and gains it backward.
+        # A backward sweep is told time runs backward: +-1 times one vector.
         self.bidirectional = bidirectional
         if bidirectional:
-            self.dir_emb = nn.Parameter(torch.zeros(cond_dim))
-        if vis_feedback and not visibility:
-            raise ValueError("vis_feedback feeds the visibility head back, which needs visibility")
-        self.vis_feedback = vis_feedback
-        # The fed-back visibility and groups (below) enter through weights
-        # that start at zero, and Adam moves a weight about the learning rate a
-        # step whatever its gradient: at 2e-4, 0.1 in 500 steps, where an
-        # attention bias needs about 1 to matter (runs.md, fzA's group bias at
-        # 0.01). `feedback_scale` multiplies what they add, so the same steps
-        # go that much further. Still zero at step 0.
-        self.feedback_scale = feedback_scale
-        if vis_feedback:
-            self.vis_in = nn.Parameter(torch.zeros(dim))
-
-        # [buddies] where each point's rigid object says it is (`Buddies.py`),
-        # as an offset from its guess and how much buddy weight backs it, into
-        # the token from zero; optionally a per-pair spatial attention bias.
-        # Built last, so every weight above draws what it draws without it.
-        if buddy_bias and not buddies:
-            raise ValueError("buddy_bias is part of buddies")
-        self.buddies = Buddies(num_heads, depth, bias=buddy_bias) if buddies else None
-        if buddies:
-            self.buddy_tok = zero_init(nn.Linear(4, dim, bias=False), almost=False)
-
-        # [virtual tracks] with `virtual` = M, M learned tokens per frame join
-        # the points: they go through the temporal blocks like a point, and in
-        # each frame the points no longer attend to each other but meet
-        # through them -- the tokens read the points, read each other, and the
-        # points read the tokens back (CoTracker's virtual tracks, TAPIP3D's
-        # `EfficientUpdateFormer`, 64 of them). Group chats that can learn to
-        # hold an object's motion, for its hidden points to read. Built last.
-        self.virtual = virtual
-        if virtual:
-            if cross_attn or buddies:
-                raise ValueError("virtual tracks are built for the CNN-only model: no "
-                                 "DINOv3 cross-attention, no buddies")
-            hd = dim // num_heads
-            self.virtual_tok = nn.Parameter(torch.randn(1, 1, virtual, dim))
-            self.virtual_cond = nn.Parameter(torch.zeros(1, 1, virtual, cond_dim))
-            self.v_reads_p = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
-            self.v_reads_v = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
-            self.p_reads_v = nn.ModuleList(_CrossAttnBlock(dim, mlp_mult, num_heads, hd) for _ in range(depth))
-
-        # [TAPIP3D's updater] with updater="tapip3d" the finder's comparison
-        # goes to TAPIP3D's own updater (`TapUpdater.py`) and none of the
-        # blocks above are used: the test of whether ours is the gap.
-        self.tap = None
-        if updater == "tapip3d":
-            if not (fine and self.fine.neigh) or cross_attn:
-                raise ValueError("TAPIP3D's updater reads the 3D-neighbourhood finder, with no DINOv3")
-            self.tap = TapUpdater(self.fine.out_dim)
-
-        # [groups fed back] with `group_feedback` every point also says a
-        # `group_feedback`-wide vector, one for the window: points on one rigid
-        # object should have close vectors (trained by `regress_loss`'s
-        # group_weight against the truth's rigid pairs). The next round is
-        # given it, as visibility is: into each point's token, and as a bias
-        # in the attention between points, per block and head, scaling the
-        # affinity 2 sigmoid(-|v_i - v_j|^2), so a point can learn to listen
-        # to its own object -- a hidden one most of all, knowing from the fed
-        # back visibility that it is hidden. Zeros before the first round, and
-        # both inputs start at zero, so step 0 is the model without it.
+            self.dir_emb = nn.Parameter(torch.zeros(dim))
+        # Each point says a vector per window, close for points on one rigid
+        # piece; the next call reads it in the token and as an attention bias
+        # between points, scaled by feedback_scale so Adam moves it in time.
         self.group_feedback = group_feedback
-        self._emb = None
+        self.feedback_scale = feedback_scale
         if group_feedback:
-            if virtual:
-                raise ValueError("group_feedback biases the attention between points, which virtual tracks replace")
             self.group_out = nn.Linear(dim, group_feedback)
             self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
             self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
@@ -470,538 +106,116 @@ class PointDiT(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
-                         query_t):
-        """The finder's comparison, (B, T, N, out_dim): each point's neighbourhood
-        in the window's frames (`fine_map`, uv, pos) against its template, read
-        in its own query frame of the clip (`clip_*`, `query_t` (B, N); None is
-        frame 0 for every point), every point in one pass."""
-        B, N = anchor.shape[:2]
-        if query_t is None:
-            query_t = torch.zeros(B, N, dtype=torch.long, device=anchor.device)
-        with torch.autocast(device_type=uv.device.type, enabled=False):
-            proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
-            uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]              # (B, N, 2)
-            if not self.fine.neigh:
-                if bool(query_t.any()):
-                    raise ValueError("a template per point is built for the 3D-neighbourhood finder")
-                places = ({} if fine_xyz is None else
-                          dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale))
-                return self.fine(fine_map, clip_map[:, 0], uv, uv0, **places)
-            places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float())
-        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, **places)
-
-    def _upsample(self, context: torch.Tensor, patch_xyz: torch.Tensor):
-        """(B, T, P, F) features and (B, T, P, 3) positions -> the same on a
-        grid `upsample` times finer per side, so P grows by upsample^2.
-
-        Positions are interpolated bilinearly, not repeated: four cells sharing
-        one position would make the finer grid no finer for the locality bias.
-        The cost is that a cell straddling a depth edge gets a position between
-        the two surfaces. Caching positions at the fine grid from the depth map
-        would remove that; this is the version that needs no new cache.
-        """
-        B, T, P, Fd = context.shape
-        g = math.isqrt(P)
-        if g * g != P:
-            raise ValueError(f"upsampling needs a square patch grid, got P={P}")
-        u = self.upsample
-        c = context.reshape(B * T, g, g, Fd).permute(0, 3, 1, 2)
-        c = F.interpolate(c, scale_factor=u, mode="nearest")
-        c = c + self.up_conv(c).to(c.dtype)
-        c = c.permute(0, 2, 3, 1).reshape(B, T, P * u * u, Fd)
-        xyz = patch_xyz.reshape(B * T, g, g, 3).permute(0, 3, 1, 2)
-        xyz = F.interpolate(xyz.float(), scale_factor=u, mode="bilinear",
-                            align_corners=False).to(patch_xyz.dtype)
-        xyz = xyz.permute(0, 2, 3, 1).reshape(B, T, P * u * u, 3)
-        return c, xyz
-
-    def _cosine(self, feats: torch.Tensor, id_card: torch.Tensor) -> torch.Tensor:
-        """(B, T, P, C) patches, (B, N, C) templates, both fp32 -> (B, T, N, P)."""
-        if self.match_head is not None:
-            return self.match_head(feats, id_card)
-        return raw_cosine(feats, id_card)
-
-    def match_scores(self, context: torch.Tensor, id_card: torch.Tensor,
-                     patch_xyz: torch.Tensor) -> torch.Tensor | None:
-        """(B, T, N, P) the scores `forward` picks its match from, on the grid
-        it picks from (the upsampled one, if any), before any frame is masked.
-
-        They depend on the images and the templates alone -- not on the sample,
-        not on `k` -- so the matching loss and the match accuracy are computed
-        from here, once, whatever the method does with the trunk. None for a
-        model without the cosine match.
-        """
-        if not self.cosine:
-            return None
-        if self.upsample > 1:
-            context, _ = self._upsample(context, patch_xyz)
-        with torch.autocast(device_type=context.device.type, enabled=False):
-            return self._cosine(context.float(), id_card.float())
-
-    def _flow_patch(self, flow: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
-        """flow (B, T, 2, h, w), uv (B, T, N, 2) the guess in [0, 1] ->
-        (B, T, N, (2R+1)^2 * 2): the flow at the cells around each guess, in
-        cells. Cell j is centred at `(j + 1/8) / w` (FineFinder's docstring);
-        outside the frame it reads 0."""
-        B, T, _, h, w = flow.shape
-        N = uv.shape[2]
-        cell = uv.float() * uv.new_tensor([w, h]) - 0.125
-        grid = cell[:, :, :, None] + self.flow_delta                              # (B, T, N, K, 2)
-        grid = 2 * grid / grid.new_tensor([w - 1, h - 1]) - 1
-        out = F.grid_sample(flow.flatten(0, 1).float(), grid.flatten(0, 1), align_corners=True)
-        out = out * out.new_tensor([w, h])[:, None, None]                        # fraction -> cells
-        return out.permute(0, 2, 3, 1).reshape(B, T, N, -1)
-
-    def _lookup_pos(self, x: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
-        """Where each point currently thinks it is, in `patch_xyz`'s space.
-
-        `x` is what gets denoised, and that is not a position: it is divided by
-        `traj_scale`, and with a displacement target it is measured from each
-        point's own start. `patch_xyz` is an absolute scene-normalised position.
-        Every lookup "near the point" has to undo both first.
-
-        Until 2026-10-09 the lookups used `x` as it was. With a displacement
-        target that centred them on the scene origin instead of on the point --
-        the locality bias and the cost volume were looking in the wrong place
-        for every run since run3493_disp. `legacy_lookup` reproduces that, only
-        so checkpoints trained that way still evaluate as they were trained.
-        """
-        if self.legacy_lookup:
-            return x
-        pos = x * self.traj_scale
-        return pos + anchor[:, None] if self.displacement else pos
-
-    def _target_units(self, pos: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
-        """The inverse of `_lookup_pos`: a position in `patch_xyz`'s space,
-        expressed the way the model's own target is."""
-        if self.legacy_lookup:
-            return pos
-        if self.displacement:
-            pos = pos - anchor[:, None]
-        return pos / self.traj_scale
-
-    @staticmethod
-    def _patch_spacing(patch_xyz: torch.Tensor) -> torch.Tensor:
-        """(B, T, P, 3) -> (B, T): how far apart neighbouring patches are.
-
-        The median distance from a patch to its right-hand neighbour on the
-        grid. Median, because a pair straddling a depth edge is metres apart
-        and a mean would follow those. Per frame, because the camera moves:
-        on two Kubric clips it drifted 10% over the clip, at most 5% between
-        frames, so a per-frame value is steady and a per-clip one is stale.
-        """
-        B, T, P, _ = patch_xyz.shape
-        g = math.isqrt(P)
-        if g * g != P:
-            raise ValueError(f"patch spacing needs a square patch grid, got P={P}")
-        grid = patch_xyz.reshape(B, T, g, g, 3)
-        step = (grid[:, :, :, 1:] - grid[:, :, :, :-1]).norm(dim=-1).flatten(2)
-        # Floored: patches stacked on one spot would otherwise divide by zero.
-        return step.median(dim=-1).values.clamp_min(1e-4)
-
-    def _describe(self, corr, top, best, vals, idx, patch_xyz, anchor, tau) -> torch.Tensor:
-        """The five numbers the trunk is handed about one candidate match.
-
-        corr (B, T, N, P) scores; top (B, T, N) the candidate's patch and
-        `best` its score; vals, idx (B, T, N, >=10) the highest scores of the
-        map and where they are. Returns (B, T, N, 5): the offset from the
-        point's start in target units, the score, and the margin.
-        """
-        B, T, N, P = corr.shape
-        g = math.isqrt(P)
-        # A soft-argmax over the candidate's 3x3 on the grid, for sub-patch
-        # precision. At the border the window slides inward rather than repeat
-        # a patch, so it is always nine different ones.
-        step = torch.arange(-1, 2, device=corr.device)
-        rows = (top // g).clamp(1, g - 2)[..., None, None] + step[:, None]
-        cols = (top % g).clamp(1, g - 2)[..., None, None] + step
-        win = (rows * g + cols).flatten(-2)                           # (B, T, N, 9)
-        w = (corr.gather(-1, win) / tau).softmax(-1)
-        # Gathered by index: a second (B, T, N, P) tensor is the memory
-        # the cosine map already costs once.
-        near = patch_xyz.gather(
-            2, win.reshape(B, T, -1)[..., None].expand(-1, -1, -1, 3)
-        ).reshape(B, T, N, 9, 3)
-        offset = self._target_units((w[..., None] * near).sum(-2), anchor)
-        # Two confidences, so an offset from a poor match can be told from a
-        # good one: how alike the candidate is, and by how much it beats the
-        # best patch OUTSIDE its window -- for the winner a small margin is a
-        # lookalike somewhere else, and for a runner-up it is negative: how
-        # far behind the winner it is. Of the top 10, one is outside.
-        inside = (idx[..., None] == win[..., None, :]).any(-1)
-        rival = vals.masked_fill(inside, -torch.inf).amax(-1)
-        return torch.cat([offset, best[..., None], (best - rival)[..., None]], dim=-1)
+    def lookup_pos(self, x: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        """The guess `x` (a displacement over traj_scale) as a position in
+        `anchor`'s space."""
+        return x * self.traj_scale + anchor[:, None]
 
     def forward(
         self,
         x: torch.Tensor,
         k: torch.Tensor,
         anchor: torch.Tensor,
-        context: torch.Tensor | None = None,
+        context: torch.Tensor,
+        id_card: torch.Tensor,
+        patch_xyz: torch.Tensor,
+        fine_map: torch.Tensor,
+        fine_proj: torch.Tensor,
+        fine_xyz: torch.Tensor,
+        query_t: torch.Tensor,
         visual_mask: torch.Tensor | None = None,
-        id_card: torch.Tensor | None = None,
-        patch_xyz: torch.Tensor | None = None,
-        fine_map: torch.Tensor | None = None,
-        fine_proj: torch.Tensor | None = None,
-        fine_xyz: torch.Tensor | None = None,
-        fine_flow: torch.Tensor | None = None,
-        visibility: bool = False,
-        vis_prev: torch.Tensor | None = None,
+        alive: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
         direction: torch.Tensor | None = None,
-        query_t: torch.Tensor | None = None,
-        alive: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
-        x:           (B, T, N, 3)    noisy trajectory, in model units
-        k:           (B,) or (B, T)  noise level in [0, 1]. Per-frame `k` is
-                                     what diffusion forcing needs later, so it
-                                     is supported from the start.
-        anchor:      (B, N, 3)       scene-normalised frame-0 position
-        context:     (B, T, P, D)    DINOv3 patch features per frame  [4c]
-        visual_mask: (B, T) bool     True = frame has visual conditioning.
-                                     False swaps in `null_ctx` -> forecasting.
-                     or (B, T, N)    the same per point: each point's frame is
-                                     blanked on its own, as a forecast frame
-                                     is. Only the `hide-hidden` diagnostic in
-                                     `scripts/evaluate.py` passes this shape.
-        id_card:     (B, N, D)       DINOv3 feature sampled at the query  [3]
-        patch_xyz:   (B, T, P, 3)    each patch's 3D position, `anchor`'s space.
-                                     Required with `context`: *what* plus *where*.
-        fine_map:    (B, T, C, h, w) CNN features from `FineFinder.encode`
-        fine_proj:   (B, T, 3, 4)    `anchor`'s space -> the image, per frame
-                                     (`fine.image_projection`). Required with
-                                     `fine_map`; the pair is independent of the
-                                     four above.
-        fine_xyz:    (B, T, 3, h, w) each CNN cell's 3D position, `anchor`'s
-                                     space, from its depth. Required with
-                                     `fine_map` for a finder with `fine_xyz`.
-        fine_flow:   (B, T, 2, h, w) at each CNN cell, how it moved since the
-                                     frame before, as a fraction of the frame
-                                     (0 at frame 0). Required by a model built
-                                     with `flow_patch`, refused by any other.
+        x            (B, T, N, 3)    the guess, displacement / traj_scale
+        k            (B,)            the round clock in [0, 1]
+        anchor       (B, N, 3)       each point at its query frame, scene-normalised
+        context      (B, Tc, P, F)   DINOv3 patches of the whole clip
+        id_card      (B, N, F)       DINOv3 feature at each query
+        patch_xyz    (B, Tc, P, 3)   each patch's 3D position, anchor's space
+        fine_map     (B, Tc, C, h, w) the CNN's maps (`FineFinder.encode`)
+        fine_proj    (B, Tc, 3, 4)   anchor's space -> the image, per frame
+        fine_xyz     (B, Tc, 3, h, w) each CNN cell's 3D position
+        query_t      (B, N) long     each point's query frame in the clip
+        visual_mask  (B, Tc) or (B, Tc, N) bool, False = no image there
+        alive        (B, N) bool     points the others may attend to
+        group_prev   (B, N, E)       the group vectors the last call said
+        direction    (B,)            +1 forward, -1 backward (bidirectional)
+        frames       (start, end)    the clip frames `x` covers; None = all
 
-        visibility:  bool            also return the visibility head's
-                                     logits, (B, T, N); a model built with it
-        vis_prev:    (B, T, N)       the logits the previous refinement
-                                     iteration gave, 0 before the first.
-                                     Required by a model built with
-                                     `vis_feedback`, refused by any other.
-        group_prev:  (B, N, E)       the group vectors the previous round
-                                     said (`group_feedback`); None before the
-                                     first, read as zeros.
-        direction:   (B,)            +1 forward, -1 backward: exactly when the
-                                     model was built `bidirectional`.
-        query_t:     (B, N) long     each point's query frame, in the clip: its
-                                     template is read there, not in frame 0.
-                                     None: every point's is frame 0.
-        alive:       (B, N) bool     the points this window has: a point first
-                                     seen after it is left out of the attention
-                                     between points. None: all of them.
-        frames:      (start, end)    the clip's frames `x` covers, one window
-                                     of a longer clip; the visual arguments
-                                     are still the whole clip's, and its
-                                     frame 0, where the query is, stays the
-                                     template. None: `x` covers every frame.
-
-        returns      (B, T, N, 3)    predicted velocity
-
-        The visual arguments are optional as a group.
+        returns the velocity (B, T, N, 3), the visibility logits (B, T, N) and
+        the group vectors (B, N, E), the last two None without their heads.
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
-        # The query frames' maps, taken before a window cuts them away.
+        # The templates are read in the whole clip, before the window cut.
         clip_map, clip_proj, clip_xyz = fine_map, fine_proj, fine_xyz
         if frames is not None:
-            if self.costvol:
-                raise ValueError("the cost volume's support is read in the frames it is given")
             cut = slice(*frames)
-            context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow = (
+            context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz = (
                 None if t is None else t[:, cut]
-                for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz, fine_flow))
-        # Every image reading below is per point once it has been looked up
-        # (the match, the cost volume, the finder, the distances), so a mask
-        # per point blanks it exactly. The feature map itself is shared by a
-        # frame's points: it is blanked for a frame only when every point is,
-        # and each blanked point's cross-attention reads `null_ctx` instead.
+                for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz))
+        # Per point inputs are blanked per point; the shared feature map only
+        # when every point of the frame is.
         point_mask = frame_mask = None
         if visual_mask is not None:
             point_mask = visual_mask if visual_mask.dim() == 3 else visual_mask[..., None]
             frame_mask = visual_mask.any(-1) if visual_mask.dim() == 3 else visual_mask
 
-        if self.upsample > 1 and context is not None and patch_xyz is not None:
-            context, patch_xyz = self._upsample(context, patch_xyz)
-
-        # --- where each point currently thinks it is, relative to every patch ---
-        # x and patch_xyz share one normalised space, so this is a plain distance
-        # and needs no camera. It is the lookup every established tracker does by
-        # projecting into the image and sampling there; in 3D the projection is
-        # unnecessary. Computed once, used by the cost volume and by every block.
-        #
-        # Every position computation in this method is taken out of autocast:
-        # bf16 keeps 8 bits of mantissa, so a coordinate near 1 is only known to
-        # about 1/256, and autocast ran the einsum below in it.
-        dist2 = near2 = None
+        # Positions in fp32: bf16 holds a coordinate near 1 to about 1/256.
         with torch.autocast(device_type=dev.type, enabled=False):
-            pos = self._lookup_pos(x.float(), anchor.float())
-            if context is not None and patch_xyz is not None and (
-                    self.locality or self.costvol or self.cross_window):
-                patch_xyz = patch_xyz.float()
-                # ||a-b||^2 = |a|^2 + |b|^2 - 2a.b, rather than materialising the
-                # (B, T, N, P, 3) difference -- that tensor is 340 MB at batch 16.
-                dist2 = (pos.pow(2).sum(-1)[..., None]
-                         + patch_xyz.pow(2).sum(-1)[:, :, None]
-                         - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
-                if self.patch_locality:
-                    # The same distances counted in patch spacings, which is
-                    # the unit "near" is meant in: a scene-unit distance says
-                    # nothing until you know the grid. Measured from the
-                    # nearest patch -- a softmax cannot tell the difference,
-                    # and it keeps the numbers small where they matter, so a
-                    # point far from every patch still sees its closest ones.
-                    near2 = dist2 / self._patch_spacing(patch_xyz).pow(2)[..., None, None]
-                    near2 = near2 - near2.amin(dim=-1, keepdim=True)
+            pos = self.lookup_pos(x.float(), anchor.float())
+            patch_xyz = patch_xyz.float()
+            # |a-b|^2 = |a|^2 + |b|^2 - 2ab, without the (B, T, N, P, 3) difference.
+            dist2 = (pos.pow(2).sum(-1)[..., None]
+                     + patch_xyz.pow(2).sum(-1)[:, :, None]
+                     - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
+            uv, _ = project(pos, fine_proj.float())
 
-        # [window] as an attention bias: 0 on the nearest patches, off elsewhere.
-        # A point with no image in a frame reads every patch there, as without
-        # the window: which patches are nearest comes from that frame's depth.
-        window = None
-        if self.cross_window:
-            d = dist2.reshape(B * T, N, -1)
-            near = d.topk(self.cross_window, dim=-1, largest=False).indices
-            window = torch.full_like(d, -CrossBlock.FAR).scatter(-1, near, 0.0)
-            if point_mask is not None:
-                window = window * point_mask.reshape(B * T, -1, 1)
+        # Each point reads only the patches nearest its guess; a point with no
+        # image reads them all (they are all null there).
+        d = dist2.reshape(B * T, N, -1)
+        near = d.topk(self.cross_window, dim=-1, largest=False).indices
+        window = torch.full_like(d, -CrossBlock.FAR).scatter(-1, near, 0.0)
+        if point_mask is not None:
+            window = window * point_mask.reshape(B * T, -1, 1)
 
-        # --- [cost volume] support window vs the neighbourhood of the estimate ---
-        cv = None
-        if self.costvol and dist2 is not None:
-            cf = self.cv_proj(context)                                # (B, T, P, cv)
-            # Support: the patches around where the point STARTS. The 3D
-            # equivalent of CoTracker's window around the query pixel, and it
-            # replaces a single-vector template that many patches match equally.
-            with torch.autocast(device_type=dev.type, enabled=False):
-                a0 = anchor.float()
-                d0 = (a0.pow(2).sum(-1)[..., None]
-                      + patch_xyz[:, 0].pow(2).sum(-1)[:, None]
-                      - 2 * torch.einsum("bnc,bpc->bnp", a0, patch_xyz[:, 0]))
-            si = d0.topk(self.cv_support, dim=-1, largest=False).indices   # (B, N, S)
-            sup = cf[:, 0].gather(1, si.reshape(B, -1)[..., None]
-                                  .expand(-1, -1, self.cv_dim)).reshape(B, N, self.cv_support, -1)
+        fine = self._fine_at_queries(fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos,
+                                     anchor, query_t)
+        if point_mask is not None:
+            fine = fine * point_mask[..., None]
 
-            # Neighbourhood: the patches nearest the CURRENT estimate, per frame.
-            ni = dist2.topk(self.cv_k, dim=-1, largest=False).indices      # (B, T, N, K)
-            flat = ni.reshape(B, T, -1)[..., None]
-            nb = cf.gather(2, flat.expand(-1, -1, -1, self.cv_dim)) \
-                   .reshape(B, T, N, self.cv_k, -1)
-            # Offsets, not absolute positions: "two cells up-left of you" is the
-            # part a single similarity score cannot express.
-            with torch.autocast(device_type=dev.type, enabled=False):
-                off = patch_xyz.gather(2, flat.expand(-1, -1, -1, 3)) \
-                               .reshape(B, T, N, self.cv_k, 3) - pos[..., None, :]
-
-            cost = torch.einsum("bnsc,btnkc->btnsk", sup, nb) * self.cv_dim ** -0.5
-            cv = self.cv_mlp(torch.cat([cost.flatten(3), off.flatten(3)], dim=-1))
-            if point_mask is not None:
-                cv = cv * point_mask[..., None]
-
-        # --- [relative finder] the window at the guess vs the window at the query ---
-        # The lookup the comment at the top says is unnecessary in 3D, done
-        # anyway: the pixels are in the image, so that is where to look. The
-        # support window is read around the anchor's own projection into frame
-        # 0 rather than around the cached query pixel, so both windows go
-        # through one camera model and cannot disagree by a convention.
-        fine = flow = None
-        if self.fine is not None and fine_map is not None:
-            with torch.autocast(device_type=dev.type, enabled=False):
-                proj = fine_proj.float()
-                uv, _ = project(pos, proj)
-                # Offsets in the units of the model's own target, which is
-                # what a difference of two positions turns into there. The 3D
-                # neighbourhood reads them scene-normalised instead, about
-                # unit spread, the scale TAPIP3D's encoding is built for.
-            fine = self._fine_at_queries(fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos,
-                                         anchor, query_t)
-            if point_mask is not None:
-                fine = fine * point_mask[..., None]
-            if bool(self.flow_patch) != (fine_flow is not None):
-                raise ValueError("fine_flow is given exactly to a model built with flow_patch")
-            if fine_flow is not None:
-                flow = self._flow_patch(fine_flow, uv)
-                if point_mask is not None:
-                    flow = flow * point_mask[..., None]
-            if self.tap is not None:
-                step, logits = self.tap(fine, pos, uv, vis_prev, point_mask)
-                return (step, logits) if visibility else step
-
-        # --- [correlation] template vs every patch, on the RAW features ---
-        # Read before the adapter overwrites `context`. The model previously had
-        # the template and the patches but nothing that compared them, so the
-        # one route from image to position had to be discovered from position
-        # error alone -- while "predict little motion" cut the loss immediately.
-        corr = match_xyz = match = None
-        if (self.cosine and context is not None and id_card is not None
-                and patch_xyz is not None):
-            with torch.autocast(device_type=dev.type, enabled=False):
-                # fp32: the match is decided by differences in the third
-                # decimal of a cosine, which bf16 does not hold.
-                corr = self._cosine(context.float(), id_card.float())
-                if point_mask is not None:
-                    corr = corr * point_mask[..., None]
-                # The best match, by appearance alone and over the whole frame:
-                # the patch that looks most like the point, then a soft-argmax
-                # over its 3x3 on the grid for sub-patch precision (TAPIR's
-                # global match, local refinement). It used to be weighted by
-                # distance from the current estimate as well, and at low k that
-                # estimate is 2-3 patches off: the search was held to the wrong
-                # neighbourhood exactly when the model had nothing else to go
-                # on. The argmax passes no gradient -- tau gets its own
-                # through the soft-argmax, match_proj through the token. What
-                # makes the argmax land on the right patch is `match_head` and
-                # the matching loss, when there is one (`tools/matching.py`).
-                g = math.isqrt(corr.shape[-1])
-                if g * g != corr.shape[-1] or g < 4:
-                    raise ValueError("the match needs a square patch grid at least "
-                                     f"4 wide, got P={corr.shape[-1]}")
-                best, top = corr.max(dim=-1)                          # (B, T, N)
-                tau = bounded_exp(self.match_log_tau, 1e-3, 1.0)
-                # The runners-up come from this list too: enough of the top
-                # scores that K peaks survive suppressing each other's 3x3.
-                vals, idx = corr.topk(nms_pool(self.match_topk), dim=-1)
-                pxyz, a0 = patch_xyz.float(), anchor.float()
-                match = self._describe(corr, top, best, vals, idx, pxyz, a0, tau)
-                if self.match_topk > 1:
-                    # Which places is decided without a gradient, like the
-                    # argmax; what is read at each has one. Rank 1 is the
-                    # argmax above, so the first five numbers are the
-                    # single-match model's, bit for bit.
-                    peaks = nms_peaks(corr, self.match_topk, first=top, idx=idx)
-                    match = torch.cat([match] + [
-                        self._describe(corr, pk, corr.gather(-1, pk[..., None])[..., 0],
-                                       vals, idx, pxyz, a0, tau)
-                        for pk in peaks.unbind(-1)[1:]], dim=-1)
-                if point_mask is not None:
-                    match = match * point_mask[..., None]
-        elif (self.correlate and context is not None and id_card is not None
-                and patch_xyz is not None):
-            q = self.corr_q(id_card)                                  # (B, N, D)
-            corr = torch.einsum("bnc,btpc->btnp", q, self.corr_k(context))
-            corr = corr * self.dim ** -0.5
-            if point_mask is not None:
-                corr = corr * point_mask[..., None]
-            # Softly, where in this frame the template matches best. Independent
-            # of the diffused path, so it is evidence rather than an echo of the
-            # model's own guess -- the one term here that the image alone decides.
-            with torch.autocast(device_type=dev.type, enabled=False):
-                match_xyz = torch.einsum("btnp,btpc->btnc",
-                                         corr.float().softmax(-1), patch_xyz.float())
-            if point_mask is not None:
-                match_xyz = match_xyz * point_mask[..., None]
-
-        # --- [3] one conditioning vector per (frame, point) ---
-        if k.dim() == 1:
-            k = k[:, None].expand(B, T)
-        cond = self.time_emb(k[..., None])[:, :, None] + self.anchor_emb(anchor)[:, None]
-        if id_card is not None:
-            cond = cond + self.id_feature_proj(id_card)[:, None]   # the "what am I" term
-        if match_xyz is not None:
-            cond = cond + self.match_gate * self.match_emb(match_xyz)  # "and here"
-        if cv is not None:
-            cond = cond + self.cv_gate * cv.to(cond.dtype)   # "and this is the fit"
-        if fine is not None:
-            cond = cond + self.fine_cond(fine).to(cond.dtype)  # "and this, to the pixel"
-        if flow is not None:
-            cond = cond + self.flow_cond(flow).to(cond.dtype)  # "and how it turned"
+        cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
+        cond = cond + self.id_feature_proj(id_card)[:, None]
+        cond = cond + self.fine_cond(fine).to(cond.dtype)
         if self.bidirectional != (direction is not None):
             raise ValueError("direction is given exactly when the model was built bidirectional")
         if direction is not None:
             cond = cond + (direction[:, None, None, None] * self.dir_emb).to(cond.dtype)
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
-        # --- [feature adapter] raw backbone width -> model width, plus position ---
-        if context is not None:
-            if patch_xyz is None:
-                raise ValueError("context needs patch_xyz -- features without "
-                                 "positions say what is in the frame but not where")
-            # The position embedding is computed in fp32 and cast down only
-            # here: a second full-size fp32 copy of the context is the memory
-            # that `rms_norm` goes out of its way not to spend.
-            context = self.frame_proj(context)
-            context = context + self.patch_pos(patch_xyz).to(context.dtype)
+        context = self.frame_proj(context)
+        context = context + self.patch_pos(patch_xyz).to(context.dtype)
+        if frame_mask is not None:
+            context = torch.where(frame_mask[..., None, None], context, self.null_ctx.to(context.dtype))
 
-            # Masked frames lose features AND positions, before any attention.
-            if frame_mask is not None:
-                context = torch.where(
-                    frame_mask[..., None, None], context, self.null_ctx.to(context.dtype)
-                )
-
-        # --- the same distances, folded into the attention bias ---
-        if self.patch_locality:
-            dist2 = near2
-        if dist2 is not None and self.locality:
-            # A masked frame is one the model is not allowed to see, and its
-            # patch positions come from that frame's depth. Its features are
-            # already replaced, so nothing can flow today -- every value is the
-            # same null vector, whatever the weights. Zeroed anyway: this is the
-            # forecasting path, and a hole in it should not wait for the null
-            # handling to change before it becomes a leak.
-            if point_mask is not None:
-                dist2 = dist2 * point_mask[..., None]
-            dist2 = dist2.reshape(B * T, N, -1)
-        else:
-            dist2 = None
-        if corr is not None:
-            corr = corr.reshape(B * T, N, -1)
-        # How noisy each frame's lookup position is, laid out like `dist2`.
-        # Per frame, so diffusion forcing gets a window per frame. Frame 0 is
-        # pinned to the truth by the loss and the sampler, but nothing passed
-        # in here says so: it gets its batch's `k` unless the caller hands a
-        # per-frame `k` with 1 there.
-        noise = ((1 - k.float()).clamp(0, 1).reshape(B * T, 1, 1)
-                 if self.sched_locality else None)
-
-        # --- [2] tokenise ---
         h = self.token_proj(x)                                        # (B, T, N, D)
-        if self.motion_waves:
-            if fine_proj is None:
-                raise ValueError("motion_waves places the guess in the image, which needs fine_proj")
-            with torch.autocast(device_type=dev.type, enabled=False):
-                step = pos.diff(dim=1)
-                fwd = torch.cat([-step, torch.zeros_like(pos[:, :1])], dim=1)
-                bwd = torch.cat([torch.zeros_like(pos[:, :1]), step], dim=1)
-                uv_now, _ = project(pos, fine_proj.float())
-                # The pixel needs the frame's camera, which a frame with no
-                # image does not give, like every other image input here.
-                seen = _posenc(uv_now)
-                if point_mask is not None:
-                    seen = seen * point_mask[..., None]
-                motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
-            h = h + self.motion_proj(motion.to(h.dtype))
-        if match is not None:
-            # Added, not folded into `cond`: conditioning only rescales
-            # channels (AdaRMSNorm), and a displacement has to be copied.
-            match = match.to(h.dtype)
-            h = h + self.match_proj(match[..., :5])
-            if self.match_topk > 1:
-                h = h + self.match_more(match[..., 5:])
-        if fine is not None:
-            h = h + self.fine_tok(fine).to(h.dtype)
-        if flow is not None:
-            h = h + self.flow_tok(flow).to(h.dtype)
-        if self.vis_feedback != (vis_prev is not None):
-            raise ValueError("vis_prev is given exactly when the model was built with vis_feedback")
-        if vis_prev is not None:
-            h = h + vis_prev[..., None].to(h.dtype) * (self.feedback_scale * self.vis_in).to(h.dtype)
+        with torch.autocast(device_type=dev.type, enabled=False):
+            step = pos.diff(dim=1)
+            fwd = torch.cat([-step, torch.zeros_like(pos[:, :1])], dim=1)
+            bwd = torch.cat([torch.zeros_like(pos[:, :1]), step], dim=1)
+            # The pixel needs the frame's image, like every image input.
+            seen = _posenc(uv)
+            if point_mask is not None:
+                seen = seen * point_mask[..., None]
+            motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
+        h = h + self.motion_proj(motion.to(h.dtype))
+        h = h + self.fine_tok(fine).to(h.dtype)
+
         biases = [None] * self.depth
-        if self.buddies is not None:
-            prop, support, bb = self.buddies(self._lookup_pos(x, anchor), anchor, vis_prev)
-            # Clamped: early on a guess can be far off, and so can the offset.
-            prop = (prop / self.traj_scale).clamp(-10, 10)
-            h = h + self.buddy_tok(torch.cat([prop, support[..., None]], -1).to(h.dtype))
-            if bb is not None:
-                biases = [b.to(h.dtype) for b in bb]
         if group_prev is not None and not self.group_feedback:
             raise ValueError("group_prev is fed back to a model built with group_feedback")
         if self.group_feedback:
@@ -1011,116 +225,60 @@ class PointDiT(nn.Module):
             a = 2 * torch.sigmoid(-_sq_dist(v))                                  # (B, N, N)
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
             biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
-                      + (0 if bb_d is None else bb_d) for d, bb_d in enumerate(biases)]
-
+                      for d in range(self.depth)]
         if alive is not None:
-            # Points first seen after this window are not in it: no point reads them.
-            if self.virtual:
-                raise ValueError("alive masks the attention between points, which virtual tracks replace")
+            # Points not in this window are read by no point.
             gone = ((~alive).to(h.dtype) * -1e4)[:, None, None, None, :]           # (B, 1, 1, 1, N)
             gone = gone.expand(B, T, 1, 1, N).reshape(B * T, 1, 1, N)
-            biases = [gone if bb_d is None else bb_d + gone for bb_d in biases]
+            biases = [gone if b is None else b + gone for b in biases]
 
-        # --- positions for RoPE, and the causal mask ---
-        # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in
-        # [-1, 1], which is what `anchor` gives the spatial one. The raw frame
-        # index turned adjacent frames by at least 180 degrees on every channel,
-        # so neighbours in time looked no more related than distant frames.
-        t_pos = (torch.linspace(-1, 1, T, device=dev, dtype=dt) if self.time_norm
-                 else torch.arange(T, device=dev, dtype=dt))
-        if self.virtual:
-            M = self.virtual
-            h = torch.cat([h, self.virtual_tok.to(h.dtype).expand(B, T, M, -1)], dim=2)
-            cv = self.cond_mlp(self.time_emb(k[..., None])[:, :, None] + self.virtual_cond)
-            cond = torch.cat([cond, cv.to(cond.dtype).expand(B, T, M, -1)], dim=2)
-        Nt = h.shape[2]                                               # points and virtual tokens
-        t_pos = t_pos[None, :, None].expand(B * Nt, T, 1)
+        # Frame times in [-1, 1], the range RoPE's ladder is built for.
+        t_pos = torch.linspace(-1, 1, T, device=dev, dtype=dt)[None, :, None].expand(B * N, T, 1)
         theta_time = self.time_rope(t_pos)                             # (B*N, H, T, d)
         if self.rope_current:
-            if self.virtual:
-                raise ValueError("rope_current encodes the points' guesses, which virtual tokens have none of")
-            now = self._lookup_pos(x.float(), anchor.float()).reshape(B * T, N, 3)
-            theta_space = self.space_rope(now.to(dt))                  # (B*T, H, N, d)
+            theta_space = self.space_rope(pos.reshape(B * T, N, 3).to(dt))
         else:
             theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
-        causal = (torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]
-                  if self.causal else None)
 
-        # --- [4] blocks ---
-        seen_blocks = []
-        cross_blocks = self.cross_blocks if (self.cross_attn and context is not None) else [None] * self.depth
         for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
-                                                  cross_blocks, biases):
-            # each point's own timeline; a frame may only see its own past
-            ht = h.permute(0, 2, 1, 3).reshape(B * Nt, T, -1)
-            ct = cond.permute(0, 2, 1, 3).reshape(B * Nt, T, -1)
-            h = temporal(ht, ct, theta=theta_time, attn_mask=causal)
-            h = h.view(B, Nt, T, -1).permute(0, 2, 1, 3)
+                                                  self.cross_blocks, biases):
+            ht = h.permute(0, 2, 1, 3).reshape(B * N, T, -1)
+            ct = cond.permute(0, 2, 1, 3).reshape(B * N, T, -1)
+            h = temporal(ht, ct, theta=theta_time)
+            h = h.view(B, N, T, -1).permute(0, 2, 1, 3)
 
-            # all points within one frame
-            hs = h.reshape(B * T, Nt, -1)
-            cs = cond.reshape(B * T, Nt, -1)
-            if self.virtual:
-                i = len(seen_blocks); seen_blocks.append(i)
-                p, v = hs[:, :N], hs[:, N:]
-                v = self.v_reads_p[i](v, p)
-                v = self.v_reads_v[i](v, v)
-                p = self.p_reads_v[i](p, v)
-                h = torch.cat([p, v], dim=1)
-            else:
-                h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
+            hs = h.reshape(B * T, N, -1)
+            cs = cond.reshape(B * T, N, -1)
+            h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
 
-            # [4c] each point queries its own frame's feature map (or the null)
-            if cross is not None:
-                frame_ctx = context.reshape(B * T, -1, self.dim)
-                seen = cross(h, cs, frame_ctx, dist2=dist2, corr=corr, noise=noise, window=window)
-                if visual_mask is not None and visual_mask.dim() == 3:
-                    # A point blanked in a frame its neighbours still see reads
-                    # exactly what a fully blanked frame would give it: the
-                    # null in every patch, and its distances and match already
-                    # zeroed above. Each point's cross-attention is its own, so
-                    # picking between the two per point leaks nothing.
-                    blank = cross(h, cs, self.null_ctx.to(frame_ctx.dtype).expand_as(frame_ctx),
-                                  dist2=dist2, corr=corr, noise=noise, window=window)
-                    seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
-                h = seen
-            h = h.view(B, T, Nt, -1)
-        h = h[:, :, :N]                                               # the virtual tokens go no further
+            frame_ctx = context.reshape(B * T, -1, self.dim)
+            seen = cross(h, cs, frame_ctx, window=window)
+            if visual_mask is not None and visual_mask.dim() == 3:
+                # A point blanked in a frame its neighbours see reads the null
+                # in every patch, as in a fully blanked frame.
+                blank = cross(h, cs, self.null_ctx.to(frame_ctx.dtype).expand_as(frame_ctx), window=window)
+                seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
+            h = seen.view(B, T, N, -1)
 
-        # --- [5] head ---
         h = self.out_norm(h)
-        if self.group_feedback:
-            # One vector per point for the window: which rigid piece a point
-            # is on does not change with time.
-            self._emb = self.group_out(h).float().mean(1)
-        if not visibility:
-            return self.out(h)
-        if not self.visibility:
-            raise ValueError("this model was built without the visibility head")
-        return self.out(h), F.linear(h, self.vis_weight[None], self.vis_bias[None])[..., 0]
+        logits = (F.linear(h, self.vis_weight[None], self.vis_bias[None])[..., 0]
+                  if self.visibility else None)
+        # One group vector per point for the window.
+        groups = self.group_out(h).float().mean(1) if self.group_feedback else None
+        return self.out(h), logits, groups
+
+    def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
+                         query_t):
+        """The matcher's comparison (B, T, N, out_dim): each point's
+        neighbourhood at its guess against its template in its query frame."""
+        with torch.autocast(device_type=uv.device.type, enabled=False):
+            proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
+            uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]              # (B, N, 2)
+            places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float())
+        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, **places)
 
 
 def _sq_dist(v: torch.Tensor) -> torch.Tensor:
-    """(B, N, E) -> (B, N, N) squared distances. Written out rather than
-    `cdist ** 2`, whose square root has no gradient where two vectors meet --
-    which, at the start, is everywhere."""
+    """(B, N, E) -> (B, N, N) squared distances, written out: cdist's square
+    root has no gradient where two vectors meet."""
     return (v[:, :, None] - v[:, None]).pow(2).sum(-1)
-
-
-def _example():
-    """DINOv3 and the CNN side by side (fx8), at a training clip's sizes, for
-    visual-code's model view: 24 frames, 128 points, DINOv3 ViT-S/16 at 384 px
-    (24 x 24 patches, 384 wide) and the CNN at 4 px cells (96 x 96)."""
-    model = PointDiT(displacement=True, legacy_lookup=False, cross_attn=True, feat_dim=384,
-                     correlate=True, corr_mode="cosine", match_learn=True, costvol=False, causal=False,
-                     fine=True, fine_xyz=True, fine_waves=10)
-    B, T, N, P, h, w = 1, 24, 128, 24 * 24, 96, 96
-    proj = torch.zeros(B, T, 3, 4)
-    proj[..., 0, 0] = proj[..., 1, 1] = 0.5
-    proj[..., 0, 3] = proj[..., 1, 3] = 0.5
-    proj[..., 2, 2] = 1.0
-    proj[..., 2, 3] = 3.0
-    inputs = (torch.zeros(B, T, N, 3), torch.ones(B), torch.randn(B, N, 3) * 0.2,
-              torch.randn(B, T, P, 384), None, torch.randn(B, N, 384), torch.randn(B, T, P, 3) * 0.2,
-              torch.randn(B, T, 128, h, w), proj, torch.randn(B, T, 3, h, w) * 0.2)
-    return model, inputs

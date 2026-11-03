@@ -1,84 +1,27 @@
-"""Train and run the model by refining its own guess, with no noise.
+"""Track by refining a guess that starts at "nothing moves".
 
-Iterative regression -- the same network, trained and run without noise.
-
-The control for flow matching (`flow.py`). There the network sees the truth
-mixed with noise and every look at the image is centred on that noisy sample.
-Here it sees its own current guess, the way TAPIP3D and CoTracker work:
-
-    g = 0                                 "nothing moves", for a displacement target
-    repeat `iters` times:
-        g = g.detach() + model(g, k_i, anchor)
-
-Nothing else differs: the network, its inputs and the error it is scored by are
-the ones flow matching uses, so a gap between the two is about the method. The
-output that flow matching reads as a velocity is read here as a correction.
-
-`k` is the iteration clock, `k_i = i / (iters - 1)`. The network already takes
-a scalar in [0, 1] that tells it how far along it is and, with
-`locality_mode="sched"`, how wide to look: wide on the first guess, one patch
-spacing on the last.
-
-A model built with `vis_feedback` is also given, at every iteration, the
-visibility logits the iteration before it gave, detached like the guess and
-0 before the first, as TAPIP3D does.
-
-`param` says what each correction the network gives per frame means, before
-it is added to the guess:
-
-    position      a change to that frame's displacement, as above
-    velocity      a change to the speed from that frame on: a correction at
-                  frame t moves every later frame by the same amount
-    acceleration  a change to how fast the speed changes from that frame on:
-                  a correction at frame t changes the speed of every later frame
-
-A clip longer than the network should see at once is tracked in windows:
-`window` frames at a time, each window starting `overlap` frames before the
-one before it ends, as TAPIP3D does. Its frames past the last window start
-where the point last was, and the frames it shares were settled by that
-window. Every window still reads the clip's frame 0 as its template.
-
-So an output of zero at a frame the network cannot see keeps the guess there
-moving the way it already moves, rather than holding it in place. Either way
-the correction is summed into a displacement first, so the guess, the loss
-and the score all stay in displacement units.
+The clip is covered by windows of `window` frames, each sharing `overlap` with
+the one before. Sweeps run over the windows forward or backward (`schedule`,
+e.g. "fbfb", one round a window each; empty is `iters` rounds forward). Each
+round the model gives a velocity per frame, summed from each point's fixed
+frame (`_integrate`), and the point is held at its known position in its
+query frame (`_pin`). A point gets no image where it has no evidence: before
+its query frame, and where the visibility head calls it hidden
+(`_blank_hidden`).
 """
 
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
 from torch import nn
 
-from genpoint3d.train.tools.flow import masked_error
 from genpoint3d.train.tools.visibility import visibility_error
 
 
-def _carry(g: torch.Tensor, i: int, iters: int) -> torch.Tensor:
-    """After iteration `i`, every frame past a horizon restarts from the
-    horizon's own guess, the horizon moving from frame 0 to the last frame
-    over the first `iters - 1` iterations.
-
-    The guess starts at frame 0's position in every frame, and each frame's
-    window looks around its own guess: a point that has gone 200 px by frame
-    20 is outside it, and only the whole-frame match can bring it back. With
-    the horizon, the frames just past it start where the point last was, and
-    the window walks forward with it, as TAPIP3D's overlapping windows do
-    (each starting from the one before). With 4 iterations and 24 frames,
-    frames past 8 restart from frame 8, then frames past 15 from frame 15.
-    """
-    T = g.shape[1]
-    if iters < 2:
-        return g
-    h = round((T - 1) * (i + 1) / (iters - 1))
-    if h >= T - 1:
-        return g
-    return torch.cat([g[:, :h + 1], g[:, h:h + 1].expand_as(g[:, h + 1:])], dim=1)
-
-
 def _windows(T: int, window: int, overlap: int) -> list[tuple[int, int]]:
-    """(start, end) of each window over `T` frames. The last one ends at the
-    clip's end, so it may share more than `overlap` frames. A `window` of 0, or
-    one as long as the clip, is the whole clip."""
+    """(start, end) of each window over `T` frames; the last ends at the clip's
+    end. A `window` of 0, or one as long as the clip, is the whole clip."""
     if not window or window >= T:
         return [(0, T)]
     out, start = [], 0
@@ -91,34 +34,199 @@ def _windows(T: int, window: int, overlap: int) -> list[tuple[int, int]]:
 
 
 def _cut(t: Optional[torch.Tensor], start: int, end: int) -> Optional[torch.Tensor]:
-    """A (B, T, ...) tensor's frames `start` to `end`, or None."""
     return None if t is None else t[:, start:end]
 
 
 def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
-    """The frames from `done` to `end`, which no window has settled yet, start
-    where the point was in the last one that has."""
+    """Frames `done` to `end`, which no window has settled, start where the
+    point was in the last settled frame."""
     if done == 0 or done >= end:
         return g
     return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
 
 
-def _groups(model: nn.Module, groups: Optional[torch.Tensor], alive: torch.Tensor) -> Optional[torch.Tensor]:
-    """Each point's group vector (B, N, E) after a call of a model built with
-    `group_feedback`, carried through every window and sweep: the points this
-    window has take the vector it said, the rest keep theirs. None for any
-    other model."""
-    if not getattr(model, "group_feedback", 0):
-        return None
-    emb = model._emb.detach()
-    return emb if groups is None else torch.where(alive[..., None], emb, groups)
+def _integrate(step: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
+    """(B, L, N, 3) velocities -> displacement changes, summed out from each
+    point's fixed frame `at` (B, N), which does not move: a later frame steps
+    from the one before, an earlier one from the one after. Time is in window
+    lengths, a frame being 1 / (L - 1)."""
+    L = step.shape[1]
+    t = torch.arange(L, device=step.device)[None, :, None, None]
+    a = at[:, None, :, None]                                                  # (B, 1, N, 1)
+    dt = 1.0 / max(L - 1, 1)
+    c = torch.cumsum(step * dt, dim=1)                                        # (B, L, N, 3)
+    before = torch.cat([torch.zeros_like(c[:, :1]), c[:, :-1]], dim=1)        # c at t - 1
+    pick = lambda v, i: v.gather(1, i.clamp(0, L - 1).expand(-1, -1, -1, 3))
+    c_a, c_a1 = pick(c, a), pick(before, a)
+    return torch.where(t > a, c - c_a, torch.where(t < a, c_a1 - before, torch.zeros_like(c)))
+
+
+def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: bool, every: bool):
+    """For one window: `alive` (B, N), the points it has (forward, those first
+    seen by its end, or all once a backward sweep has run, `every`; backward,
+    all), only points whose query frame has its image; `at` (B, N), the frame
+    each point's steps run from: its query frame when inside the window, else
+    the window's first frame forward and its last backward; `inside` (B, N)."""
+    q = cond["query_t"]
+    vm = cond.get("visual_mask")
+    seen = torch.ones(B, N, dtype=torch.bool, device=q.device)
+    if vm is not None:
+        seen = (vm[..., None].expand(-1, -1, N) if vm.dim() == 2 else vm).gather(1, q[:, None])[:, 0]
+    inside = (q >= start) & (q < end)
+    alive = seen if backward or every else seen & (q < end)
+    at = torch.where(inside, q - start, torch.full_like(q, end - start - 1 if backward else 0))
+    return alive, at, inside
+
+
+def _pin(g: torch.Tensor, known_x0: torch.Tensor, at: torch.Tensor, inside: torch.Tensor) -> torch.Tensor:
+    """Hold each point whose query frame is in the window at its known position there."""
+    if not bool(inside.any()):
+        return g
+    idx = at[:, None, :, None].expand(-1, 1, -1, 3)
+    held = torch.where(inside[:, None, :, None], known_x0[:, None].to(g.dtype), g.gather(1, idx))
+    return g.scatter(1, idx, held)
+
+
+def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
+    """The sweeps in order, each ("f" or "b", rounds a window)."""
+    if schedule:
+        if set(schedule) - {"f", "b"} or schedule[0] != "f":
+            raise ValueError(f"a schedule is f and b, starting with f: {schedule!r}")
+        return [(c, 1) for c in schedule]
+    return [("f", iters)]
+
+
+def _blank_hidden(cond: dict, logits: Optional[torch.Tensor], start: int, end: int, T: int,
+                  N: int) -> dict:
+    """`cond` for the window `start` to `end` with no image where a point has
+    no evidence: before its query frame, and, given `logits` (B, L, N), where
+    the head calls it hidden. Its query frame keeps its image."""
+    q = cond["query_t"]
+    B = q.shape[0]
+    vm = cond.get("visual_mask")
+    if vm is None:
+        vm = torch.ones(B, T, dtype=torch.bool, device=q.device)
+    full = (vm[..., None].expand(B, T, N) if vm.dim() == 2 else vm).clone()
+    t = torch.arange(start, end, device=q.device)[None, :, None]
+    seen = t >= q[:, None]
+    if logits is not None:
+        seen &= (logits.detach() > 0) | (t == q[:, None])
+    full[:, start:end] &= seen
+    return {**cond, "visual_mask": full}
+
+
+def _clock(i: int, rounds: int, B: int, device) -> torch.Tensor:
+    """(B,) `k` for round `i` of `rounds`; a single round is the last."""
+    return torch.full((B,), i / (rounds - 1) if rounds > 1 else 1.0, device=device)
+
+
+@dataclass
+class _Round:
+    i: int                          # the round, counted over every sweep
+    start: int
+    end: int
+    g: torch.Tensor                 # (B, L, N, 3) the window's guess, before the pin
+    logits: Optional[torch.Tensor]  # (B, L, N) visibility, with the head
+    groups: Optional[torch.Tensor]  # (B, N, E) group vectors, with their graph
+    alive: torch.Tensor             # (B, N)
+
+
+class _Sweeps:
+    """Every round of every window of every sweep, in order, as `_Round`s.
+    `whole` and `vis` then hold the clip's guess and each frame's last
+    visibility logits; `rounds`, if a list, gets the clip's guess before the
+    first round and after each."""
+
+    def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, iters: int, schedule: str,
+                 window: int, overlap: int, known_x0: torch.Tensor, cond: dict,
+                 rounds: Optional[list] = None) -> None:
+        self.model, self.anchor, self.T, self.known_x0, self.cond = model, anchor, T, known_x0, cond
+        self.plan = _schedule(iters, schedule)
+        self.R = sum(n for _, n in self.plan)
+        self.spans = _windows(T, window, overlap)
+        B, N = anchor.shape[:2]
+        self.whole = torch.zeros(B, T, N, 3, device=anchor.device)
+        # Visibility so far: seen everywhere until a window has called it.
+        self.vis = torch.full((B, T, N), 20.0, device=anchor.device)
+        self.rounds = rounds
+
+    def _record(self, i: int, g: torch.Tensor, start: int, end: int) -> None:
+        if self.rounds is not None:
+            if not self.rounds:
+                self.rounds.extend(self.whole.clone() for _ in range(self.R + 1))
+            self.rounds[i] = torch.cat([self.rounds[i][:, :start], g, self.rounds[i][:, end:]], dim=1)
+
+    def __iter__(self):
+        model, anchor, T = self.model, self.anchor, self.T
+        B, N = anchor.shape[:2]
+        dev = anchor.device
+        blank = model.hidden_blank
+        groups = None                       # each point's group vector, carried throughout
+        done = r0 = 0
+        for sweep, n in self.plan:
+            back = sweep == "b"
+            direction = (torch.full((B,), -1.0 if back else 1.0, device=dev)
+                         if model.bidirectional else None)
+            for start, end in (reversed(self.spans) if back else self.spans):
+                if not back:
+                    self.whole = _reach(self.whole, done, end)
+                g = self.whole[:, start:end]
+                if not back:
+                    self._record(0, g, start, end)
+                alive, at, inside = _window_points(self.cond, B, N, start, end, back, every=r0 > 0)
+                frames = None if len(self.spans) == 1 else (start, end)
+                c = _blank_hidden(self.cond, self.vis[:, start:end] if blank else None, start, end, T, N)
+                logits = None
+                for i in range(r0, r0 + n):
+                    step, logits, emb = model(g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive,
+                                              group_prev=groups, direction=direction, frames=frames, **c)
+                    if emb is not None:
+                        groups = emb.detach() if groups is None else torch.where(alive[..., None], emb.detach(),
+                                                                                 groups)
+                    if blank:
+                        c = _blank_hidden(self.cond, logits, start, end, T, N)
+                    g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
+                    yield _Round(i, start, end, g, logits, emb, alive)
+                    g = _pin(g, self.known_x0, at, inside)
+                    self._record(i + 1, g.detach(), start, end)
+                self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
+                if logits is not None:
+                    self.vis[:, start:end] = logits.detach()
+                if not back:
+                    done = end
+            r0 += n
+
+
+def _error(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
+           weight: Optional[torch.Tensor]) -> torch.Tensor:
+    """The weighted mean distance of `pred` from `target`, (B, T, N, 3)."""
+    err = (pred - target).norm(dim=-1)
+    w = mask.float()
+    if weight is not None:
+        w = w * weight
+    return (err * w).sum() / w.sum().clamp(min=1e-8)
+
+
+def _motion_error(g, x1, mask, weight):
+    """The error of each frame-to-frame step against the truth's, in window
+    lengths like `_integrate`; a step counts where both its frames do."""
+    s = x1.shape[1] - 1
+    w = None if weight is None else (weight[:, :-1] + weight[:, 1:]) / 2
+    return _error(g.diff(dim=1) * s, x1.diff(dim=1) * s, mask[:, 1:] & mask[:, :-1], w)
+
+
+def _rigid_error(g, x1, pairs):
+    """The error of the gap between two points on one rigid object, `pairs`
+    (B, N, N), against the true gap: their errors should be the same."""
+    e = (g - x1)[:, :, :, None] - (g - x1)[:, :, None]           # (B, T, N, N, 3)
+    err = e.norm(dim=-1)
+    w = pairs[:, None].to(err.dtype).expand_as(err)
+    return (err * w).sum() / w.sum().clamp(min=1e-8)
 
 
 def _group_error(emb: torch.Tensor, groups: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
-    """How far the affinities of the points' vectors (B, N, E) are from the
-    pairs that truly move as one (B, N, N): cross-entropy of
-    2 sigmoid(-|v_i - v_j|^2) against 1 for such a pair and 0 otherwise, the
-    two kinds averaged apart so the rarer one counts as much."""
+    """Cross-entropy of the affinity 2 sigmoid(-|v_i - v_j|^2) against the
+    pairs that truly move as one (B, N, N), the two kinds averaged apart."""
     v = emb.float()
     a = (2 * torch.sigmoid(-(v[:, :, None] - v[:, None]).pow(2).sum(-1))).clamp(1e-4, 1 - 1e-4)
     off = ~torch.eye(emb.shape[1], dtype=torch.bool, device=emb.device) & alive[:, :, None] & alive[:, None, :]
@@ -128,505 +236,74 @@ def _group_error(emb: torch.Tensor, groups: torch.Tensor, alive: torch.Tensor) -
     return (p + n) / 2
 
 
-def _integrate(step: torch.Tensor, param: str, at: torch.Tensor) -> torch.Tensor:
-    """(B, T, N, 3) the network's per-frame output, as a change in displacement,
-    summed from each point's own fixed frame `at` (B, N), an index into the
-    window, which gets no correction: a later frame's output is its step from
-    the frame before it, an earlier frame's its step from the frame after it,
-    so an output of zero holds a frame level with its neighbour towards `at`.
-    Forward, `at` is the window's first frame, or a point's own query frame
-    inside it; backward, the window's last, which the window after has settled.
-
-    Time is measured in window lengths, one frame being 1 / (T - 1): an output
-    the same size in every frame then moves the far end by about that much,
-    as a position output would; without the step a velocity would move it
-    T - 1 times as far, and every weight change near the output would be that
-    much larger from the first step on. An acceleration is summed twice from
-    the first frame, the only `at` it takes.
-    """
-    L = step.shape[1]
-    t = torch.arange(L, device=step.device)[None, :, None, None]
-    a = at[:, None, :, None]                                                  # (B, 1, N, 1)
-    if param == "position":
-        return step * (t != a).to(step.dtype)
-    dt = 1.0 / max(L - 1, 1)
-    if param == "acceleration":
-        if bool((at != 0).any()):
-            raise ValueError("an acceleration is summed from the window's first frame only")
-        rate = (step * (t > 0).to(step.dtype)).cumsum(dim=1) * dt
-        return rate.cumsum(dim=1) * dt
-    c = torch.cumsum(step * dt, dim=1)                                        # (B, L, N, 3)
-    before = torch.cat([torch.zeros_like(c[:, :1]), c[:, :-1]], dim=1)        # c at t - 1
-    pick = lambda v, i: v.gather(1, i.clamp(0, L - 1).expand(-1, -1, -1, 3))
-    c_a, c_a1 = pick(c, a), pick(before, a)                                   # at `at`, and just before
-    return torch.where(t > a, c - c_a, torch.where(t < a, c_a1 - before, torch.zeros_like(c)))
-
-
-def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: bool, device,
-                   every: bool = False):
-    """Per window, from each point's query frame (`cond["query_t"]` (B, N);
-    none means frame 0) and the frames with an image (`cond["visual_mask"]`):
-    `alive` (B, N), the points the window has -- on the forward pass those
-    first seen by its end (`every`: all of them, once a backward sweep has
-    given late points their past), on the backward pass all of them, either way only
-    points whose query frame has its image; `at` (B, N), the frame each
-    point's steps run from (`_integrate`): its query frame when that is in
-    the window, else the window's first frame forward and its last backward;
-    `inside` (B, N), whether the query frame is in the window."""
-    q = cond.get("query_t")
-    if q is None:
-        q = torch.zeros(B, N, dtype=torch.long, device=device)
-    vm = cond.get("visual_mask")
-    seen = torch.ones(B, N, dtype=torch.bool, device=device)
-    if vm is not None:
-        seen = (vm[..., None].expand(-1, -1, N) if vm.dim() == 2 else vm).gather(1, q[:, None])[:, 0]
-    inside = (q >= start) & (q < end)
-    alive = seen if backward or every else seen & (q < end)
-    at = torch.where(inside, q - start, torch.full_like(q, end - start - 1 if backward else 0))
-    return alive, at, inside
-
-
-def _alive_only(mask_w: Optional[torch.Tensor], pairs: Optional[torch.Tensor], alive: torch.Tensor,
-                g: torch.Tensor) -> tuple:
-    """The window's loss mask (B, L, N) and rigid pairs (B, N, N) cut to the
-    points it has: a point not yet in it is neither scored nor a partner."""
-    keep = alive[:, None].expand(-1, g.shape[1], -1)
-    mask_w = keep if mask_w is None else mask_w & keep
-    if pairs is not None:
-        pairs = pairs & alive[:, :, None] & alive[:, None, :]
-    return mask_w, pairs
-
-
-def _pin(g: torch.Tensor, known_x0: Optional[torch.Tensor], at: torch.Tensor,
-            inside: torch.Tensor) -> torch.Tensor:
-    """Hold each point whose query frame is in the window at its known position
-    there."""
-    if known_x0 is None or not bool(inside.any()):
-        return g
-    idx = at[:, None, :, None].expand(-1, 1, -1, 3)
-    held = g.gather(1, idx)
-    held = torch.where(inside[:, None, :, None], known_x0[:, None].to(g.dtype), held)
-    return g.scatter(1, idx, held)
-
-
-def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
-    """The sweeps over the windows, in order, each ("f" forward or "b"
-    backward, rounds a window). `schedule` spells them one round a letter,
-    e.g. "fbfb": forward, back, forward, back, each sweep starting from where
-    the one before left every frame. Empty: `iters` rounds forward."""
-    if schedule:
-        if set(schedule) - {"f", "b"} or schedule[0] != "f":
-            raise ValueError(f"a schedule is f and b, starting with f: {schedule!r}")
-        return [(c, 1) for c in schedule]
-    return [("f", iters)]
-
-
-def _check_backward(model: nn.Module, schedule: str) -> None:
-    """A backward sweep does not carry a fed-back visibility (`vis_feedback`);
-    hidden blanking and the group vectors it carries."""
-    if "b" in schedule and model.vis_feedback:
-        raise ValueError("the backward sweep does not carry fed-back visibility: use --hidden-blank")
-
-
-def _direction(model: nn.Module, sign: float, B: int, device) -> dict:
-    """The model call's `direction` argument, (B,) +1 forward or -1 backward,
-    for a model built with `bidirectional`; nothing for any other."""
-    if not getattr(model, "bidirectional", False):
-        return {}
-    return {"direction": torch.full((B,), sign, device=device)}
-
-
-def _blank_hidden(cond: dict, logits: Optional[torch.Tensor], start: int, end: int, num_frames: int,
-                  N: int) -> dict:
-    """`cond` for a call over the window's frames `start` to `end`, with no
-    image wherever a point has no evidence, exactly as a forecast frame has
-    none -- carried by the rest of the scene, not matched to whatever is
-    there: every frame before the point's query frame, where it has not been
-    seen; and, with `logits` (B, end - start, N) from a model built with
-    `hidden_blank`, every frame its visibility head calls hidden. Each point's
-    query frame keeps its image."""
-    q = cond.get("query_t")
-    if q is None and logits is None:
-        return cond
-    vm = cond.get("visual_mask")
-    B = (q if q is not None else logits).shape[0]
-    dev = (q if q is not None else logits).device
-    if q is None:
-        q = torch.zeros(B, N, dtype=torch.long, device=dev)
-    if vm is None:
-        vm = torch.ones(B, num_frames, dtype=torch.bool, device=dev)
-    full = (vm[..., None].expand(B, num_frames, N) if vm.dim() == 2 else vm).clone()
-    t = torch.arange(start, end, device=dev)[None, :, None]
-    seen = t >= q[:, None]                                                   # seen by now
-    if logits is not None:
-        seen &= (logits.detach() > 0) | (t == q[:, None])
-    full[:, start:end] &= seen
-    return {**cond, "visual_mask": full}
-
-
-def _no_logits(model: nn.Module, x: torch.Tensor) -> Optional[torch.Tensor]:
-    """(B, T, N) zeros for the first iteration's fed-back visibility, or None
-    for a model that is not given it."""
-    return x.new_zeros(x.shape[:3]) if model.vis_feedback else None
-
-
-def _motion_error(g, x1, mask, weight, loss_type, order):
-    """The error of how `g` moves against how the truth moves.
-
-    order 1: each frame-to-frame change, the speed.
-    order 2: each change of that change, how the speed changes.
-
-    A change counts when every frame it spans counts in the position loss, at
-    the mean of their weights. Each is times T - 1 once, so the speed is in the
-    same clip-length time units as `_integrate`, and a guess that drifts away a
-    little every frame costs about as much as one off by that drift at the
-    end. A change of speed is left per frame, so it stays in the same units as
-    a speed rather than growing with T.
-    """
-    s = x1.shape[1] - 1
-    dg, dx = g.diff(n=order, dim=1) * s, x1.diff(n=order, dim=1) * s
-    m = w = None
-    if mask is not None:
-        m = mask[:, order:]
-        for j in range(order):
-            m = m & mask[:, j:j + dg.shape[1]]
-    if weight is not None:
-        w = sum(weight[:, j:j + dg.shape[1]] for j in range(order + 1)) / (order + 1)
-    return masked_error(dg, dx, m, w, loss_type)
-
-
-def _rigid_error(g, x1, pairs, loss_type):
-    """The error of the gap between two points of one rigid object, `pairs`
-    (B, N, N), against the true gap, in every frame. The gap's error is the
-    difference of the two points' own errors, so this asks the points of an
-    object to be wrong together: a hidden point that stays behind while its
-    object's visible points move costs, even where both are close to right.
-    """
-    e = (g - x1)[:, :, :, None] - (g - x1)[:, :, None]           # (B, T, N, N, 3)
-    err = e.norm(dim=-1) if loss_type == "l21" else e.pow(2).mean(dim=-1)
-    w = pairs[:, None].to(err.dtype).expand_as(err)
-    return (err * w).sum() / w.sum().clamp(min=1e-8)
-
-
-def _clock(i: int, iters: int, batch: int, device: torch.device) -> torch.Tensor:
-    """(B,) `k` for iteration `i`. A single iteration is the last one."""
-    return torch.full((batch,), i / (iters - 1) if iters > 1 else 1.0, device=device)
-
-
 def regress_loss(
     model: nn.Module,
     x1: torch.Tensor,
     anchor: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
+    known_x0: torch.Tensor,
+    mask: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
-    known_x0: Optional[torch.Tensor] = None,
-    loss_type: str = "l2",
     iters: int = 4,
     gamma: float = 0.8,
     backward: Optional[float] = None,
     visible: Optional[torch.Tensor] = None,
     vis_weight: float = 0.0,
-    param: str = "position",
-    carry: bool = False,
     vel_weight: float = 0.0,
-    acc_weight: float = 0.0,
     pairs: Optional[torch.Tensor] = None,
     rigid_weight: float = 0.0,
-    window: int = 0,
-    overlap: int = 0,
     groups: Optional[torch.Tensor] = None,
     group_weight: float = 0.0,
+    window: int = 0,
+    overlap: int = 0,
     schedule: str = "",
     **cond,
 ) -> tuple[torch.Tensor, dict]:
-    """
-    x1, anchor, mask, weight, known_x0, loss_type, visible, vis_weight, cond:
-              as `flow_matching_loss`. The visibility loss is scored at every
-              iteration too, with the same weights, and added to the
-              position loss before each backward pass.
-    iters:    refinement iterations, each one supervised against `x1`.
-    gamma:    iteration i is weighted gamma^(iters - 1 - i), so the last guess
-              counts most. TAPIP3D's weighting and its value
-              (`training/criterion.py`, `gamma: 0.8`). Normalised to sum to 1,
-              which theirs is not: the loss then stays an error per point,
-              comparable with the flow loss and with the gradient clip.
-    backward: None returns the loss with its graph, all `iters` forward passes
-              of it. A number back-propagates each iteration's share, times
-              that number, as soon as it exists and returns the loss detached.
-              The guess is detached between iterations, so no gradient crosses
-              from one to the next and the two give the same gradient -- but
-              this way a step holds one forward pass in memory, not `iters`
-              (TAPIP3D appendix, "memory-saving strategy"). The caller still
-              zeroes, clips and steps. The loss returned is then the position
-              loss alone, and the visibility loss is only in the dict.
-              With no `visible`, a model built with `vis_feedback` still
-              computes its visibility, to feed it back, but nothing scores it.
-    param:    what the network's output means, see the top of this file.
-    carry:    restart the frames past a moving horizon from its guess
-              between iterations (`_carry`).
-    vel_weight: also score each frame-to-frame change of the guess against the
-              truth's, weighted this against the position loss, at every
-              iteration. Part of the returned loss.
-    acc_weight: the same for each change of that change, how the speed of the
-              guess changes against how the truth's does.
-    pairs, rigid_weight: (B, N, N) the pairs of points on one rigid object
-              (`batch.rigid_pairs`), and the weight of the loss that keeps
-              the gap between them true, at every iteration.
-    groups, group_weight: a model built with `group_feedback` also has its
-              points' vectors scored against `groups` (B, N, N), the pairs the
-              truth shows keeping their distance (`_group_error`), every round;
-              each point's vector is carried through every window and sweep.
-    window, overlap: track in windows of this many frames, sharing `overlap`
-              (top of this file); 0 tracks the whole clip at once. Each
-              window is scored on its own frames, and the windows' losses are
-              averaged.
-
-    schedule: the sweeps over the windows one round a letter, f forward and b
-              backward, e.g. "fbfb" (`_schedule`; empty is `iters` forward):
-              each sweep starts from where the one before left every frame,
-              a backward one from the clip's end with the model told time runs
-              backward (`direction`) and each output a step from the frame
-              after (`_integrate`), so later frames inform earlier ones without
-              a window that holds both. Rounds are weighted and clocked over all
-              sweeps together; every sweep's windows are averaged.
-
-    Frame 0 is scored before it is pinned again: the network is asked for a
-    zero correction there, as the flow loss asks for a zero velocity. With a
-    velocity or an acceleration its correction there is zero by construction.
-    """
-    if window and carry:
-        raise ValueError("windows and carry both restart the later frames: use one")
-    _check_backward(model, schedule)
-    B, T = x1.shape[:2]
-    R = sum(n for _, n in _schedule(iters, schedule))
-    w = [gamma ** (R - 1 - i) for i in range(R)]
+    """The loss of every round against the truth `x1` (B, T, N, 3), round i
+    weighted gamma^(R - 1 - i) (TAPIP3D's 0.8), normalised, and the windows
+    averaged. Per round: the position error (`mask`, `weight` (B, T, N)), and
+    with their weights the step error, the rigid pairs' gap error, the group
+    vectors' error against `groups`, and the visibility head's against
+    `visible`. With `backward`, each round's loss times it is back-propagated
+    at once (one round in memory) and the loss comes back detached."""
+    run = _Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, known_x0, cond)
+    w = [gamma ** (run.R - 1 - i) for i in range(run.R)]
     w = [v / sum(w) for v in w]
-    spans = _windows(T, window, overlap)
-    # The round weights `w` already sum to 1 over every sweep: windows averaged.
-    share = 1 / len(spans)
-
-    whole = torch.zeros_like(x1)
+    share = 1 / len(run.spans)
     total = vis_total = x1.new_zeros(())
-    # Visibility logits so far: seen everywhere until a window has called them.
-    seen_all = torch.full((B, T, x1.shape[2]), 20.0, device=x1.device)
-    groups_now = None                       # each point's group vector, carried throughout
-    gp = lambda: {"group_prev": groups_now} if getattr(model, "group_feedback", 0) else {}
-    done = 0
-    r0 = 0
-    for sweep, n in _schedule(iters, schedule):
-        if sweep == "f":
-            for start, end in spans:
-                whole = _reach(whole, done, end)
-                g, x1_w = whole[:, start:end], x1[:, start:end]
-                mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
-                alive, at_q, inside = _window_points(cond, B, x1.shape[2], start, end, False, x1.device,
-                                                     every=r0 > 0)
-                mask_w, pairs_w = _alive_only(mask_w, pairs, alive, g)
-                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-                prev = _no_logits(model, x1_w)
-                blank = getattr(model, "hidden_blank", False)
-                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, T, x1.shape[2])
-                fwd = _direction(model, 1.0, B, x1.device)
-                for i in range(r0, r0 + n):
-                    k = _clock(i, R, B, x1.device)
-                    vis_loss = x1.new_zeros(())
-                    if visible_w is None and prev is None and not blank:
-                        step = model(g.detach(), k, anchor, **at, **gp(), **fwd, **c)
-                    else:
-                        step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **gp(),
-                                             **fwd, **c)
-                        if visible_w is not None:
-                            vis_loss = share * w[i] * visibility_error(logits, visible_w)
-                        if prev is not None:
-                            prev = logits.detach()
-                        if blank:
-                            c = _blank_hidden(cond, logits, start, end, T, x1.shape[2])
-                    g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, param, at_q), g.detach())
-                    emb = model._emb if getattr(model, "group_feedback", 0) else None
-                    groups_now = _groups(model, groups_now, alive)
-                    loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
-                    if vel_weight:
-                        loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
-                    if acc_weight:
-                        loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
-                    if rigid_weight:
-                        loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs_w, loss_type)
-                    if group_weight:
-                        loss = loss + w[i] * group_weight * _group_error(emb, groups, alive)
-                    loss = share * loss
-                    if backward is not None:
-                        # Out of autocast, where the training loop's own backward runs.
-                        with torch.autocast(device_type=x1.device.type, enabled=False):
-                            ((loss + vis_weight * vis_loss) * backward).backward()
-                        loss, vis_loss = loss.detach(), vis_loss.detach()
-                    total = total + loss
-                    vis_total = vis_total + vis_loss
-                    g = _pin(g, known_x0, at_q, inside)
-                    if carry:
-                        g = _carry(g.detach(), i, iters)
-                whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
-                if blank:
-                    seen_all[:, start:end] = logits.detach()
-                done = end
-        else:
-            for start, end in reversed(spans):
-                g, x1_w = whole[:, start:end], x1[:, start:end]
-                mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
-                alive, at_q, inside = _window_points(cond, B, x1.shape[2], start, end, True, x1.device)
-                mask_w, pairs_w = _alive_only(mask_w, pairs, alive, g)
-                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-                blank = getattr(model, "hidden_blank", False)
-                # Hidden points stay blanked from the forward pass's last call on.
-                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, T, x1.shape[2])
-                bwd = _direction(model, -1.0, B, x1.device)
-                for i in range(r0, r0 + n):
-                    vis_loss = x1.new_zeros(())
-                    out = model(g.detach(), _clock(i, R, B, x1.device), anchor, visibility=model.visibility,
-                                **at, **gp(), **bwd, **c)
-                    step, logits = out if model.visibility else (out, None)
-                    emb = model._emb if getattr(model, "group_feedback", 0) else None
-                    groups_now = _groups(model, groups_now, alive)
-                    if visible_w is not None:
-                        vis_loss = share * w[i] * visibility_error(logits, visible_w)
-                    if blank:
-                        c = _blank_hidden(cond, logits, start, end, T, x1.shape[2])
-                    g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, param, at_q), g.detach())
-                    loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
-                    if vel_weight:
-                        loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
-                    if acc_weight:
-                        loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
-                    if rigid_weight:
-                        loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs_w, loss_type)
-                    if group_weight:
-                        loss = loss + w[i] * group_weight * _group_error(emb, groups, alive)
-                    loss = share * loss
-                    if backward is not None:
-                        with torch.autocast(device_type=x1.device.type, enabled=False):
-                            ((loss + vis_weight * vis_loss) * backward).backward()
-                        loss, vis_loss = loss.detach(), vis_loss.detach()
-                    total = total + loss
-                    vis_total = vis_total + vis_loss
-                    g = _pin(g, known_x0, at_q, inside)
-                whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
-                if blank and logits is not None:
-                    seen_all[:, start:end] = logits.detach()
-        r0 += n
-
+    for r in run:
+        g, x1_w = r.g, x1[:, r.start:r.end]
+        keep = r.alive[:, None].expand(-1, g.shape[1], -1)
+        mask_w, weight_w = _cut(mask, r.start, r.end) & keep, _cut(weight, r.start, r.end)
+        loss = w[r.i] * _error(g, x1_w, mask_w, weight_w)
+        if vel_weight:
+            loss = loss + w[r.i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w)
+        if rigid_weight:
+            pairs_w = pairs & r.alive[:, :, None] & r.alive[:, None, :]
+            loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, pairs_w)
+        if group_weight:
+            loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups, r.alive)
+        loss = share * loss
+        vis_loss = x1.new_zeros(())
+        if visible is not None:
+            vis_loss = share * w[r.i] * visibility_error(r.logits, _cut(visible, r.start, r.end))
+        if backward is not None:
+            with torch.autocast(device_type=x1.device.type, enabled=False):
+                ((loss + vis_weight * vis_loss) * backward).backward()
+            loss, vis_loss = loss.detach(), vis_loss.detach()
+        total = total + loss
+        vis_total = vis_total + vis_loss
     if backward is None:
         total = total + vis_weight * vis_total
     return total, {"loss": total.detach(), "visibility": vis_total.detach()}
 
 
 @torch.no_grad()
-def refine(
-    model: nn.Module,
-    anchor: torch.Tensor,
-    num_frames: int,
-    iters: int = 4,
-    known_x0: Optional[torch.Tensor] = None,
-    visibility: bool = False,
-    param: str = "position",
-    carry: bool = False,
-    window: int = 0,
-    overlap: int = 0,
-    rounds: Optional[list] = None,
-    schedule: str = "",
-    **cond,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """The prediction: `iters` corrections to a guess that starts at zero.
-
-    No noise anywhere, so the same input always gives the same answer. With a
-    displacement target, a network that outputs zero gives exactly the static
-    baseline.
-
-    `visibility` also returns the visibility logits (B, T, N) of the last
-    iteration, the one the training weighs most; in windows, of the last
-    window that covers each frame. `param`, `carry`, `window` and `overlap`
-    are as in `regress_loss`, and must be what the model was trained with.
-
-    A `rounds` list is filled with the whole clip's guess before the first
-    correction and after each one, `iters + 1` (B, T, N, 3) tensors; in
-    windows, each frame from the last window that covers it.
-
-    `schedule`: the sweeps over the windows, as `regress_loss`.
-    """
-    if window and carry:
-        raise ValueError("windows and carry both restart the later frames: use one")
-    _check_backward(model, schedule)
-    B, N, _ = anchor.shape
-    R = sum(n for _, n in _schedule(iters, schedule))
-    spans = _windows(num_frames, window, overlap)
-    whole = torch.zeros(B, num_frames, N, 3, device=anchor.device)
-    seen = whole.new_zeros(B, num_frames, N) if visibility else None
-    # Visibility logits so far: seen everywhere until a window has called them.
-    seen_all = torch.full((B, num_frames, N), 20.0, device=anchor.device)
-    groups_now = None                       # each point's group vector, carried throughout
-    gp = lambda: {"group_prev": groups_now} if getattr(model, "group_feedback", 0) else {}
-    done = 0
-    r0 = 0
-    for sweep, n in _schedule(iters, schedule):
-        if sweep == "f":
-            for start, end in spans:
-                whole = _reach(whole, done, end)
-                g = whole[:, start:end]
-                alive, at_q, inside = _window_points(cond, B, N, start, end, False, anchor.device,
-                                                     every=r0 > 0)
-                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-                prev = _no_logits(model, g)
-                logits = None
-                blank = getattr(model, "hidden_blank", False)
-                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, num_frames, N)
-                fwd = _direction(model, 1.0, B, anchor.device)
-                if rounds is not None:
-                    if not rounds:
-                        rounds.extend(whole.clone() for _ in range(R + 1))
-                    rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
-                for i in range(r0, r0 + n):
-                    out = model(g, _clock(i, R, B, anchor.device), anchor,
-                                visibility=visibility or prev is not None or blank, vis_prev=prev, **at, **gp(),
-                                **fwd, **c)
-                    if visibility or prev is not None or blank:
-                        out, logits = out
-                    if prev is not None:
-                        prev = logits
-                    if blank:
-                        c = _blank_hidden(cond, logits, start, end, num_frames, N)
-                    g = torch.where(alive[:, None, :, None], _pin(g + _integrate(out, param, at_q), known_x0, at_q, inside), g)
-                    groups_now = _groups(model, groups_now, alive)
-                    if carry:
-                        g = _carry(g, i, iters)
-                    if rounds is not None:
-                        rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
-                whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
-                if visibility:
-                    seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
-                if blank:
-                    seen_all[:, start:end] = logits
-                done = end
-        else:
-            for start, end in reversed(spans):
-                g = whole[:, start:end]
-                alive, at_q, inside = _window_points(cond, B, N, start, end, True, anchor.device)
-                at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
-                blank = getattr(model, "hidden_blank", False)
-                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, num_frames, N)
-                bwd = _direction(model, -1.0, B, anchor.device)
-                for i in range(r0, r0 + n):
-                    want = visibility or blank
-                    out = model(g, _clock(i, R, B, anchor.device), anchor, visibility=want, **at, **gp(), **bwd, **c)
-                    out, logits = out if want else (out, None)
-                    groups_now = _groups(model, groups_now, alive)
-                    if blank:
-                        c = _blank_hidden(cond, logits, start, end, num_frames, N)
-                    g = torch.where(alive[:, None, :, None], _pin(g + _integrate(out, param, at_q), known_x0, at_q, inside), g)
-                    if rounds is not None:
-                        rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
-                whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
-                if blank and logits is not None:
-                    seen_all[:, start:end] = logits.detach()
-                if visibility:
-                    seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
-        r0 += n
-
-    return (whole, seen) if visibility else whole
+def refine(model: nn.Module, anchor: torch.Tensor, num_frames: int, known_x0: torch.Tensor,
+           iters: int = 4, window: int = 0, overlap: int = 0, schedule: str = "",
+           rounds: Optional[list] = None, **cond) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """The tracks (B, T, N, 3) and, with a visibility head, the logits (B, T,
+    N) of each frame's last window; `rounds` as `_Sweeps`."""
+    run = _Sweeps(model, anchor, num_frames, iters, schedule, window, overlap, known_x0, cond, rounds)
+    for _ in run:
+        pass
+    return run.whole, run.vis if model.visibility else None

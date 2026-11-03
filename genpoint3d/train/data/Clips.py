@@ -10,11 +10,5 @@ class Clips:
     # or the clip's dict itself from a legacy single-file cache.
     train: list[Path | dict]
     val: list[Path | dict]
-    # The cache's feature width. The encoder chooses its own width, and it need
-    # not equal the model's.
-    feat_dim: int | None
-    # Whether the model is given DINOv3 features at all.
-    has_feats: bool
-    # The directory of RGB frames for these clips, for the relative finder;
-    # None without it.
-    frames: Path | None = None
+    feat_dim: int            # the cache's DINOv3 width
+    frames: Path | None = None   # the RGB and depth cache for these clips

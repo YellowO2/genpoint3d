@@ -1,26 +1,10 @@
 """Fit the tracker to cached clips, scoring and saving it as it goes.
 
-Many clips, held-out validation, checkpoints. The question is whether the model
-learns anything that transfers to clips it has never seen.
+Each training clip keeps its images before a random cutoff and forecasts the
+rest; validation does the same from `--eval-cutoff`, and reports APD in metres
+(TAPVid-3D's `average_pts_within_thresh`) beside the static baseline.
 
-The metric that matters is APD on the VAL split -- `average_pts_within_thresh`
-from the TAP-Vid-3D benchmark, scored in metres. `apd_static` is the
-benchmark's own Static Baseline -- the query point assumed never to move --
-which is the bar a tracker has to clear.
-
-With a feature cache this trains pure TRACKING by default: every frame keeps
-its image, so `visual_mask` is all-True and the null embedding is never used.
-`--random-cutoff 1` trains FORECASTING as Gen-points does: each clip keeps the
-images of its frames before a random cutoff, the rest get the null embedding,
-and the model still predicts every frame. `--eval-cutoff C` validates the same
-way with one cutoff for every clip, and scores observed and forecast frames
-apart (`_obs`, `_fut`).
-
-Without a feature cache this falls back to the step-2 model, which sees no
-images at all -- a pure motion prior rather than tracking.
-
-Run:  python -m genpoint3d.prepare.main --root DATA --out local/cache/kubric
-      python -m genpoint3d.train.main --cache local/cache/kubric --steps 20000 --batch 8
+Run:  python -m genpoint3d.train.main --cache CACHE --frames-cache FRAMES --init CKPT
 """
 
 from genpoint3d.train.Hardware import Hardware
@@ -29,7 +13,6 @@ from genpoint3d.train.RunningLoss import RunningLoss
 from genpoint3d.train.Saver import Saver
 from genpoint3d.train.Settings import Settings
 from genpoint3d.train.data.Loaders import Loaders
-from genpoint3d.train.data.check_target_scale import check_target_scale
 from genpoint3d.train.data.apply_run_settings import apply_run_settings
 from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.learn import learn
@@ -46,8 +29,7 @@ def train(settings: Settings):
     clips = split_clips(settings.cache, settings.val_frac, settings.seed)
     clips = apply_run_settings(clips, settings, hardware)
     loaders = Loaders(clips, settings)
-    check_target_scale(loaders, settings)
-    model = build_model(settings, clips.feat_dim, clips.has_feats)
+    model = build_model(settings, clips.feat_dim)
     model = set_up_model(model, settings, hardware)
     optimiser = Optimiser(model, settings, hardware)
     judging = validation_settings(settings, hardware)

@@ -1,7 +1,8 @@
 """Check the visibility head: does it know when it can see the point?"""
 
+import torch
+
 from genpoint3d.train.score.Prediction import Prediction
-from genpoint3d.train.tools.matching import per_clip
 from genpoint3d.train.tools.visibility import visible_target
 
 
@@ -26,3 +27,8 @@ def visibility_scores(prediction: Prediction) -> dict:
     return {"vis_acc": right.flatten(1).mean(1),
             "vis_acc_hidden": per_clip(right, ~vis & observed),
             "vis_acc_visible": per_clip(right, vis & observed)}
+
+
+def per_clip(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    """(B, T, N) values -> (B,) mean over each clip's valid entries; NaN for none."""
+    return (x * valid).flatten(1).sum(1) / valid.flatten(1).sum(1)

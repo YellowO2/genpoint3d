@@ -9,21 +9,13 @@ import torch
 class ScoreSettings:
     device: torch.device
     amp: bool = False
-    method: str = "flow"          # "flow" samples, "regress" refines
-    steps: int = 50               # flow: Euler steps from noise to tracks
-    refine_iters: int = 4         # regress: corrections to the first guess
-    param: str = "position"       # regress: what a correction means, as trained
-    carry: bool = False           # regress: frames past a moving horizon restart from it
-    window: int = 0               # regress: frames tracked at a time, 0 = the whole clip
-    overlap: int = 0              # regress: frames each window shares with the one before
-    anchor_frame0: bool = False   # hold frame 0 at its known position
-    loss_type: str = "l2"         # the objective val_loss is measured by
+    refine_iters: int = 4         # rounds forward, without a schedule
+    window: int = 0               # frames tracked at a time, 0 = the whole clip
+    overlap: int = 0              # frames each window shares with the one before
+    schedule: str = ""            # the sweeps over the windows, e.g. "fbfb"
     space: str = "3d"             # "2d" scores the projections in pixels
     oracle_axis: str = ""         # "x", "y" or "z": that channel set to the truth
     scaling: str = "median"       # the protocol's global rescale, or "none"
     min_motion_px: float = 0.0    # score only points that move more than this
     cutoff: int = 0               # frames from here on get no image; 0 = none
-    samples: int = 1              # flow with a cutoff: best of this many forecasts
     hide_hidden: bool = False     # blank each point's image where it is truly hidden
-    support: int = 0              # regress: an S x S grid of helper points tracked alongside
-    schedule: str = ""            # regress in windows: the sweeps, e.g. "fbfb"

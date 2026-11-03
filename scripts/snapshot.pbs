@@ -5,7 +5,7 @@
 # forecast from 5.
 #
 #   qsub -v MODE=save scripts/snapshot.pbs      # before
-#   qsub -v MODE=check scripts/snapshot.pbs     # after
+#   qsub -v MODE=check scripts/snapshot.pbs     # after, with one training step each
 #
 #PBS -N snapshot
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
@@ -32,4 +32,10 @@ for C in 0 5; do
   python scripts/snapshot.py --ckpt outputs/fzN_scene_points_any_frame/best.pt --cache $ROOT/fall_test/val \
     --frames-cache $ROOT/cache/kubric_movi48_frames384 --clips 4 --cutoff $C $(flag fzN_c$C) 2>&1 | grep -v "Warn\|warn"
 done
+if [ "$MODE" = check ]; then
+  python scripts/snapshot.py --ckpt outputs/fyT_dense_reference/best.pt --cache $ROOT/fit_check/std_fyP_0/val \
+    --frames-cache $ROOT/cache/kubric_frames384 --train-against $S/train_fyT.pt 2>&1 | grep -v "Warn\|warn"
+  python scripts/snapshot.py --ckpt outputs/fzN_scene_points_any_frame/best.pt --cache $ROOT/fall_test/val \
+    --frames-cache $ROOT/cache/kubric_movi48_frames384 --train-against $S/train_fzN.pt 2>&1 | grep -v "Warn\|warn"
+fi
 echo "=== SNAPSHOT $MODE DONE ==="
