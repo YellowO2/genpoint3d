@@ -25,7 +25,7 @@ if [ ! -d $D/cache ]; then
   scratch=$(mktemp -d -p ${TMPDIR:-/tmp} kubric.XXXX)
   apptainer exec --nv --bind $ROOT --pwd $ROOT/genpoint3d $ROOT/containers/kubruntu.sif \
     python3 $ROOT/genpoint3d/scripts/kubric_movi_tracks.py --job-dir $D/raw/000000 --scratch_dir $scratch \
-    --seed $SEED --resolution 256 --frame_end 48 --drop_test --samples_per_pixel 32 \
+    --seed $SEED --resolution 256 --frame_end 48 --drop_test --samples_per_pixel 32 --tracks 8192 \
     --min_num_static_objects 0 --max_num_static_objects 0 --min_num_dynamic_objects 0 \
     --max_num_dynamic_objects 0 --min_num_rolling_objects 0 --max_num_rolling_objects 0
   rm -rf $scratch
