@@ -51,18 +51,24 @@ with each other, so a turning surface is never seen turning as a whole.
    frame and a frame before a point was first seen all get no image and are
    carried by the rest of the scene (`--hidden-blank`).
 3. Two passes over the clip's windows, with an input saying which way time
-   runs: forward, then backward, so later frames inform earlier ones (late
-   points get their past) without a window large enough to hold both. Four
-   refinement rounds a window in all: forward round 1 matches every point,
-   makes the large jump and predicts visibility; forward round 2 refines with
-   hidden points blanked; backward round 1 fills the past and refines with
-   what came later; backward round 2 polishes. Trained on clips run both ways,
+   runs, alternating forward, back, forward, back, one round a window each,
+   four in all: each sweep starts from what the one before left, so later
+   frames inform earlier ones (late points get their past) twice, without a
+   window large enough to hold both. Forward 1 matches every point, makes the
+   large jump and predicts visibility; back 1 fills late points' past and
+   brings later evidence; forward 2 refines with hidden points blanked; back 2
+   polishes. Trained on clips run both ways,
    the direction input telling the physics apart (a bounce loses height
    forward and gains it backward).
 4. Training data: Kubric clips longer and with more turning (MOVi's own worker,
    a spin at each throw, rolling objects, 48-96 frames; `scripts/kubric_movi*`),
    a portion of PointOdyssey (long clips, people and animals, real camera
    paths), mixed with the current Kubric.
+
+5. Depth: true depth while the design is tested; then Depth Anything 3's in
+   training too (depth as noisy evidence, as on real video); then the scene
+   points' 3D positions refined jointly across frames, structure from motion
+   style, each frame's depth one piece of evidence.
 
 ## Still to settle
 
