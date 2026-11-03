@@ -8,18 +8,13 @@ forecast, the forecast given frames before --cutoff only. Up is the clip's own
 """
 
 import argparse
-from pathlib import Path
-
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.CachedClip import CachedClip
-from genpoint3d.train.Settings import Settings
-from genpoint3d.train.data.ClipDataset import ClipDataset
-from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.score.Predictor import Predictor
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
 
 p = argparse.ArgumentParser()
@@ -29,24 +24,12 @@ p.add_argument("--frames-cache", required=True)
 p.add_argument("--cutoff", type=int, default=2)
 args = p.parse_args()
 
-ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-targs = ckpt["args"]
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-clips = sorted(Path(args.cache).glob("*.pt"))
-level = bool(targs.get("level", 0))
-ds = ClipDataset(clips, 3000, resample=False, norm_mode=targs.get("norm_mode", "median"),
-                 target=targs.get("target", "displacement"), fix_idcard=bool(targs.get("fix_idcard", 0)),
-                 frames=Path(args.frames_cache), features=True, depth=True, level=level,
-                 query_before=args.cutoff)
-first = torch.load(clips[0], weights_only=False, mmap=True)
-model = build_model(Settings(**targs), first["feat_dim"], first["context"] is not None).to(dev)
-model.load_state_dict(ckpt["model"])
-predictor = Predictor(model, ScoreSettings(
-    device=dev, amp=dev.type == "cuda", anchor_frame0=bool(targs.get("anchor_frame0", 0)),
-    loss_type=targs.get("loss_type", "l21"), method=targs.get("method", "regress"),
-    refine_iters=targs.get("refine_iters", 4), param=targs.get("param", "position"),
-    window=targs.get("window", 0), overlap=targs.get("overlap", 0),
-    schedule=targs.get("schedule", ""), cutoff=args.cutoff))
+run = Run.load(args.ckpt, dev)
+ds = run.dataset(args.cache, args.frames_cache, points=3000, query_before=args.cutoff)
+level = bool(run.settings.level)
+predictor = Predictor(run.model, run.judging(dev, cutoff=args.cutoff))
+first = torch.load(ds.clips[0], weights_only=False, mmap=True)
 up_clip = CachedClip.from_dict(first).up.float()
 up = torch.tensor([0.0, -1.0, 0.0]) if level else up_clip / up_clip.norm()
 with torch.no_grad():

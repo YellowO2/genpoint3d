@@ -14,12 +14,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.Hardware import Hardware
-from genpoint3d.train.Settings import Settings
-from genpoint3d.train.data.ClipDataset import ClipDataset
 from genpoint3d.train.learn import learn
-from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.score.Predictor import Predictor
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.Run import Run
 
 p = argparse.ArgumentParser()
 p.add_argument("--ckpt", required=True)
@@ -32,18 +29,13 @@ p.add_argument("--against", default=None)
 p.add_argument("--train-against", default=None)
 args = p.parse_args()
 
-ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-targs = ckpt["args"]
-settings = Settings(**{"schedule": "", **targs})
 dev = torch.device("cuda")
+run = Run.load(args.ckpt, dev)
+model, settings = run.model, run.settings
 clips = sorted(Path(args.cache).glob("*.pt"))[: args.clips]
-level = bool(targs.get("level", 0))
-first = torch.load(clips[0], weights_only=False, mmap=True)
-model = build_model(settings, first["feat_dim"]).to(dev)
-model.load_state_dict(ckpt["model"])
 
 if args.train_against:
-    ds = ClipDataset(clips[:1], targs["points"], resample=False, frames=Path(args.frames_cache), level=level)
+    ds = run.dataset(clips[:1], args.frames_cache)
     model.train()
     torch.manual_seed(0)
     losses = learn(model, next(iter(DataLoader(ds, batch_size=1))), settings, Hardware(dev, True))
@@ -57,11 +49,8 @@ if args.train_against:
           f" -> {'SAME' if rel < 1e-3 and set(grads) == set(ref['grads']) else 'CHANGED'}")
     raise SystemExit
 
-ds = ClipDataset(clips, targs["points"], resample=False, frames=Path(args.frames_cache), level=level,
-                 query_before=args.cutoff)
-predictor = Predictor(model, ScoreSettings(
-    device=dev, amp=True, refine_iters=targs.get("refine_iters", 4), window=targs.get("window", 0),
-    overlap=targs.get("overlap", 0), schedule=targs.get("schedule", ""), cutoff=args.cutoff))
+ds = run.dataset(clips, args.frames_cache, query_before=args.cutoff)
+predictor = Predictor(model, run.judging(dev, cutoff=args.cutoff))
 out = []
 torch.manual_seed(0)
 with torch.no_grad():

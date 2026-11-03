@@ -24,11 +24,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.train.Settings import Settings
-from genpoint3d.train.data.ClipDataset import ClipDataset
-from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.score.Predictor import Predictor
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
 
 p = argparse.ArgumentParser()
@@ -42,22 +39,11 @@ p.add_argument("--hide-hidden", action="store_true",
                     "no match rather than a wrong one")
 args = p.parse_args()
 
-ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-targs = ckpt["args"]
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-clips = sorted(Path(args.cache).glob("*.pt"))
-ds = ClipDataset(clips, 1000, resample=False, norm_mode=targs.get("norm_mode", "median"),
-                 target=targs.get("target", "displacement"), fix_idcard=bool(targs.get("fix_idcard", 0)),
-                 frames=Path(args.frames_cache), features=True, depth=True)
-first = torch.load(clips[0], weights_only=False, mmap=True)
-model = build_model(Settings(**targs), first["feat_dim"], first["context"] is not None).to(dev)
-model.load_state_dict(ckpt["model"])
-predictor = Predictor(model, ScoreSettings(
-    device=dev, steps=50, amp=dev.type == "cuda", anchor_frame0=bool(targs.get("anchor_frame0", 0)),
-    loss_type=targs.get("loss_type", "l21"), method=targs.get("method", "regress"),
-    refine_iters=targs.get("refine_iters", 4), param=targs.get("param", "position"),
-    carry=bool(targs.get("carry", 0)), window=targs.get("window", 0), overlap=targs.get("overlap", 0),
-    schedule=targs.get("schedule", ""), hide_hidden=args.hide_hidden))
+run = Run.load(args.ckpt, dev)
+ds = run.dataset(args.cache, args.frames_cache, points=1000)
+clips = ds.clips
+predictor = Predictor(run.model, run.judging(dev, hide_hidden=args.hide_hidden))
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():

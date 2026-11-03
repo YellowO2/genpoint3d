@@ -1,16 +1,7 @@
-"""
-Score a trained checkpoint on a cache. No training, no checkpoint selection.
+"""Score a trained checkpoint on every clip of a cache, with no training and no
+checkpoint selection: the number to report for a held-out test set.
 
-This is what a held-out TEST set is for. The val split inside training picks
-`best.pt`, so its APD is mildly optimistic -- it is the score of whichever
-checkpoint happened to suit those exact clips. A set that is never used to
-choose anything does not have that problem, and its number is the one to report.
-
-Sequences 3500+ were downloaded separately for this and have never been seen by
-training.
-
-Run:  python scripts/evaluate.py --ckpt outputs/run3493/best.pt \
-                                 --cache ~/scratch/cache/kubric_test
+Run:  python scripts/evaluate.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
 """
 
 import argparse
@@ -22,215 +13,53 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.CachedClip import CachedClip
-from genpoint3d.train.Settings import Settings
-from genpoint3d.train.data.ClipDataset import ClipDataset
-from genpoint3d.train.model.build_model import build_model
-from genpoint3d.train.score.Predictor import EVAL_SEED
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.main import score
-from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres
-from genpoint3d.train.tools.flow import sample as flow_sample
-from genpoint3d.train.tools.matching import MATCH_KEYS
-from genpoint3d.train.tools.metrics import (HIDDEN_KEYS, appearance_change, change_table, clip_mean,
-                                            error_and_motion, motion_px, motion_table,
-                                            tapvid3d_metrics)
+from genpoint3d.train.tools.batch import fine_inputs, known_frame0, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, error_and_motion, motion_px, motion_table, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 
 @torch.no_grad()
-def per_frame_apd(model, loader, device, steps: int, amp: bool,
-                  anchor_frame0: bool = False, scaling: str = "median",
-                  method: str = "flow", refine_iters: int = 4,
-                  param: str = "position", carry: bool = False, window: int = 0,
-                  overlap: int = 0, schedule: str = "") -> list[float]:
-    """APD for each frame index separately: APD3D over every visible point
-    that moves (more than 4 px), with no rescale -- the points the tracking
-    is about, and where it falls off through the clip.
-
-    The model is handed frame 0's true position as `anchor`, but still has to
-    generate frame 0 from noise like every other frame -- nothing pins it. If
-    frame 0 scores no better than the rest, the model is failing to reproduce a
-    position it was given, and clamping it during sampling is worth doing. If
-    frame 0 is clearly the best and the score decays with time, the error is
-    accumulating drift instead and clamping would not address it.
-
-    Seeded like `score()`, so on the same loader these are the frames of the
-    very samples it scores. A mean over clips; a clip with no visible point in
-    a frame is left out of that frame.
-    """
-    model.eval()
-    vals, within, errs, disps, by_round, turns, scales = None, {}, [], [], {}, [], []
-    gen = torch.Generator(device=device).manual_seed(EVAL_SEED)
+def per_frame_apd(run: Run, loader, device) -> list[float]:
+    """APD by frame over the visible points that move more than 4 px, every
+    frame given its image, with no rescale; and printed, every seen point's
+    error against how far it has moved."""
+    model, s = run.model, run.settings
+    amp = device.type == "cuda"
+    vals, errs, disps = None, [], []
     for batch in loader:
-        b = to_device(batch, device, amp)
-        traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-        ctx, idc, pxyz = b["context"], b["id_card"], b["patch_xyz"]
-        vm = torch.ones(traj.shape[:2], dtype=torch.bool, device=device) if ctx is not None else None
-        kx0 = known_frame0(b) if anchor_frame0 else None
-        cond = dict(context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,
-                    **fine_inputs(model, b, amp))
-        rounds = []
+        b = to_device(batch, device)
+        traj, vis = b["traj"], b["visibility"]
+        cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
+                    patch_xyz=b["patch_xyz"], **fine_inputs(model, b, amp))
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            if method == "regress":
-                pred = refine(model, anchor, num_frames=traj.shape[1],
-                              iters=refine_iters, known_x0=kx0, param=param,
-                              carry=carry, window=window, overlap=overlap, rounds=rounds,
-                              schedule=schedule, **cond)
-            else:
-                pred = flow_sample(model, anchor, num_frames=traj.shape[1], steps=steps,
-                                   generator=gen, known_x0=kx0, **cond)
+            pred, _ = refine(model, b["anchor"], traj.shape[1], known_frame0(b), iters=s.refine_iters,
+                             window=s.window, overlap=s.overlap, schedule=s.schedule, **cond)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
-
-        if vals is None:
-            vals = [[] for _ in range(traj.shape[1])]
-        # How well each query's spot in frame 0 can be pinned down: the
-        # Shi-Tomasi score, the smaller eigenvalue of the image gradients'
-        # structure tensor over a 9 x 9 patch. High at a corner or a
-        # pattern; low on a plain surface and along a plain edge, where many
-        # nearby spots look alike (the aperture problem).
-        corner = None
-        if b["frames"] is not None and "fine_proj" in cond:
-            g = b["frames"][:, 0].float().mean(-1)                          # (B, H, W)
-            ix = torch.nn.functional.pad(g[:, :, 1:] - g[:, :, :-1], (0, 1))
-            iy = torch.nn.functional.pad(g[:, 1:] - g[:, :-1], (0, 0, 0, 1))
-            box = lambda a: torch.nn.functional.avg_pool2d(a[:, None], 9, 1, 4)[:, 0]
-            sxx, syy, sxy = box(ix * ix), box(iy * iy), box(ix * iy)
-            lmin = (sxx + syy) / 2 - (((sxx - syy) / 2) ** 2 + sxy ** 2).sqrt()
-            from genpoint3d.train.tools.camera import project
-            uv0, _ = project(anchor.float()[:, None], cond["fine_proj"][:, :1].float())
-            corner = torch.nn.functional.grid_sample(lmin[:, None], 2 * uv0 - 1,
-                                                     align_corners=False)[:, 0, 0]   # (B, N)
         e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
-        errs.append(e); disps.append(d)
-        # The same (point, frame)s `error_and_motion` keeps.
-        a, s = appearance_change(gt_m, b["extrinsics"])
-        keep = vis.bool().clone()
-        keep[:, 0] = False
-        turns.append(a[keep].cpu()); scales.append(s[keep].float().cpu())
-        for i, r in enumerate(rounds):
-            er, _ = error_and_motion(to_metres(r.float(), b), gt_m, vis,
-                                     b["intrinsics_256"], b["extrinsics"])
-            by_round.setdefault(i, []).append(er)
-        motion = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"])
-        moving = motion > 4
-        still_3d = (gt_m - gt_m[:, :1]).norm(dim=-1).amax(1) < 1e-3
-        seen = vis.bool() & moving[:, None]
+        errs.append(e)
+        disps.append(d)
+        seen = vis.bool() & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4)[:, None]
+        vals = vals or [[] for _ in range(traj.shape[1])]
         for t in range(traj.shape[1]):
-            # One frame at a time, so each score is that frame's alone.
-            m = tapvid3d_metrics(
-                pred_m[:, t : t + 1], gt_m[:, t : t + 1], seen[:, t : t + 1],
-                b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
-                scaling="none", per_clip=True,
-            )
+            m = tapvid3d_metrics(pred_m[:, t:t + 1], gt_m[:, t:t + 1], seen[:, t:t + 1],
+                                 b["intrinsics_256"][:, t:t + 1], b["extrinsics"][:, t:t + 1],
+                                 scaling="none", per_clip=True)
             vals[t].append(m["average_pts_within_thresh"].cpu())
-            for th in (1, 4, 16):
-                within.setdefault((t, th), []).append(m[f"pts_within_{th}"].cpu())
-            # Moving points split at this batch's median corner score.
-            if corner is not None:
-                c = corner.masked_fill(~moving, float("nan"))
-                med = c.nanmedian(dim=1, keepdim=True).values
-                for part, keep in (("plain", c < med), ("corner", c >= med)):
-                    mk = tapvid3d_metrics(
-                        pred_m[:, t : t + 1], gt_m[:, t : t + 1], seen[:, t : t + 1] & keep[:, None],
-                        b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
-                        scaling="none", per_clip=True,
-                    )
-                    for th in (1, 4, 16):
-                        within.setdefault((part, t, th), []).append(mk[f"pts_within_{th}"].cpu())
-            # How much of the true motion the prediction covers: its length
-            # against the truth's, and its part along the truth's direction.
-            # Under 1 is a prediction that stops short.
-            d_gt = (gt_m[:, t] - gt_m[:, 0])[seen[:, t]]
-            d_pr = (pred_m[:, t] - gt_m[:, 0])[seen[:, t]]
-            if len(d_gt):
-                n2 = d_gt.norm(dim=-1).sum().clamp_min(1e-9)
-                within.setdefault(("len", t), []).append(float(d_pr.norm(dim=-1).sum() / n2))
-                along = (d_pr * d_gt).sum(-1) / d_gt.norm(dim=-1).clamp_min(1e-9)
-                within.setdefault(("along", t), []).append(float(along.sum() / n2))
-            # The same for the points that barely move on screen.
-            still = vis.bool() & ~moving[:, None]
-            ms = tapvid3d_metrics(
-                pred_m[:, t : t + 1], gt_m[:, t : t + 1], still[:, t : t + 1],
-                b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
-                scaling="none", per_clip=True,
-            )
-            for th in (1, 4, 16):
-                within.setdefault(("still", t, th), []).append(ms[f"pts_within_{th}"].cpu())
-            # And the points that truly do not move: the same 3D position in
-            # every frame (to a millimetre) and under half a pixel on screen.
-            frozen = vis.bool() & (still_3d & (motion < 0.5))[:, None]
-            mf = tapvid3d_metrics(
-                pred_m[:, t : t + 1], gt_m[:, t : t + 1], frozen[:, t : t + 1],
-                b["intrinsics_256"][:, t : t + 1], b["extrinsics"][:, t : t + 1],
-                scaling="none", per_clip=True,
-            )
-            for th in (1, 4, 16):
-                within.setdefault(("frozen", t, th), []).append(mf[f"pts_within_{th}"].cpu())
-    model.train()
-    # Whether a falling score is points drifting off by a few pixels (16 px
-    # holds while 1 px falls) or points being lost (16 px falls too).
     print("\n    every seen point after frame 0: error against how far it has moved")
     print(motion_table(torch.cat(errs), torch.cat(disps)))
-    # Whether a point that has moved far is off from the start and the rounds
-    # cannot pull it in (the matcher never sees it), or the rounds get it close
-    # and stall (the matcher sees it and reads it imprecisely).
-    for i, er in by_round.items():
-        print(f"\n    the same, {'the starting guess' if i == 0 else f'after round {i}'}")
-        print(motion_table(torch.cat(er), torch.cat(disps)))
-    # Whether a point that has turned or changed size since frame 0 no longer
-    # matches its frame-0 look: at a fixed distance moved, worse when it has.
-    err, disp, turn = torch.cat(errs), torch.cat(disps), torch.cat(turns)
-    known = ~turn.isnan()
-    print(f"\n    error / moved by how far the point turned since frame 0, degrees"
-          f" ({known.float().mean():.0%} of seen points have enough rigid companions to tell)")
-    print(change_table(err[known], disp[known], turn[known], (0, 5, 15, 45, 180), "turned"))
-    print("\n    error / moved by how much nearer or further it is, |log(depth / frame-0 depth)|")
-    print(change_table(err, disp, torch.cat(scales), (0, 0.05, 0.15, 0.4, 10), "depth"))
-    if ("plain", 1, 1) in within:
-        print("\n    seen moving points within 1 / 4 / 16 px, by frame: plain half | corner-like half")
-        for t in range(len(vals)):
-            print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[('plain', t, th)]):.3f}" for th in (1, 4, 16))
-                  + "   |  " + "  ".join(f"{clip_mean(within[('corner', t, th)]):.3f}" for th in (1, 4, 16)))
-    print("\n    seen moving points: predicted motion / true motion, by frame (length, along the truth)")
-    for t in range(1, len(vals)):
-        ls, al = within.get(("len", t), []), within.get(("along", t), [])
-        if ls:
-            print(f"    frame {t:2d}  {sum(ls) / len(ls):.3f}  {sum(al) / len(al):.3f}")
-    print("\n    seen points within 1 / 4 / 16 px, by frame: moving | barely moving (< 4 px)"
-          " | not moving at all")
-    for t in range(len(vals)):
-        print(f"    frame {t:2d}  " + "  ".join(f"{clip_mean(within[(t, th)]):.3f}" for th in (1, 4, 16))
-              + "   |  " + "  ".join(f"{clip_mean(within[('still', t, th)]):.3f}" for th in (1, 4, 16))
-              + "   |  " + "  ".join(f"{clip_mean(within[('frozen', t, th)]):.3f}" for th in (1, 4, 16)))
     return [clip_mean(v) for v in vals]
 
 
-# Each ablation destroys ONE thing the model is supposed to rely on. A score
-# that does not move is a pathway the model is not using.
-#   swap-features   right clip, another clip's appearance
-#   noise-features  appearance replaced by noise of the same mean and std
-#   shuffle-pos     right patches, scrambled 3D positions
-#   swap-id         another clip's query ID cards
-#   blind           no features at all -- the forecasting null embedding
-#   swap-frames     another clip's RGB frames, for the relative finder's CNN
-#   no-fine         no RGB frames: the relative finder is skipped
-#   hide-hidden     every image input blanked for each point on each frame
-#                   where it is truly hidden, as if it were a forecast frame
-# The first five are about DINOv3 and leave the frames alone; on a checkpoint
-# without the relative finder the next two change nothing. hide-hidden reads
-# the true visibility, so it is a diagnostic only: does the image of whatever
-# is in front pull a hidden point onto it?
-ABLATIONS = ("none", "swap-features", "noise-features", "shuffle-pos", "swap-id", "blind",
-             "swap-frames", "no-fine", "hide-hidden")
+# Each ablation destroys one input; a score that does not move names a pathway
+# the model ignores. hide-hidden reads the truth: each point blanked wherever
+# it is truly hidden, as in a forecast frame.
+ABLATIONS = ("swap-features", "noise-features", "shuffle-pos", "swap-id", "swap-frames", "hide-hidden")
 
 
 class Ablated:
-    """Wraps a loader and corrupts each batch on the way out.
-
-    `score()` moves each batch itself, so this hands back CPU batches of the
-    same shapes and dtypes and nothing downstream needs to know.
-    """
+    """A loader whose CPU batches come out with one input corrupted."""
 
     def __init__(self, loader, kind: str) -> None:
         self.loader, self.kind = loader, kind
@@ -241,272 +70,105 @@ class Ablated:
     def __iter__(self):
         for b in self.loader:
             b = dict(b)
-            ctx, pxyz, idc = b["context"], b["patch_xyz"], b["id_card"]
+            ctx = b["context"]
             if self.kind == "swap-features":
                 b["context"] = ctx.roll(1, 0)          # needs batch > 1
             elif self.kind == "noise-features":
-                b["context"] = torch.randn_like(ctx.float()).to(ctx.dtype) \
-                    * ctx.float().std() + ctx.float().mean()
+                b["context"] = (torch.randn_like(ctx.float()) * ctx.float().std() + ctx.float().mean()).to(ctx.dtype)
             elif self.kind == "shuffle-pos":
-                b["patch_xyz"] = pxyz[:, :, torch.randperm(pxyz.shape[2])]
+                b["patch_xyz"] = b["patch_xyz"][:, :, torch.randperm(b["patch_xyz"].shape[2])]
             elif self.kind == "swap-id":
-                b["id_card"] = idc.roll(1, 0)
-            elif self.kind == "blind":
-                # to_device turns an empty tensor into None, and the model skips
-                # cross-attention entirely -- no features, no positions.
-                b["context"] = b["patch_xyz"] = b["id_card"] = torch.zeros(0)
+                b["id_card"] = b["id_card"].roll(1, 0)
             elif self.kind == "swap-frames":
-                # with their depth: another clip's frames, whole
-                b["frames"] = b["frames"].roll(1, 0)
-                if b["depth"].numel():
-                    b["depth"] = b["depth"].roll(1, 0)
-            elif self.kind == "no-fine":
-                b["frames"] = b["depth"] = torch.zeros(0)
+                b["frames"], b["depth"] = b["frames"].roll(1, 0), b["depth"].roll(1, 0)
             yield b
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="best.pt or ckpt.pt from a run")
-    p.add_argument("--cache", required=True, help="cache DIRECTORY to score")
-    p.add_argument("--flow-cache", default=None,
-                   help="optical flow of --cache's clips (scripts/cache_flow.py), for a --flow-patch run")
-    p.add_argument("--frames-cache", default=None,
-                   help="--fine checkpoints only: RGB frames of --cache's clips,"
-                        " from scripts/cache_frames.py at the checkpoint's --fine-res")
+    p.add_argument("--cache", required=True, help="cache directory to score, every clip")
+    p.add_argument("--frames-cache", required=True, help="RGB and depth of --cache's clips")
     p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--points", type=int, default=None,
-                   help="default: whatever the checkpoint trained with")
-    p.add_argument("--sample-steps", type=int, default=50,
-                   help="Euler steps when sampling; the published protocol is not"
-                        " prescriptive, so report whatever you use")
-    p.add_argument("--refine-iters", type=int, default=None,
-                   help="regress checkpoints only: refinement iterations. "
-                        "default: whatever the checkpoint trained with. More "
-                        "than that is a test of whether extra looks help")
+    p.add_argument("--points", type=int, default=None, help="default: the run's own")
     p.add_argument("--out", default=None, help="write the metrics as JSON here")
     p.add_argument("--ablate", nargs="*", default=None, choices=ABLATIONS,
-                   help="also score with visual inputs corrupted. A score that"
-                        " does not move names a pathway the model ignores."
-                        " No argument means all of them")
+                   help="also score with one input corrupted; no argument means all")
     p.add_argument("--space", default="3d", choices=["3d", "2d"],
-                   help="3d is APD3D, the reported metric. 2d projects both "
-                        "tracks into the image and scores the original TAP-Vid "
-                        "pixel thresholds, which is blind to depth error. The "
-                        "two together say whether depth is what we get wrong.")
+                   help="2d scores the projections at TAP-Vid's pixel thresholds, blind to depth")
     p.add_argument("--scaling", default="median", choices=["median", "none"],
-                   help="median is the TAPVid-3D protocol: the whole prediction "
-                        "is multiplied by one factor so its median norm matches "
-                        "the truth, because monocular depth has no scale. We "
-                        "have metric depth, so that factor can only move a "
-                        "correct point. none scores the prediction as it is.")
+                   help="median: TAPVid-3D's one global rescale of the prediction")
     p.add_argument("--min-motion-px", type=float, default=0.0,
-                   help="score only points that move more than this many "
-                        "(back-projected) pixels from their start. A point that "
-                        "never moves is tracked perfectly by doing nothing, so "
-                        "an average dominated by them hides the tracking.")
+                   help="score only points that move more than this many pixels")
     p.add_argument("--oracle-axis", default="", choices=["", "x", "y", "z"],
-                   help="overwrite one channel of the PREDICTION with the truth "
-                        "before scoring. An error decomposition, not an input. "
-                        "Correcting any single axis removes part of the error "
-                        "budget, so this is only informative run on all three: "
-                        "depth is the problem only if z buys more than x and y.")
+                   help="that channel of the prediction set to the truth before scoring")
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
-                   help="forecast: frames C on get no image, and the observed"
-                        " (_obs) and forecast (_fut) frames are scored apart,"
-                        " beside the stop/cv baselines from the true past and"
-                        " the own-stop one from the model's frame C-1. 0 = off")
-    p.add_argument("--samples", type=int, default=1, metavar="K",
-                   help="flow with --eval-cutoff: also score the oracle best of"
-                        " K forecasts (_fut_bestK). Regress is deterministic"
-                        " and ignores this")
-    p.add_argument("--fine-weights", default=None,
-                   help="diagnostic: after loading the checkpoint, put these weights "
-                        "into its finder (a file --fine-init takes)")
-    p.add_argument("--support", type=int, default=0, metavar="S",
-                   help="regress, CNN-only models: also track an S x S grid of "
-                        "helper points over frame 0 and score the queries only "
-                        "(TAPIP3D's test-time support grid uses 16)")
-    p.add_argument("--per-frame", action="store_true",
-                   help="also report APD per frame index, which separates a bad"
-                        " start from accumulating drift")
+                   help="frames C on get no image, observed (_obs) and forecast (_fut) scored apart")
+    p.add_argument("--per-frame", action="store_true", help="also APD by frame, every frame seen")
     args = p.parse_args()
-    if args.eval_cutoff == 1 or args.eval_cutoff < 0 or args.samples < 1:
-        p.error("--eval-cutoff is 0 (off) or at least 2, and --samples at least 1")
+    if args.eval_cutoff == 1 or args.eval_cutoff < 0:
+        p.error("--eval-cutoff is 0 (off) or at least 2")
 
-    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    targs = ckpt["args"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    amp = device.type == "cuda" and torch.cuda.is_bf16_supported()
-
-    # Every clip in the cache is the test set. split() is not reused here: it
-    # always holds back at least one clip for validation, which is right for
-    # training and would silently drop a test clip.
-    clips = sorted(Path(args.cache).glob("*.pt"))
-    if not clips:
-        raise SystemExit(f"no cached clips in {args.cache}")
-    probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False, mmap=True))
-    feat_dim, has_feats = probe.feat_dim, probe.context is not None
-    points = args.points or targs["points"]
-    # Absent means a checkpoint from before there was a second method.
-    method = targs.get("method", "flow")
-    refine_iters = args.refine_iters or targs.get("refine_iters", 4)
-    # Absent means a checkpoint from before corrections could mean a speed.
-    param = targs.get("param", "position")
-    carry = bool(targs.get("carry", 0))
-    window, overlap = targs.get("window", 0), targs.get("overlap", 0)
-    print(f"{len(clips)} test clips | {device} | amp {'bf16' if amp else 'off'}"
-          f" | points {points} | "
-          + (f"{refine_iters} refinement iterations" if method == "regress"
-             else f"{args.sample_steps} sampling steps"), flush=True)
-
-    model = build_model(Settings(**targs), feat_dim, has_feats).to(device)
-    model.load_state_dict(ckpt["model"])
-    print(f"loaded step {ckpt['step']} from {args.ckpt}", flush=True)
-    if args.fine_weights:
-        # A diagnostic: the trained model with its finder put back to other
-        # weights (e.g. TAPIP3D's own), everything else as trained.
-        sd = torch.load(args.fine_weights, map_location="cpu")
-        before = {k: v.clone() for k, v in model.fine.state_dict().items() if k in sd}
-        missing, unexpected = model.fine.load_state_dict(sd, strict=False)
-        if unexpected:
-            raise ValueError(f"{args.fine_weights} does not fit this finder: {unexpected}")
-        drift = sum((before[k].float() - sd[k].float().to(before[k].device)).norm() ** 2 for k in before) ** 0.5
-        size = sum(sd[k].float().norm() ** 2 for k in before) ** 0.5
-        print(f"finder weights replaced from {args.fine_weights}: the trained ones had moved "
-              f"{drift:.2f} from these (their size {size:.2f})", flush=True)
-
-    loader = DataLoader(
-        # resample=False: a test score must not change between runs.
-        # Every one of these changes what the numbers MEAN. Defaulting any of
-        # them scores the model in a space it was not trained in, and the result
-        # is not a bad score but a meaningless one.
-        ClipDataset(clips, points, resample=False, level=bool(targs.get("level", 0)),
-                    query_before=args.eval_cutoff,
-                    norm_mode=targs.get("norm_mode", "median"),
-                    target=targs.get("target", "absolute"),
-                    # Absent means trained on the ID cards as they were cached.
-                    fix_idcard=bool(targs.get("fix_idcard", 0)),
-                    frames=(ClipDataset.frames_dir(args.frames_cache, clips, targs.get("fine_res", 384),
-                                                   depth=bool(targs.get("fine_xyz", 0)))
-                            if targs.get("fine", 0) else None),
-                    features=bool(targs.get("dino", 1)),
-                    flow=Path(args.flow_cache) if targs.get("flow_patch", 0) else None,
-                    depth=bool(targs.get("fine_xyz", 0))),
-        batch_size=args.batch, shuffle=False, num_workers=4,
-    )
+    run = Run.load(args.ckpt, device)
+    ds = run.dataset(args.cache, args.frames_cache, points=args.points, query_before=args.eval_cutoff)
+    loader = DataLoader(ds, batch_size=args.batch, shuffle=False, num_workers=4)
+    print(f"{len(ds)} clips | {device} | points {ds.num_points} | step {run.step} of {args.ckpt}", flush=True)
 
     t0 = time.time()
-    anchor_frame0 = bool(targs.get("anchor_frame0", 0))
-    loss_type = targs.get("loss_type", "l21")  # training's default
-    print(f"scoring as trained: target {targs.get('target', 'absolute')}"
-          f" | norm {targs.get('norm_mode', 'median')}"
-          f" | anchor_frame0 {int(anchor_frame0)} | loss {loss_type}", flush=True)
-
-    per_frame = per_frame_apd(model, loader, device, args.sample_steps, amp,
-                              anchor_frame0, args.scaling, method,
-                              refine_iters, param, carry, window, overlap,
-                              targs.get("schedule", "")) if args.per_frame else None
-    # One set of scoring rules for the intact score and every ablation of it.
-    judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
-                            anchor_frame0=anchor_frame0, loss_type=loss_type,
-                            space=args.space, oracle_axis=args.oracle_axis,
-                            scaling=args.scaling, min_motion_px=args.min_motion_px,
-                            method=method, refine_iters=refine_iters, param=param, carry=carry,
-                            window=window, overlap=overlap,
-                            cutoff=args.eval_cutoff, samples=args.samples,
-                            support=args.support, schedule=targs.get("schedule", ""))
-    m = score(model, loader, judging, split="test")
+    per_frame = per_frame_apd(run, loader, device) if args.per_frame else None
+    judging = run.judging(device, cutoff=args.eval_cutoff, space=args.space, oracle_axis=args.oracle_axis,
+                          scaling=args.scaling, min_motion_px=args.min_motion_px)
+    m = score(run.model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 
-    for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac",
-              "disp_ratio", "disp_cos", *MATCH_KEYS):
+    for k in ("average_pts_within_thresh", "apd_static", "val_loss", "moving_frac", "disp_ratio", "disp_cos"):
         if k in m:
             print(f"  {k:<26} {m[k]:.4f}")
     if "moving_clips" in m:
-        print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(clips)}")
-    visible = [k for k in ("vis_acc", "vis_acc_hidden", "vis_acc_visible",
-                           "average_jaccard", "occlusion_accuracy") if k in m]
-    if visible:
-        print("\n  visibility head, right where it can and cannot see the point,"
-              " and AJ and OA on the observed frames:")
-        for k in visible:
-            print(f"  {k:<26} {m[k]:.4f}")
-    hidden = [k for k in HIDDEN_KEYS if k in m]
-    if hidden:
-        print("\n  hidden on the observed frames, occluded or out of the frame,"
-              " each beside the last-seen and constant-speed baselines:")
-        for k in hidden:
-            print(f"  {k:<30} {m[k]:.4f}")
-    forecast = [k for k in m if k.endswith("_obs") or "_fut" in k]
-    if forecast:
-        print(f"\n  forecast, frames {args.eval_cutoff}+ without images:")
-        for k in forecast:
-            print(f"  {k:<26} {m[k]:.4f}")
+        print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(ds)}")
+    groups = (("visibility head, and AJ and OA on the observed frames:",
+               [k for k in ("vis_acc", "vis_acc_hidden", "vis_acc_visible", "average_jaccard",
+                            "occlusion_accuracy") if k in m]),
+              ("hidden on the observed frames, beside the last-seen and constant-speed baselines:",
+               [k for k in HIDDEN_KEYS if k in m]),
+              (f"forecast, frames {args.eval_cutoff}+ without images:",
+               [k for k in m if k.endswith("_obs") or "_fut" in k]))
+    for title, keys in groups:
+        if keys:
+            print(f"\n  {title}")
+            for k in keys:
+                print(f"  {k:<30} {m[k]:.4f}")
     print()
     for t in (1, 2, 4, 8, 16):
         print(f"  pts_within_{t:<15} {m[f'pts_within_{t}']:.4f}")
 
     if per_frame is not None:
-        print("\n  APD by frame -- does error start at frame 0 or accumulate?")
-        if args.eval_cutoff:
-            print("    NOTE: per-frame APD always gives every frame its image;"
-                  " --eval-cutoff does NOT apply to it.")
-        if args.space != "3d" or args.min_motion_px or args.oracle_axis:
-            print("    NOTE: per-frame APD is always 3D, over all visible points,"
-                  " with no oracle axis.\n    --space, --min-motion-px and"
-                  " --oracle-axis do NOT apply to it; only --scaling does.")
+        print("\n  APD by frame, moving seen points, every frame with its image:")
         top = max((v for v in per_frame if v == v), default=0.0)
         for t, v in enumerate(per_frame):
-            # NaN where a frame has no moving point to score (a still scene).
             bar = "" if v != v else "#" * int(round(v / max(top, 1e-9) * 40))
             print(f"    frame {t:>2}  {v:.4f}  {bar}")
-        print(f"\n    frame 0 {per_frame[0]:.4f}  ->  frame {len(per_frame)-1}"
-              f" {per_frame[-1]:.4f}")
-        # Two separate questions, and comparing frames only answers the second.
-        if per_frame[0] < 0.5:
-            print(f"    frame 0 scores {per_frame[0]:.3f} despite being handed its"
-                  " own position as `anchor`, so pinning it is worth doing --"
-                  " every later frame inherits that error.")
-        if per_frame[-1] < 0.5 * per_frame[0]:
-            print("    the score also decays with time, so error accumulates"
-                  " during the rollout on top of any bad start.")
 
     if args.ablate is not None:
-        kinds = [k for k in (args.ablate or ABLATIONS) if k != "none"]
-        print("\n  Ablations -- APD with one visual input destroyed:\n")
+        print("\n  Ablations -- APD with one input destroyed:\n")
         print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
-        for kind in kinds:
-            # hide-hidden changes what the model is shown per point, which the
-            # batch alone cannot say, so it goes through the scoring rules.
-            a = (score(model, loader, replace(judging, hide_hidden=True), split=kind)
-                 if kind == "hide-hidden"
-                 else score(model, Ablated(loader, kind), judging, split=kind))
+        for kind in args.ablate or ABLATIONS:
+            a = (score(run.model, loader, replace(judging, hide_hidden=True), split=kind) if kind == "hide-hidden"
+                 else score(run.model, Ablated(loader, kind), judging, split=kind))
             apd = a["average_pts_within_thresh"]
-            print(f"    {kind:<16} {apd:>7.4f}"
-                  f" {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
+            print(f"    {kind:<16} {apd:>7.4f} {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
             m[f"ablate_{kind}"] = apd
             if kind == "hide-hidden":
-                # The point of this one is the hidden score, so print it too.
                 for k in HIDDEN_KEYS:
                     if k in a:
                         print(f"      {k:<30} {a[k]:.4f}  (intact {m.get(k, float('nan')):.4f})")
                         m[f"ablate_{kind}_{k}"] = a[k]
-        print("\n    ~1.00x means the model is not using that input at all.")
-        print(f"    For scale, the static baseline is {m['apd_static']:.4f}.")
-
-    if m["average_pts_within_thresh"] <= m["apd_static"]:
-        print("\n  APD is at or below the static baseline -- assuming the points"
-              " never move would score as well as this model.")
 
     if args.out:
-        Path(args.out).write_text(json.dumps(
-            {"ckpt": args.ckpt, "cache": args.cache, "step": ckpt["step"],
-             "sample_steps": args.sample_steps, "method": method,
-             "refine_iters": refine_iters, "clips": len(clips),
-             "eval_cutoff": args.eval_cutoff, "samples": args.samples, **m},
-            indent=2))
+        Path(args.out).write_text(json.dumps({"ckpt": args.ckpt, "cache": args.cache, "step": run.step,
+                                              "clips": len(ds), "eval_cutoff": args.eval_cutoff, **m}, indent=2))
         print(f"\nwrote {args.out}")
     return 0
 

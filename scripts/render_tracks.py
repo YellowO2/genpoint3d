@@ -2,8 +2,8 @@
 Watch a checkpoint track: its predictions drawn over the RGB frames, as mp4s.
 
 A visual sanity check beside the scores. The predictions are made exactly the
-way scoring makes them -- the same `Predictor`, the same val split, the same
-batch size, so the same noise -- and each clip's moving-point APD is printed,
+way scoring makes them -- the same `Predictor`, the same val split -- and
+each clip's moving-point APD is printed,
 so every video can be matched to a number.
 
 Per point, in each frame:
@@ -38,13 +38,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.CachedClip import CachedClip
-from genpoint3d.train.Settings import Settings
-from genpoint3d.train.data.ClipDataset import ClipDataset
 from genpoint3d.train.data.split_clips import split_clips
-from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.score.Predictor import Predictor
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
 from genpoint3d.train.tools.metrics import _project, _to_camera_t, motion_px, tapvid3d_metrics
 
@@ -209,7 +205,6 @@ def main() -> int:
                    help="draw tracking (red) against forecasting from frame C (green), no truth")
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="forecast: frames C on get no image, as in evaluate.py")
-    p.add_argument("--sample-steps", type=int, default=50)
     p.add_argument("--batch", type=int, default=None,
                    help="clips per batch; the run's own by default. 1 for clips with different numbers of points")
     p.add_argument("--out", required=True, help="directory for the mp4s and PNGs")
@@ -217,51 +212,24 @@ def main() -> int:
                    help="debug: draw the truth as the prediction; red must sit on green")
     args = p.parse_args()
 
-    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    targs = ckpt["args"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    amp = device.type == "cuda" and torch.cuda.is_bf16_supported()
-
-    # The trainer's own split, so "the first K val clips" are the clips its
-    # val APD was measured on.
-    split = split_clips(args.cache, targs.get("val_frac", 0.1), targs.get("seed", 0))
+    run = Run.load(args.ckpt, device)
+    rs = run.settings
+    # The trainer's own split, so "the first K val clips" are the ones its val APD scored.
     if args.clip:
         clips = [Path(args.cache) / f"{c}.pt" for c in args.clip]
     else:
-        clips = split.val[: args.clips]
-    method = targs.get("method", "flow")
-    fine, fine_xyz = targs.get("fine", 0), bool(targs.get("fine_xyz", 0))
-    # As many points as are drawn, not only as many as the run trained with:
-    # a clip's first points are often all of one object.
-    ds = ClipDataset(clips, max(targs["points"], args.points), resample=False,
-                     level=bool(targs.get("level", 0)), query_before=args.eval_cutoff,
-                     norm_mode=targs.get("norm_mode", "median"),
-                     target=targs.get("target", "absolute"),
-                     fix_idcard=bool(targs.get("fix_idcard", 0)),
-                     frames=(ClipDataset.frames_dir(args.frames_cache, clips,
-                                                    targs.get("fine_res", 384), depth=fine_xyz)
-                             if fine else None),
-                     features=bool(targs.get("dino", 1)), depth=fine_xyz)
-    # The trainer's val batch size: flow sampling draws its noise per batch,
-    # so this is what makes these the very samples the val APD scored.
-    loader = DataLoader(ds, batch_size=args.batch or targs.get("batch", 1), shuffle=False, num_workers=2)
-
-    model = build_model(Settings(**targs), split.feat_dim, split.has_feats).to(device)
-    model.load_state_dict(ckpt["model"])
-    judging = ScoreSettings(device=device, steps=args.sample_steps, amp=amp,
-                            anchor_frame0=bool(targs.get("anchor_frame0", 0)),
-                            loss_type=targs.get("loss_type", "l21"), method=method,
-                            refine_iters=targs.get("refine_iters", 4),
-                            param=targs.get("param", "position"),
-                            carry=bool(targs.get("carry", 0)), window=targs.get("window", 0),
-                            overlap=targs.get("overlap", 0), cutoff=args.eval_cutoff,
-                            schedule=targs.get("schedule", ""))
-    predictor = Predictor(model, judging)
+        clips = split_clips(args.cache, rs.val_frac, rs.seed).val[: args.clips]
+    # As many points as are drawn: a clip's first points are often all of one object.
+    ds = run.dataset(clips, args.frames_cache, points=max(rs.points, args.points), query_before=args.eval_cutoff)
+    loader = DataLoader(ds, batch_size=args.batch or rs.batch, shuffle=False, num_workers=2)
+    judging = run.judging(device, cutoff=args.eval_cutoff)
+    predictor = Predictor(run.model, judging)
     # The same model, the frames from C on blank: what it forecasts there.
-    forecaster = (Predictor(model, dataclasses.replace(judging, cutoff=args.forecast_from))
+    forecaster = (Predictor(run.model, dataclasses.replace(judging, cutoff=args.forecast_from))
                   if args.forecast_from else None)
-    print(f"step {ckpt['step']} of {args.ckpt} | {device} | {method} | {len(clips)} clips"
-          f" | drawing {args.points} of {targs['points']} points", flush=True)
+    print(f"step {run.step} of {args.ckpt} | {device} | {len(clips)} clips"
+          f" | drawing {args.points} of {rs.points} points", flush=True)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

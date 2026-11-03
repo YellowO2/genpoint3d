@@ -1,17 +1,11 @@
 #!/bin/bash
 # Score a checkpoint on the held-out TEST cache (sequences 3500+).
 #
-#   qsub -q normal -P personal-yhuang01 scripts/evaluate.pbs
-#   qsub -v CKPT=outputs/run3493/ckpt.pt -q normal -P personal-yhuang01 scripts/evaluate.pbs
-#   qsub -v CKPT=outputs/run4_adapter/best_8k.pt,ARGS=--ablate ... scripts/evaluate.pbs
-#
-# Needs a GPU: scoring runs the 50-step sampler for every clip. Under 2h and one
-# GPU routes to gdev, which usually starts quickly.
+#   qsub -v CKPT=outputs/RUN/best.pt,FRAMES=cache/kubric_test_frames384 scripts/evaluate.pbs
+#   qsub -v CKPT=...,FRAMES=...,CUTOFF=12,ARGS=--ablate scripts/evaluate.pbs
 #
 #PBS -N evaluate
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
-# 300 clips at batch 16 is ~19 batches of 50 sampling steps -- minutes, not
-# hours. Walltime is a cap, not a reservation.
 #PBS -l walltime=01:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
@@ -30,23 +24,17 @@ source $ROOT/venvs/fyp/bin/activate
 
 # best.pt was selected on the VAL split, so its val APD is mildly optimistic.
 # This cache chose nothing, which is what makes its number reportable.
-CKPT=${CKPT:-outputs/run3493/best.pt}
+CKPT=${CKPT:?}
 ARGS=${ARGS:-}
-# FRAMES=cache/kubric_test_frames384 (relative to ~/scratch) is the RGB frames
-# cache of the TEST clips, which a --fine 1 checkpoint needs:
-#   qsub -v SRC=cache/kubric_test,DST=cache/kubric_test_frames384,RAW=<test download> scripts/cache_frames.pbs
-FRAMES=${FRAMES:-}
-if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
+# FRAMES (relative to ~/scratch): the RGB and depth cache of the TEST clips.
+FRAMES=${FRAMES:?}
 # CUTOFF=12 forecasts: frames 12 on get no image, scored apart (_obs, _fut).
-# SAMPLES=5 with it also scores the oracle best of 5 flow forecasts.
 CUTOFF=${CUTOFF:-}
-SAMPLES=${SAMPLES:-}
 if [ -n "$CUTOFF" ]; then ARGS="--eval-cutoff $CUTOFF $ARGS"; fi
-if [ -n "$SAMPLES" ]; then ARGS="--samples $SAMPLES $ARGS"; fi
 
 python scripts/evaluate.py \
   --ckpt "$CKPT" --per-frame $ARGS \
-  --cache $ROOT/cache/kubric_test \
-  --out "$(dirname "$CKPT")/test_metrics${CUTOFF:+_c$CUTOFF}${SAMPLES:+_k$SAMPLES}.json"
+  --cache $ROOT/cache/kubric_test --frames-cache $ROOT/$FRAMES \
+  --out "$(dirname "$CKPT")/test_metrics${CUTOFF:+_c$CUTOFF}.json"
 
 echo "=== EVALUATE DONE ==="

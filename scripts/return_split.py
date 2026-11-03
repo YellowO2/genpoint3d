@@ -17,16 +17,12 @@ without the angle, which needs the surface's direction.
 """
 
 import argparse
-from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.train.Settings import Settings
-from genpoint3d.train.data.ClipDataset import ClipDataset
-from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.score.Predictor import Predictor
-from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
 from genpoint3d.train.tools.metrics import _to_camera_t, motion_px
 
@@ -37,22 +33,11 @@ p.add_argument("--frames-cache", required=True)
 p.add_argument("--points", type=int, default=256)
 args = p.parse_args()
 
-ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-targs = ckpt["args"]
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-clips = sorted(Path(args.cache).glob("*.pt"))
-ds = ClipDataset(clips, args.points, resample=False, norm_mode=targs.get("norm_mode", "median"),
-                 target=targs.get("target", "displacement"), fix_idcard=bool(targs.get("fix_idcard", 0)),
-                 frames=Path(args.frames_cache), features=True, depth=True)
-first = torch.load(clips[0], weights_only=False, mmap=True)
-model = build_model(Settings(**targs), first["feat_dim"], first["context"] is not None).to(dev)
-model.load_state_dict(ckpt["model"])
-predictor = Predictor(model, ScoreSettings(
-    device=dev, steps=50, amp=dev.type == "cuda", anchor_frame0=bool(targs.get("anchor_frame0", 0)),
-    loss_type=targs.get("loss_type", "l21"), method=targs.get("method", "regress"),
-    refine_iters=targs.get("refine_iters", 4), param=targs.get("param", "position"),
-    carry=bool(targs.get("carry", 0)), window=targs.get("window", 0), overlap=targs.get("overlap", 0),
-    schedule=targs.get("schedule", "")))
+run = Run.load(args.ckpt, dev)
+ds = run.dataset(args.cache, args.frames_cache, points=args.points)
+clips = ds.clips
+predictor = Predictor(run.model, run.judging(dev))
 names = ("always seen", "returned", "hidden")
 spans = ((1, 8), (8, 16), (16, 10_000))
 errs = {(n, s): [] for n in names for s in spans}

@@ -131,15 +131,13 @@ class _Round:
     alive: torch.Tensor             # (B, N)
 
 
-class _Sweeps:
+class Sweeps:
     """Every round of every window of every sweep, in order, as `_Round`s.
-    `whole` and `vis` then hold the clip's guess and each frame's last
-    visibility logits; `rounds`, if a list, gets the clip's guess before the
-    first round and after each."""
+    `whole`, `vis` and `groups` then hold the clip's guess, each frame's last
+    visibility logits and each point's last group vector."""
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, iters: int, schedule: str,
-                 window: int, overlap: int, known_x0: torch.Tensor, cond: dict,
-                 rounds: Optional[list] = None) -> None:
+                 window: int, overlap: int, known_x0: torch.Tensor, cond: dict) -> None:
         self.model, self.anchor, self.T, self.known_x0, self.cond = model, anchor, T, known_x0, cond
         self.plan = _schedule(iters, schedule)
         self.R = sum(n for _, n in self.plan)
@@ -148,13 +146,7 @@ class _Sweeps:
         self.whole = torch.zeros(B, T, N, 3, device=anchor.device)
         # Visibility so far: seen everywhere until a window has called it.
         self.vis = torch.full((B, T, N), 20.0, device=anchor.device)
-        self.rounds = rounds
-
-    def _record(self, i: int, g: torch.Tensor, start: int, end: int) -> None:
-        if self.rounds is not None:
-            if not self.rounds:
-                self.rounds.extend(self.whole.clone() for _ in range(self.R + 1))
-            self.rounds[i] = torch.cat([self.rounds[i][:, :start], g, self.rounds[i][:, end:]], dim=1)
+        self.groups = None
 
     def __iter__(self):
         model, anchor, T = self.model, self.anchor, self.T
@@ -171,8 +163,6 @@ class _Sweeps:
                 if not back:
                     self.whole = _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
-                if not back:
-                    self._record(0, g, start, end)
                 alive, at, inside = _window_points(self.cond, B, N, start, end, back, every=r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
                 c = _blank_hidden(self.cond, self.vis[:, start:end] if blank else None, start, end, T, N)
@@ -183,12 +173,12 @@ class _Sweeps:
                     if emb is not None:
                         groups = emb.detach() if groups is None else torch.where(alive[..., None], emb.detach(),
                                                                                  groups)
+                        self.groups = groups
                     if blank:
                         c = _blank_hidden(self.cond, logits, start, end, T, N)
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive)
                     g = _pin(g, self.known_x0, at, inside)
-                    self._record(i + 1, g.detach(), start, end)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 if logits is not None:
                     self.vis[:, start:end] = logits.detach()
@@ -265,7 +255,7 @@ def regress_loss(
     vectors' error against `groups`, and the visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
     at once (one round in memory) and the loss comes back detached."""
-    run = _Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, known_x0, cond)
+    run = Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, known_x0, cond)
     w = [gamma ** (run.R - 1 - i) for i in range(run.R)]
     w = [v / sum(w) for v in w]
     share = 1 / len(run.spans)
@@ -300,10 +290,10 @@ def regress_loss(
 @torch.no_grad()
 def refine(model: nn.Module, anchor: torch.Tensor, num_frames: int, known_x0: torch.Tensor,
            iters: int = 4, window: int = 0, overlap: int = 0, schedule: str = "",
-           rounds: Optional[list] = None, **cond) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+           **cond) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """The tracks (B, T, N, 3) and, with a visibility head, the logits (B, T,
-    N) of each frame's last window; `rounds` as `_Sweeps`."""
-    run = _Sweeps(model, anchor, num_frames, iters, schedule, window, overlap, known_x0, cond, rounds)
+    N) of each frame's last window."""
+    run = Sweeps(model, anchor, num_frames, iters, schedule, window, overlap, known_x0, cond)
     for _ in run:
         pass
     return run.whole, run.vis if model.visibility else None

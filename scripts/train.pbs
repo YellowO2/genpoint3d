@@ -1,18 +1,12 @@
 #!/bin/bash
-# The real training run: 3493 Kubric clips, pure tracking, APD reported in metres.
+# A training run: the current design (the flags' defaults), started from the
+# dense reference, on our Kubric clips. ARGS holds what the experiment changes.
 #
-#   qsub -q normal -P personal-yhuang01 scripts/train.pbs
+#   qsub -v OUT=fzP_name,ARGS="--rope-current 1" scripts/train.pbs
+#   qsub -v OUT=...,CACHE=cache/kubric_dense,FRAMES=cache/kubric_frames384 scripts/train.pbs
 #
 #PBS -N train
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
-# 30000 steps deliberately matches run3493, so this is an A/B on the loss
-# changes alone. A longer run would stretch the cosine schedule too, and then a
-# better result would not say which change caused it.
-#
-# Measured 0.44 s/it at batch 16 with bf16, so 30k steps is ~4h, plus ~1h of
-# validation (349 val clips x 50 sampling steps, every 2000). 8h leaves room
-# for a shared GPU being slower than the benchmark. Walltime is a cap, not a
-# reservation -- the job ends when the script does.
 #PBS -l walltime=08:00:00
 #PBS -q normal
 #PBS -P personal-yhuang01
@@ -23,42 +17,21 @@ set -euo pipefail
 ROOT=$HOME/scratch
 cd $ROOT/genpoint3d
 
-# PBS only writes its -o file when the job ENDS. Tee to scratch so progress can
-# be watched live with: tail -f ~/scratch/train.live.log
-# Defined before the tee below, which names the log after the run.
-OUT=${OUT:-run3493_apdloss}
+OUT=${OUT:?}
 ARGS=${ARGS:-}
-# FRAMES=cache/kubric_frames384 (relative to ~/scratch) is the RGB frames cache
-# that a --fine 1 model reads, from scripts/cache_frames.pbs.
-FRAMES=${FRAMES:-}
-if [ -n "$FRAMES" ]; then ARGS="--frames-cache $ROOT/$FRAMES $ARGS"; fi
+CACHE=${CACHE:-cache/kubric_movi48q1}
+FRAMES=${FRAMES:-cache/kubric_movi48_frames384}
+INIT=${INIT:-outputs/fyT_dense_reference/best.pt}
 
+# PBS writes its -o file only when the job ends: tail -f ~/scratch/$OUT.live.log
 exec > >(tee -a $ROOT/${OUT}.live.log) 2>&1
 
 module load python/3.11.7-gcc11
 module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
-
 nvidia-smi --query-gpu=name,memory.total --format=csv
-# Compute nodes have no git on PATH, and `set -e` turns that into a dead job.
-git log --oneline -1 2>/dev/null || echo "(git unavailable on compute node)"
 
-# batch 16 is the measured limit on a 40GB A100: it peaked at 23.9 GB and 32
-# went out of memory. Features now stay fp16 so there should be headroom, but
-# an unattended overnight run is the wrong place to gamble on that.
-# Overridable so a variant does not need the file edited, which is how two jobs
-# ended up writing to the same output directory once:
-#   qsub -v OUT=run3493_disp,ARGS="--target displacement" ... scripts/train.pbs
-# The relative finder (--fine 1) beside DINOv3, and on its own (--dino 0):
-#   qsub -v OUT=fine_a,FRAMES=cache/kubric_frames384,ARGS="--fine 1 ..." ... scripts/train.pbs
-#   qsub -v OUT=fine_b,FRAMES=cache/kubric_frames384,ARGS="--fine 1 --dino 0 ..." ... scripts/train.pbs
-# And reading each CNN cell's 3D position from the depth in the same cache:
-#   qsub -v OUT=fine_c,FRAMES=cache/kubric_frames384,ARGS="--fine 1 --fine-xyz 1 ..." ... scripts/train.pbs
-python -m genpoint3d.train.main \
-  --cache $ROOT/cache/kubric \
-  --out outputs/$OUT \
-  --steps 30000 --batch 16 --points 128 \
-  --dim 256 --depth 6 --heads 4 \
-  --val-every 2000 --workers 4 $ARGS
+python -m genpoint3d.train.main --cache $ROOT/$CACHE --frames-cache $ROOT/$FRAMES --out outputs/$OUT \
+  --init $INIT --fine-init $ROOT/weights/tapip3d_finder.pt $ARGS
 
 echo "=== TRAIN DONE ==="

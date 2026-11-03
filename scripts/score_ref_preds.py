@@ -64,8 +64,7 @@ def main() -> int:
     if not clips or missing:
         raise SystemExit(f"{len(clips)} clips, {len(missing)} without a prediction in {pred_dir}"
                          f" ({' '.join(missing[:5])})")
-    loader = DataLoader(ClipDataset(clips, args.points or 2**31, resample=False, target="absolute",
-                                    fix_idcard=False, features=False),
+    loader = DataLoader(ClipDataset(clips, args.points or 2**31, resample=False),
                         batch_size=1, shuffle=False, num_workers=4)
     # evaluate.py's scoring rules at their defaults, as tapvid3d_score.pbs ran it.
     device = torch.device("cpu")
