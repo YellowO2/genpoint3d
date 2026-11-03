@@ -498,3 +498,21 @@ Bugs found and fixed (`ff7cc56`):
 Open design question: a point first seen inside a window has steps that run
 from its query frame both ways, but the model is told one direction for the
 whole window.
+
+## Cleanup, 4 Nov
+
+The code now holds the current design only: the model is the CNN matcher (3D
+neighbourhoods against the template and the frame before), DINOv3
+cross-attention and the motion input, and training and scoring share one
+sweep loop (`regress.Sweeps`). Removed: flow matching, the whole-frame match
+and its head, the cost volume, the locality prior, upsampling, causal
+attention, the flow patch, the depth head, fed-back visibility, buddies,
+virtual tracks, TAPIP3D's updater, the position and acceleration params,
+carry, augmentation, best-of-k, support points, and about 30 scripts of those
+or of finished checks. 8600 lines out, 900 in.
+
+The training flags' defaults are now fzN's design, so a run names only what
+it changes (`scripts/train.pbs`). Only fyT and fzN are kept loadable (their
+two dead finder weights stripped); fyP and older checkpoints no longer load.
+`scripts/snapshot.pbs` checks that fyT and fzN predict, and train one step,
+exactly as before the cleanup.
