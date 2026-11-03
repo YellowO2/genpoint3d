@@ -48,8 +48,9 @@ class CachedClip:
     visibility: torch.Tensor      # (T, N) bool, True = visible
 
     # --- query pointers ---
-    query_uv: torch.Tensor        # (N, 2) pixel location in frame 0
+    query_uv: torch.Tensor        # (N, 2) pixel location in each point's query frame
     hw: tuple[int, int]           # frame size, to map uv into the feature grid
+    query_t: Optional[torch.Tensor] = None   # (N,) each point's query frame; None is frame 0
 
     # --- geometry the metrics need ---
     # TAP-Vid-3D back-projects its pixel thresholds through the focal length,
@@ -93,6 +94,7 @@ class CachedClip:
             "anchor_metric": self.anchor,
             "visibility": self.visibility,
             "query_uv": self.query_uv,
+            "query_t": self.query_t,
             "hw": self.hw,
             "intrinsics": self.intrinsics,
             "extrinsics": self.extrinsics,
@@ -120,6 +122,7 @@ class CachedClip:
             anchor=d["anchor_metric"],
             visibility=d["visibility"],
             query_uv=d["query_uv"],
+            query_t=d.get("query_t"),
             hw=d["hw"],
             intrinsics=d.get("intrinsics"),
             extrinsics=d.get("extrinsics"),

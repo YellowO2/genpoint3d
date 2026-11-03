@@ -14,6 +14,9 @@ class Settings(argparse.Namespace):
         p.add_argument("--root", required=True)
         p.add_argument("--out", default="local/cache/kubric", help="DIRECTORY, one .pt per clip")
         p.add_argument("--points", type=int, default=256)
+        p.add_argument("--query-stride", type=int, default=0, metavar="S",
+                       help="each point's query is the first of frames 0, S, 2S, ... it is seen in, "
+                            "so later frames add points; 0 queries every point at frame 0")
         p.add_argument("--features", action="store_true", help="also cache DINOv3 features")
         p.add_argument("--image-size", type=int, default=384)
         # Which backbone layers to concatenate. Omitted means the last one only,

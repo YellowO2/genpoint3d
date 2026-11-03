@@ -25,7 +25,8 @@ class ModelInputs:
     visibility: torch.Tensor  # (T, N) bool, True = visible
 
     # --- query pointers (stage 3) ---
-    query_uv: torch.Tensor    # (N, 2) pixel location in frame 0
+    query_uv: torch.Tensor    # (N, 2) pixel location in each point's query frame
+    query_t: torch.Tensor     # (N,) int64 each point's query frame
 
     num_context_frames: int   # T_C -- frames with visual conditioning
     norm: NormStats

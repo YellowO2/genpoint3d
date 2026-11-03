@@ -542,6 +542,43 @@ class PointDiT(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
+    def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
+                         rot, query_t):
+        """The finder's comparison, (B, T, N, out_dim): each point's neighbourhood
+        in the window's frames (`fine_map`, uv, pos) against its template, read
+        in its own query frame of the clip (`clip_*`, `query_t` (B, N); None is
+        frame 0 for every point). Points that share a query frame are compared
+        together, padded to the largest such group, so the cost stays one pass
+        over the points however many query frames there are."""
+        B, T, N = uv.shape[:3]
+        if query_t is None:
+            query_t = torch.zeros(B, N, dtype=torch.long, device=uv.device)
+        out = None
+        for t in query_t.unique().tolist():
+            m = query_t == t                                                       # (B, N)
+            count = m.sum(1)
+            K = int(count.max())
+            idx = torch.argsort((~m).int(), dim=1, stable=True)[:, :K]             # (B, K) the group first
+            valid = torch.arange(K, device=uv.device)[None] < count[:, None]      # (B, K)
+            take = lambda v, d: v.gather(d, idx.view(B, *([1] * (d - 1)), K, *([1] * (v.dim() - d - 1)))
+                                         .expand(*v.shape[:d], K, *v.shape[d + 1:]))
+            a = take(anchor.float(), 1)                                            # (B, K, 3)
+            with torch.autocast(device_type=uv.device.type, enabled=False):
+                uv0, _ = project(a[:, None], clip_proj[:, t:t + 1].float())
+                if fine_xyz is None:
+                    places = {}
+                elif self.fine.neigh:
+                    places = dict(xyz=fine_xyz.float(), xyz0=clip_xyz[:, t].float(), pos=take(pos, 2),
+                                  pos0=a, rot=None if (rot is None or not self.rot_match) else take(rot, 2))
+                else:
+                    places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=take(pos, 2) / self.traj_scale)
+            f = self.fine(fine_map, clip_map[:, t], take(uv, 2), uv0[:, 0], **places)   # (B, T, K, D)
+            if out is None:
+                out = f.new_zeros(B, T, N, f.shape[-1])
+            f = f * valid[:, None, :, None].to(f.dtype)
+            out.scatter_add_(2, idx[:, None, :, None].expand_as(f), f)
+        return out
+
     def _upsample(self, context: torch.Tensor, patch_xyz: torch.Tensor):
         """(B, T, P, F) features and (B, T, P, 3) positions -> the same on a
         grid `upsample` times finer per side, so P grows by upsample^2.
@@ -777,6 +814,8 @@ class PointDiT(nn.Module):
         group_prev: torch.Tensor | None = None,
         group_pairs: torch.Tensor | None = None,
         direction: torch.Tensor | None = None,
+        query_t: torch.Tensor | None = None,
+        alive: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -831,6 +870,12 @@ class PointDiT(nn.Module):
                                      first, read as zeros.
         direction:   (B,)            +1 forward, -1 backward: exactly when the
                                      model was built `bidirectional`.
+        query_t:     (B, N) long     each point's query frame, in the clip: its
+                                     template is read there, not in frame 0.
+                                     None: every point's is frame 0.
+        alive:       (B, N) bool     the points this window has: a point first
+                                     seen after it is left out of the attention
+                                     between points. None: all of them.
         group_pairs: (B, N, N) bool  the truth's pairs that move as one, in
                                      place of the vectors' affinity; given
                                      exactly to a model built with
@@ -847,10 +892,8 @@ class PointDiT(nn.Module):
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
-        # The query's frame, taken before a window cuts it away.
-        query_map = None if fine_map is None else fine_map[:, 0]
-        query_proj = None if fine_proj is None else fine_proj[:, :1]
-        query_xyz = None if fine_xyz is None else fine_xyz[:, 0]
+        # The query frames' maps, taken before a window cuts them away.
+        clip_map, clip_proj, clip_xyz = fine_map, fine_proj, fine_xyz
         if frames is not None:
             if self.costvol:
                 raise ValueError("the cost volume's support is read in the frames it is given")
@@ -975,19 +1018,12 @@ class PointDiT(nn.Module):
             with torch.autocast(device_type=dev.type, enabled=False):
                 proj = fine_proj.float()
                 uv, _ = project(pos, proj)
-                uv0, _ = project(anchor.float()[:, None], query_proj.float())
                 # Offsets in the units of the model's own target, which is
                 # what a difference of two positions turns into there. The 3D
                 # neighbourhood reads them scene-normalised instead, about
                 # unit spread, the scale TAPIP3D's encoding is built for.
-                if fine_xyz is None:
-                    places = {}
-                elif self.fine.neigh:
-                    places = dict(xyz=fine_xyz.float(), xyz0=query_xyz.float(), pos=pos,
-                                  pos0=anchor.float(), rot=rot if self.rot_match else None)
-                else:
-                    places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale)
-            fine = self.fine(fine_map, query_map, uv, uv0[:, 0], **places)
+            fine = self._fine_at_queries(fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos,
+                                         anchor, rot, query_t)
             if point_mask is not None:
                 fine = fine * point_mask[..., None]
             if bool(self.flow_patch) != (fine_flow is not None):
@@ -1200,6 +1236,14 @@ class PointDiT(nn.Module):
                        + (0 if hid is None else hid * self.feedback_scale * self.group_hid_bias[d][:, None, None])
                        ).to(h.dtype) + (0 if bb_d is None else bb_d)
                       for d, bb_d in enumerate(biases)]
+
+        if alive is not None:
+            # Points first seen after this window are not in it: no point reads them.
+            if self.virtual:
+                raise ValueError("alive masks the attention between points, which virtual tracks replace")
+            gone = ((~alive).to(h.dtype) * -1e4)[:, None, None, None, :]           # (B, 1, 1, 1, N)
+            gone = gone.expand(B, T, 1, 1, N).reshape(B * T, 1, 1, N)
+            biases = [gone if bb_d is None else bb_d + gone for bb_d in biases]
 
         # --- positions for RoPE, and the causal mask ---
         # RoPE's ladder runs pi..10*pi rad per unit and is built for positions in

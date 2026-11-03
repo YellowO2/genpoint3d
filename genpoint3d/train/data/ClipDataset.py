@@ -110,20 +110,26 @@ class ClipDataset(Dataset):
         traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
+        # Each point's query frame; a cache from before it had them all at 0.
+        query_t = (torch.zeros(traj.shape[1], dtype=torch.long) if clip.query_t is None
+                   else clip.query_t.long())
         if self.fix_idcard and id_card is not None:
             # Before the subsampling below, so it stays aligned with traj.
             # `context` is (T, P, F) with P row-major, which is what `tokens()`
-            # flattens a (F, g, g) grid into.
-            f0 = clip.context[0].float()
-            g = math.isqrt(f0.shape[0])
-            id_card = sample_at(
-                f0.T.reshape(1, -1, g, g), clip.query_uv[None].float(), clip.hw,
-            )[0].to(id_card.dtype)
+            # flattens a (F, g, g) grid into. Read in each point's query frame.
+            fixed = id_card.clone()
+            for t in query_t.unique().tolist():
+                m = query_t == t
+                ft = clip.context[t].float()
+                g = math.isqrt(ft.shape[0])
+                fixed[m] = sample_at(ft.T.reshape(1, -1, g, g), clip.query_uv[m][None].float(),
+                                     clip.hw)[0].to(id_card.dtype)
+            id_card = fixed
         n_pts = traj.shape[1]
         if self.num_points < n_pts:
             idx = (torch.randperm(n_pts)[: self.num_points] if self.resample
                    else torch.arange(self.num_points))
-            traj, anchor, vis = traj[:, idx], anchor[idx], vis[:, idx]
+            traj, anchor, vis, query_t = traj[:, idx], anchor[idx], vis[:, idx], query_t[idx]
             offset = offset[:, idx]
             if id_card is not None:
                 id_card = id_card[idx]
@@ -156,7 +162,7 @@ class ClipDataset(Dataset):
             flow = torch.cat([torch.zeros_like(back[:1]), back])
         norm = clip.norm(self.norm_mode, traj_scale=self.traj_scale)
         return {
-            "traj": traj, "anchor": anchor, "visibility": vis,
+            "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t,
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),

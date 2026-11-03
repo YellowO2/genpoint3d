@@ -115,7 +115,10 @@ def transform(
     extrinsics_world = torch.from_numpy(sample.extrinsics).float()
     traj_world = torch.from_numpy(sample.traj_3d).float()          # (T, N, 3)
     visibility = torch.from_numpy(sample.visibility).bool()        # (T, N)
-    query_uv = torch.from_numpy(sample.coords_2d[0]).float()       # (N, 2)
+    N = sample.traj_3d.shape[1]
+    query_t = (torch.zeros(N, dtype=torch.long) if sample.query_t is None
+               else torch.from_numpy(sample.query_t).long())               # (N,)
+    query_uv = torch.from_numpy(sample.coords_2d).float()[query_t, torch.arange(N)]   # (N, 2)
 
     # 1. reframe -----------------------------------------------------------
     extrinsics = _relative_extrinsics(extrinsics_world)
@@ -131,7 +134,7 @@ def transform(
 
     # 3. scale the target to unit variance ---------------------------------
     traj = norm.apply_traj(traj_cam0)   # (T, N, 3) absolute, in model units
-    anchor = norm.apply(traj_cam0[0])   # (N, 3) frame-0 position, for conditioning
+    anchor = norm.apply(traj_cam0[query_t, torch.arange(N)])   # (N, 3) at each query, for conditioning
 
     return ModelInputs(
         seq_id=sample.seq_id,
@@ -143,6 +146,7 @@ def transform(
         anchor=anchor,
         visibility=visibility,
         query_uv=query_uv,
+        query_t=query_t,
         num_context_frames=num_context_frames,
         norm=norm,
     )

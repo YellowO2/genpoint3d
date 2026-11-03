@@ -24,7 +24,8 @@ class Pending:
         out = Path(settings.out)
         out.mkdir(parents=True, exist_ok=True)
 
-        ds = KubricSequenceDataset(settings.root, num_query_points=settings.points)
+        ds = KubricSequenceDataset(settings.root, num_query_points=settings.points,
+                                   query_stride=settings.query_stride)
         found = len(ds.seq_ids)
 
         # No up-front completeness scan. A half-downloaded clip raises when we try

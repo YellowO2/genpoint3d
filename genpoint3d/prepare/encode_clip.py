@@ -18,10 +18,13 @@ def encode_clip(clip: CachedClip, inputs: ModelInputs, pointmap: torch.Tensor,
     clip.image_size = encoder.image_size
     with torch.no_grad():
         feat = encoder(inputs.frames.to(dev))                             # (T,D,g,g)
-        # The ID card is sampled ONCE, at the query's own frame (frame 0),
-        # per the paper's "unique starting context" -- not per frame.
-        uv0 = inputs.query_uv[None].to(dev)
-        id_card = sample_at(feat[:1], uv0, clip.hw)[0]                    # (N, D)
+        # The ID card is sampled ONCE, at the query's own frame, per the
+        # paper's "unique starting context" -- not per frame.
+        uv = inputs.query_uv.to(dev)
+        id_card = feat.new_zeros(len(uv), feat.shape[1])
+        for t in inputs.query_t.unique().tolist():
+            m = (inputs.query_t == t).to(dev)
+            id_card[m] = sample_at(feat[t:t + 1], uv[m][None], clip.hw)[0]  # (n, D)
         # METRES, like `traj`. The load path normalises it with the same
         # statistics as the anchor, so patch positions and point
         # positions land in one shared space whatever scheme is chosen.

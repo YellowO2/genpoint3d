@@ -108,7 +108,8 @@ class KubricSequenceDataset:
     (e.g. seq_ids=["000000", "000001"] for your n=2 starting point).
     """
 
-    def __init__(self, root_dir: str, seq_ids: list[str] | None = None, num_query_points: int = 256):
+    def __init__(self, root_dir: str, seq_ids: list[str] | None = None, num_query_points: int = 256,
+                 query_stride: int = 0):
         self.root_dir = root_dir
         if seq_ids is None:
             seq_ids = sorted(
@@ -117,6 +118,10 @@ class KubricSequenceDataset:
             )
         self.seq_ids = seq_ids
         self.num_query_points = num_query_points
+        # 0: every query at frame 0. S: each point's query is the first of frames
+        # 0, S, 2S, ... in which it is seen -- a point first seen at frame 30
+        # joins at frame 32 -- so later frames add points of their own.
+        self.query_stride = query_stride
 
     @staticmethod
     def load_depths(root_dir: str, seq_id: str) -> np.ndarray:
@@ -182,19 +187,24 @@ class KubricSequenceDataset:
         visibility &= (coords[..., 0] >= 0) & (coords[..., 0] < W) & (coords[..., 1] >= 0) & (coords[..., 1] < H)
 
         N_total = traj_3d.shape[1]
+        query_frames = np.arange(0, num_frames, self.query_stride) if self.query_stride else np.array([0])
+        seen_at = visibility[query_frames]                                   # (Q, N)
+        has_query = seen_at.any(0)
+        query_t = query_frames[seen_at.argmax(0)]                             # (N,) first query frame seen
         if self.num_query_points is not None and self.num_query_points < N_total:
-            visible_at_0 = np.where(visibility[0])[0]
-            if len(visible_at_0) < self.num_query_points:
-                raise ValueError(f"only {len(visible_at_0)} of {N_total} points are visible "
-                                 f"in frame 0, fewer than the {self.num_query_points} queries")
-            chosen = np.random.choice(visible_at_0, size=self.num_query_points, replace=False)
+            candidates = np.where(has_query)[0]
+            if len(candidates) < self.num_query_points:
+                raise ValueError(f"only {len(candidates)} of {N_total} points are visible in a "
+                                 f"query frame, fewer than the {self.num_query_points} queries")
+            chosen = np.random.choice(candidates, size=self.num_query_points, replace=False)
         else:
             chosen = np.arange(N_total)
 
         traj_3d = traj_3d[:, chosen]
         coords = coords[:, chosen]
         visibility = visibility[:, chosen]
-        query_points_3d = traj_3d[0]  # 3D position at first frame
+        query_t = query_t[chosen]
+        query_points_3d = traj_3d[query_t, np.arange(len(chosen))]  # 3D position at each query
 
         return KubricSample(
             seq_id=seq_id,
@@ -206,6 +216,7 @@ class KubricSequenceDataset:
             intrinsics=intrinsics,
             extrinsics=extrinsics,
             query_points_3d=query_points_3d,
+            query_t=query_t.astype(np.int64),
         )
 
 
