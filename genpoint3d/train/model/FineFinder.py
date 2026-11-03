@@ -276,6 +276,10 @@ class FineFinder(nn.Module):
             raise ValueError("turning frame 0's neighbourhood is the 3D neighbourhood's (neigh)")
         if query_t is not None and (not self.neigh or rot is not None):
             raise ValueError("a template per point is built for the 3D neighbourhood, unturned")
+        if self.neigh and query_t is None:
+            # One template frame for every point: a clip of that one frame.
+            fmap0, xyz0 = fmap0[:, None], xyz0[:, None]
+            query_t = torch.zeros(uv.shape[0], uv.shape[2], dtype=torch.long, device=uv.device)
         out = []
         # As many clips at a time as hold `chunk` points between them, so a
         # clip with more points is not more memory per piece.
@@ -321,14 +325,11 @@ class FineFinder(nn.Module):
         # From frame 0's alone, which every clip sees; TAPIP3D uses the whole
         # window, which a forecast would leak through.
         xyz, xyz0, pos, pos0 = xyz.float(), xyz0.float(), pos.float(), pos0.float()
-        first = xyz0 if query_t is None else xyz0[:, 0]                     # the clip's frame 0
+        first = xyz0[:, 0]                                                  # the clip's frame 0
         mean = first.mean(dim=(2, 3))                                       # (b, 3)
         std = (first - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
         xyz = (xyz - mean[:, None, :, None, None]) / std[:, None, None, None, None]
-        if query_t is None:
-            xyz0 = (xyz0 - mean[:, :, None, None]) / std[:, None, None, None]
-        else:
-            xyz0 = (xyz0 - mean[:, None, :, None, None]) / std[:, None, None, None, None]
+        xyz0 = (xyz0 - mean[:, None, :, None, None]) / std[:, None, None, None, None]
         pos = (pos - mean[:, None, None]) / std[:, None, None, None]
         pos0 = (pos0 - mean[:, None]) / std[:, None, None]
         # The frame before each frame, the first standing in for its own.
@@ -364,17 +365,14 @@ class FineFinder(nn.Module):
                 own = F.grid_sample(f0.float(), grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
                 return torch.cat([own[:, :, None].to(sf.dtype), sf], dim=2), sx
 
-            if query_t is None:
-                sup_f, sup_x = support(pool(fmap0), pick_xyz(xyz0).flatten(2).transpose(1, 2))
-            else:
-                # Each point's template from its own frame: the support built in
-                # every query frame there is, each point keeping its own.
-                sup_f = sup_x = None
-                for t in query_t.unique().tolist():
-                    sf, sx = support(pool(fmap0[:, t]), pick_xyz(xyz0[:, t]).flatten(2).transpose(1, 2))
-                    m = (query_t == t)[:, :, None, None]
-                    sup_f = sf if sup_f is None else torch.where(m, sf, sup_f)
-                    sup_x = sx if sup_x is None else torch.where(m, sx, sup_x)
+            # Each point's template from its own frame: the support built in
+            # every query frame there is, each point keeping its own.
+            sup_f = sup_x = None
+            for t in query_t.unique().tolist():
+                sf, sx = support(pool(fmap0[:, t]), pick_xyz(xyz0[:, t]).flatten(2).transpose(1, 2))
+                m = (query_t == t)[:, :, None, None]
+                sup_f = sf if sup_f is None else torch.where(m, sf, sup_f)
+                sup_x = sx if sup_x is None else torch.where(m, sx, sup_x)
             # Normalised after the sampling and the pooling, as TAPIP3D has it.
             sup_f, cur_f = self.in_norm(sup_f), self.in_norm(cur_f)
             sup_off = torch.cat([torch.zeros_like(sup_x[:, :, :1]), sup_x - pos0[:, :, None]], dim=2)

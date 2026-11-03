@@ -57,8 +57,7 @@ predictor = Predictor(model, ScoreSettings(
     loss_type=targs.get("loss_type", "l21"), method=targs.get("method", "regress"),
     refine_iters=targs.get("refine_iters", 4), param=targs.get("param", "position"),
     carry=bool(targs.get("carry", 0)), window=targs.get("window", 0), overlap=targs.get("overlap", 0),
-    reach=targs.get("reach", "hold"), back_iters=targs.get("back_iters", 0),
-    schedule=targs.get("schedule", ""), hide_hidden=args.hide_hidden))
+    reach=targs.get("reach", "hold"), schedule=targs.get("schedule", ""), hide_hidden=args.hide_hidden))
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():

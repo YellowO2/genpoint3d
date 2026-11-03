@@ -330,14 +330,10 @@ class Settings(argparse.Namespace):
                             "attention bias uses the true pairs that move as one in "
                             "place of the vectors' affinity, in training and scoring. "
                             "0 off.")
-        p.add_argument("--back-iters", type=int, default=0, metavar="K",
-                       help="regress in windows: after the forward pass, a backward pass "
-                            "over the windows from the clip's end, K rounds a window, the "
-                            "model told which way time runs (regress_loss back_iters). 0 off.")
         p.add_argument("--schedule", default="", metavar="SWEEPS",
                        help="regress in windows: the sweeps over the windows one round a "
                             "letter, f forward and b backward, e.g. fbfb (regress._schedule); "
-                            "given, it replaces --refine-iters and --back-iters.")
+                            "empty, --refine-iters forward rounds and no backward.")
         p.add_argument("--level", type=int, default=0, choices=[0, 1],
                        help="turn every clip so up is the same axis (-y), gravity one fixed "
                             "direction (ClipDataset level); the cache needs each clip's up.")
@@ -455,8 +451,8 @@ class Settings(argparse.Namespace):
         if settings.rot_match and not (settings.rigid_fit and settings.fine_neigh):
             p.error("--rot-match turns the 3D neighbourhood by the fit's rotation: needs "
                     "--rigid-fit E and --fine-neigh K")
-        if (settings.back_iters or settings.schedule) and (settings.method != "regress" or not settings.window):
-            p.error("--back-iters runs back over the windows: needs --method regress and --window W")
+        if settings.schedule and (settings.method != "regress" or not settings.window):
+            p.error("--schedule sweeps over the windows: needs --method regress and --window W")
         if settings.hidden_blank and (settings.vis_loss <= 0 or settings.method != "regress"):
             p.error("--hidden-blank uses the visibility head's calls: needs --vis-loss W, in --method regress")
         if settings.group_feedback and (settings.group_loss <= 0 or settings.method != "regress"):

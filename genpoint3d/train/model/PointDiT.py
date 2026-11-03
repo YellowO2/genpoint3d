@@ -445,7 +445,7 @@ class PointDiT(nn.Module):
             raise ValueError("hidden_blank uses the visibility head's calls: needs visibility")
         self.hidden_blank = hidden_blank
         # [time's direction] with `bidirectional` the refinement also runs a
-        # backward pass over the windows (`regress_loss`'s back_iters), and every
+        # backward sweep over the windows (`regress._schedule`), and every
         # call is told which way time runs: +1 or -1 times one learned vector,
         # added to the conditioning. Zeros at first. Physics is not the same
         # both ways -- a bounce loses height forward and gains it backward.
@@ -548,25 +548,20 @@ class PointDiT(nn.Module):
         in the window's frames (`fine_map`, uv, pos) against its template, read
         in its own query frame of the clip (`clip_*`, `query_t` (B, N); None is
         frame 0 for every point), every point in one pass."""
-        with torch.autocast(device_type=uv.device.type, enabled=False):
-            if query_t is None:
-                uv0, _ = project(anchor.float()[:, None], clip_proj[:, :1].float())
-                uv0 = uv0[:, 0]
-            else:
-                proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
-                uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]          # (B, N, 2)
-            if fine_xyz is None:
-                places = {}
-            elif self.fine.neigh:
-                places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(),
-                              rot=rot if self.rot_match else None,
-                              xyz0=(clip_xyz[:, 0] if query_t is None else clip_xyz).float())
-            else:
-                if query_t is not None:
-                    raise ValueError("a template per point is built for the 3D-neighbourhood finder")
-                places = dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale)
+        B, N = anchor.shape[:2]
         if query_t is None:
-            return self.fine(fine_map, clip_map[:, 0], uv, uv0, **places)
+            query_t = torch.zeros(B, N, dtype=torch.long, device=anchor.device)
+        with torch.autocast(device_type=uv.device.type, enabled=False):
+            proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
+            uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]              # (B, N, 2)
+            if not self.fine.neigh:
+                if bool(query_t.any()):
+                    raise ValueError("a template per point is built for the 3D-neighbourhood finder")
+                places = ({} if fine_xyz is None else
+                          dict(xyz=fine_xyz.float() / self.traj_scale, pos=pos / self.traj_scale))
+                return self.fine(fine_map, clip_map[:, 0], uv, uv0, **places)
+            places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float(),
+                          rot=rot if self.rot_match else None)
         return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, **places)
 
     def _upsample(self, context: torch.Tensor, patch_xyz: torch.Tensor):

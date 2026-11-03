@@ -258,7 +258,7 @@ def main() -> int:
                             carry=bool(targs.get("carry", 0)), window=targs.get("window", 0),
                             overlap=targs.get("overlap", 0), cutoff=args.eval_cutoff,
                             reach=args.reach or targs.get("reach", "hold"),
-                            back_iters=targs.get("back_iters", 0), schedule=targs.get("schedule", ""))
+                            schedule=targs.get("schedule", ""))
     predictor = Predictor(model, judging)
     # The same model, the frames from C on blank: what it forecasts there.
     forecaster = (Predictor(model, dataclasses.replace(judging, cutoff=args.forecast_from))

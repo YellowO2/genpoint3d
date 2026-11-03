@@ -27,5 +27,4 @@ class ScoreSettings:
     hide_hidden: bool = False     # blank each point's image where it is truly hidden
     support: int = 0              # regress: an S x S grid of helper points tracked alongside
     reach: str = "hold"           # regress in windows: how a window's new frames start
-    back_iters: int = 0           # regress in windows: rounds a window of the backward pass
     schedule: str = ""            # regress in windows: the sweeps, e.g. "fbfb"
