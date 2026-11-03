@@ -62,6 +62,7 @@ def build_model(settings, feat_dim: int | None, has_feats: bool) -> PointDiT:
                     feedback_scale=a("feedback_scale", 1.0),
                     hidden_blank=bool(a("hidden_blank", 0)),
                     bidirectional="b" in a("schedule", ""),
+                    rope_current=bool(a("rope_current", 0)),
                     motion_waves=bool(a("motion_waves", 0)),
                     buddies=bool(a("buddies", 0)),
                     buddy_bias=bool(a("buddy_bias", 0)),

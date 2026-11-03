@@ -92,6 +92,7 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         hidden_blank: bool = False,
         bidirectional: bool = False,
+        rope_current: bool = False,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -253,6 +254,12 @@ class PointDiT(nn.Module):
         )
         self.time_rope = RoPE(head_dim, num_heads, n_axes=1)   # position = frame time
         self.space_rope = RoPE(head_dim, num_heads, n_axes=3)  # position = query xyz
+        # `rope_current`: the attention between points encodes where each point
+        # is now -- its current guess, in this frame -- not where it was
+        # first seen, so "how near is that point" means near now: a falling
+        # point sees the floor come closer, a turning shape's points their
+        # positions as they turn. Off: the anchor, as every run before it.
+        self.rope_current = rope_current
 
         # [4c] point-image cross-attention (a soft pick of the patches that look
         # like the point), and the tracking/forecasting switch.
@@ -1029,7 +1036,13 @@ class PointDiT(nn.Module):
         Nt = h.shape[2]                                               # points and virtual tokens
         t_pos = t_pos[None, :, None].expand(B * Nt, T, 1)
         theta_time = self.time_rope(t_pos)                             # (B*N, H, T, d)
-        theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
+        if self.rope_current:
+            if self.virtual:
+                raise ValueError("rope_current encodes the points' guesses, which virtual tokens have none of")
+            now = self._lookup_pos(x.float(), anchor.float()).reshape(B * T, N, 3)
+            theta_space = self.space_rope(now.to(dt))                  # (B*T, H, N, d)
+        else:
+            theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
         causal = (torch.ones(T, T, dtype=torch.bool, device=dev).tril()[None, None]
                   if self.causal else None)
 

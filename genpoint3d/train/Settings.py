@@ -299,6 +299,10 @@ class Settings(argparse.Namespace):
         p.add_argument("--level", type=int, default=0, choices=[0, 1],
                        help="turn every clip so up is the same axis (-y), gravity one fixed "
                             "direction (ClipDataset level); the cache needs each clip's up.")
+        p.add_argument("--rope-current", type=int, default=0, choices=[0, 1],
+                       help="the attention between points encodes each point's current "
+                            "guess in each frame, not where it was first seen (PointDiT "
+                            "rope_current). 0: every run before it.")
         p.add_argument("--hidden-blank", type=int, default=0, choices=[0, 1],
                        help="regress, with --vis-loss: from the second refinement round on, "
                             "each point the visibility head calls hidden in a frame gets no "
