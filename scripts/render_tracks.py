@@ -234,7 +234,7 @@ def main() -> int:
     # As many points as are drawn, not only as many as the run trained with:
     # a clip's first points are often all of one object.
     ds = ClipDataset(clips, max(targs["points"], args.points), resample=False,
-                     level=bool(targs.get("level", 0)),
+                     level=bool(targs.get("level", 0)), query_before=args.eval_cutoff,
                      norm_mode=targs.get("norm_mode", "median"),
                      target=targs.get("target", "absolute"),
                      fix_idcard=bool(targs.get("fix_idcard", 0)),

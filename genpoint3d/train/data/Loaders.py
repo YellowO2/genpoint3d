@@ -26,7 +26,8 @@ class Loaders:
             drop_last=True, persistent_workers=settings.workers > 0,
         )
         self.val = DataLoader(
-            ClipDataset(clips.val, settings.points, resample=False, **how_data),
+            ClipDataset(clips.val, settings.points, resample=False, query_before=settings.eval_cutoff,
+                        **how_data),
             batch_size=settings.batch, shuffle=False, num_workers=settings.workers,
         )
         # Scored with resample=False and the val loader's settings, so the only
@@ -34,7 +35,7 @@ class Loaders:
         # confound the comparison the number exists to make.
         self.fit = DataLoader(
             ClipDataset(clips.train[: settings.train_eval], settings.points, resample=False,
-                        **how_data),
+                        query_before=settings.eval_cutoff, **how_data),
             batch_size=settings.batch, shuffle=False, num_workers=settings.workers,
         ) if settings.train_eval else None
         self._stream = None

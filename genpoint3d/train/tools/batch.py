@@ -8,8 +8,6 @@ from genpoint3d.train.tools.camera import image_projection, unproject
 from genpoint3d.train.tools.matching import true_patch
 from genpoint3d.train.tools.metrics import _to_camera_t
 
-# TAPIP3D clamps depth the same way before dividing, so a point behind the
-# camera or at zero depth cannot produce an enormous weight.
 
 
 def to_device(batch: dict, device, amp: bool = False) -> dict:
@@ -92,20 +90,25 @@ def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     instead, which is what TAPIP3D's `scale_loss_by_depth` does
     (`training/criterion.py:165`, "Normalize to match with the APD metric").
 
-    One weight per point, from frame 0, kept for all its frames: how clearly
-    the point was seen when it was picked. Every query point is visible and in
-    front of the camera there. A later frame's depth is not: off screen a point
-    can sit beside or behind the camera, where `depth / focal` goes to zero and
-    one hidden point would outweigh the rest of the batch.
+    One weight per point, from its query frame, kept for all its frames: how
+    clearly the point was seen when it was picked. Every point is visible and
+    in front of the camera there. Another frame's depth is not: off screen a
+    point can sit beside or behind the camera, where `depth / focal` goes to
+    zero and one hidden point would outweigh the rest of the batch. Held to at
+    least 10 cm, as TAPIP3D holds it.
 
     Normalised to mean 1 over the batch so the loss keeps its magnitude and the
     learning rate stays comparable across runs -- only the RELATIVE weighting
     of points is the point here.
     """
-    gt_cam = _to_camera_t(to_metres(traj[:, :1], b), b["extrinsics"][:, :1])
-    depth = gt_cam[..., 2]                                             # (B, 1, N)
-    focal = (b["intrinsics"][:, :1, 0, 0] * b["intrinsics"][:, :1, 1, 1]).sqrt()
-    w = focal[..., None] / depth * b["norm_scale"][:, None, None]
+    q = b.get("query_t")
+    if q is None:
+        q = torch.zeros(traj.shape[0], traj.shape[2], dtype=torch.long, device=traj.device)
+    gt_cam = _to_camera_t(to_metres(traj, b), b["extrinsics"])         # (B, T, N, 3)
+    depth = gt_cam[..., 2].gather(1, q[:, None]).clamp_min(0.1)        # (B, 1, N) at each query
+    fx, fy = b["intrinsics"][..., 0, 0], b["intrinsics"][..., 1, 1]   # (B, T)
+    focal = (fx * fy).sqrt().gather(1, q)[:, None]                     # (B, 1, N)
+    w = focal / depth * b["norm_scale"][:, None, None]
     return (w / w.mean().clamp(min=1e-8)).expand_as(traj[..., 0])
 
 
@@ -182,7 +185,7 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
     CNN once they are all done.
     """
     if model.fine is None or b["frames"] is None:
-        return {}
+        return {} if b.get("query_t") is None else {"query_t": b["query_t"]}
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         fmap = model.fine.encode(b["frames"])
     proj = image_projection(b["intrinsics"], b["extrinsics"], b["hw"],

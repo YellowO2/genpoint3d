@@ -36,7 +36,8 @@ clips = sorted(Path(args.cache).glob("*.pt"))
 level = bool(targs.get("level", 0))
 ds = ClipDataset(clips, 3000, resample=False, norm_mode=targs.get("norm_mode", "median"),
                  target=targs.get("target", "displacement"), fix_idcard=bool(targs.get("fix_idcard", 0)),
-                 frames=Path(args.frames_cache), features=True, depth=True, level=level)
+                 frames=Path(args.frames_cache), features=True, depth=True, level=level,
+                 query_before=args.cutoff)
 first = torch.load(clips[0], weights_only=False, mmap=True)
 model = build_model(Settings(**targs), first["feat_dim"], first["context"] is not None).to(dev)
 model.load_state_dict(ckpt["model"])

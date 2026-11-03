@@ -236,24 +236,30 @@ def _direction(model: nn.Module, sign: float, B: int, device) -> dict:
     return {"direction": torch.full((B,), sign, device=device)}
 
 
-def _blank_hidden(cond: dict, logits: torch.Tensor, start: int, end: int, num_frames: int) -> dict:
-    """`cond` for the next round of a model built with `hidden_blank`: in the
-    window's frames `start` to `end`, each point the visibility head (logits
-    (B, end - start, N)) calls hidden gets no image, exactly as a forecast
-    frame gets none -- a hidden point is carried by the rest of the scene, not
-    matched to whatever covers it. Each point's query frame keeps its image."""
-    B, _, N = logits.shape
-    vm = cond.get("visual_mask")
-    if vm is None:
-        vm = logits.new_ones(B, num_frames, dtype=torch.bool)
-    full = (vm[..., None].expand(B, num_frames, N) if vm.dim() == 2 else vm).clone()
-    seen = logits.detach() > 0
+def _blank_hidden(cond: dict, logits: Optional[torch.Tensor], start: int, end: int, num_frames: int,
+                  N: int) -> dict:
+    """`cond` for a call over the window's frames `start` to `end`, with no
+    image wherever a point has no evidence, exactly as a forecast frame has
+    none -- carried by the rest of the scene, not matched to whatever is
+    there: every frame before the point's query frame, where it has not been
+    seen; and, with `logits` (B, end - start, N) from a model built with
+    `hidden_blank`, every frame its visibility head calls hidden. Each point's
+    query frame keeps its image."""
     q = cond.get("query_t")
+    if q is None and logits is None:
+        return cond
+    vm = cond.get("visual_mask")
+    B = (q if q is not None else logits).shape[0]
+    dev = (q if q is not None else logits).device
     if q is None:
-        q = torch.zeros(B, N, dtype=torch.long, device=logits.device)
-    inside = (q >= start) & (q < end)
-    seen.scatter_(1, (q - start).clamp(0, end - start - 1)[:, None],
-                  seen.gather(1, (q - start).clamp(0, end - start - 1)[:, None]) | inside[:, None])
+        q = torch.zeros(B, N, dtype=torch.long, device=dev)
+    if vm is None:
+        vm = torch.ones(B, num_frames, dtype=torch.bool, device=dev)
+    full = (vm[..., None].expand(B, num_frames, N) if vm.dim() == 2 else vm).clone()
+    t = torch.arange(start, end, device=dev)[None, :, None]
+    seen = t >= q[:, None]                                                   # seen by now
+    if logits is not None:
+        seen &= (logits.detach() > 0) | (t == q[:, None])
     full[:, start:end] &= seen
     return {**cond, "visual_mask": full}
 
@@ -396,11 +402,13 @@ def regress_loss(
     w = [gamma ** (R - 1 - i) for i in range(R)]
     w = [v / sum(w) for v in w]
     spans = _windows(T, window, overlap)
-    share = 1 / (len(spans) * len(_schedule(iters, schedule)))
+    # The round weights `w` already sum to 1 over every sweep: windows averaged.
+    share = 1 / len(spans)
 
     whole = torch.zeros_like(x1)
     total = vis_total = x1.new_zeros(())
-    seen_all = None
+    # Visibility logits so far: seen everywhere until a window has called them.
+    seen_all = torch.full((B, T, x1.shape[2]), 20.0, device=x1.device)
     groups_now = None                       # each point's group vector, carried throughout
     gp = lambda: {"group_prev": groups_now} if getattr(model, "group_feedback", 0) else {}
     done = 0
@@ -417,7 +425,7 @@ def regress_loss(
                 at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
                 prev = _no_logits(model, x1_w)
                 blank = getattr(model, "hidden_blank", False)
-                c = cond if seen_all is None or not blank else _blank_hidden(cond, seen_all[:, start:end], start, end, T)
+                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, T, x1.shape[2])
                 fwd = _direction(model, 1.0, B, x1.device)
                 for i in range(r0, r0 + n):
                     k = _clock(i, R, B, x1.device)
@@ -432,7 +440,7 @@ def regress_loss(
                         if prev is not None:
                             prev = logits.detach()
                         if blank:
-                            c = _blank_hidden(cond, logits, start, end, T)
+                            c = _blank_hidden(cond, logits, start, end, T, x1.shape[2])
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, param, at_q), g.detach())
                     emb = model._emb if getattr(model, "group_feedback", 0) else None
                     groups_now = _groups(model, groups_now, alive)
@@ -458,8 +466,6 @@ def regress_loss(
                         g = _carry(g.detach(), i, iters)
                 whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
                 if blank:
-                    if seen_all is None:
-                        seen_all = logits.new_zeros(B, T, logits.shape[-1])
                     seen_all[:, start:end] = logits.detach()
                 done = end
         else:
@@ -471,7 +477,7 @@ def regress_loss(
                 at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
                 blank = getattr(model, "hidden_blank", False)
                 # Hidden points stay blanked from the forward pass's last call on.
-                c = _blank_hidden(cond, seen_all[:, start:end], start, end, T) if blank else cond
+                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, T, x1.shape[2])
                 bwd = _direction(model, -1.0, B, x1.device)
                 for i in range(r0, r0 + n):
                     vis_loss = x1.new_zeros(())
@@ -483,7 +489,7 @@ def regress_loss(
                     if visible_w is not None:
                         vis_loss = share * w[i] * visibility_error(logits, visible_w)
                     if blank:
-                        c = _blank_hidden(cond, logits, start, end, T)
+                        c = _blank_hidden(cond, logits, start, end, T, x1.shape[2])
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, param, at_q), g.detach())
                     loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
                     if vel_weight:
@@ -553,7 +559,8 @@ def refine(
     spans = _windows(num_frames, window, overlap)
     whole = torch.zeros(B, num_frames, N, 3, device=anchor.device)
     seen = whole.new_zeros(B, num_frames, N) if visibility else None
-    seen_all = None
+    # Visibility logits so far: seen everywhere until a window has called them.
+    seen_all = torch.full((B, num_frames, N), 20.0, device=anchor.device)
     groups_now = None                       # each point's group vector, carried throughout
     gp = lambda: {"group_prev": groups_now} if getattr(model, "group_feedback", 0) else {}
     done = 0
@@ -569,7 +576,7 @@ def refine(
                 prev = _no_logits(model, g)
                 logits = None
                 blank = getattr(model, "hidden_blank", False)
-                c = cond if seen_all is None or not blank else _blank_hidden(cond, seen_all[:, start:end], start, end, num_frames)
+                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, num_frames, N)
                 fwd = _direction(model, 1.0, B, anchor.device)
                 if rounds is not None:
                     if not rounds:
@@ -584,7 +591,7 @@ def refine(
                     if prev is not None:
                         prev = logits
                     if blank:
-                        c = _blank_hidden(cond, logits, start, end, num_frames)
+                        c = _blank_hidden(cond, logits, start, end, num_frames, N)
                     g = torch.where(alive[:, None, :, None], _pin(g + _integrate(out, param, at_q), known_x0, at_q, inside), g)
                     groups_now = _groups(model, groups_now, alive)
                     if carry:
@@ -595,8 +602,6 @@ def refine(
                 if visibility:
                     seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
                 if blank:
-                    if seen_all is None:
-                        seen_all = logits.new_zeros(B, num_frames, N)
                     seen_all[:, start:end] = logits
                 done = end
         else:
@@ -605,7 +610,7 @@ def refine(
                 alive, at_q, inside = _window_points(cond, B, N, start, end, True, anchor.device)
                 at = ({} if len(spans) == 1 else {"frames": (start, end)}) | {"alive": alive}
                 blank = getattr(model, "hidden_blank", False)
-                c = _blank_hidden(cond, seen_all[:, start:end], start, end, num_frames) if blank else cond
+                c = _blank_hidden(cond, seen_all[:, start:end] if blank else None, start, end, num_frames, N)
                 bwd = _direction(model, -1.0, B, anchor.device)
                 for i in range(r0, r0 + n):
                     want = visibility or blank
@@ -613,7 +618,7 @@ def refine(
                     out, logits = out if want else (out, None)
                     groups_now = _groups(model, groups_now, alive)
                     if blank:
-                        c = _blank_hidden(cond, logits, start, end, num_frames)
+                        c = _blank_hidden(cond, logits, start, end, num_frames, N)
                     g = torch.where(alive[:, None, :, None], _pin(g + _integrate(out, param, at_q), known_x0, at_q, inside), g)
                     if rounds is not None:
                         rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)

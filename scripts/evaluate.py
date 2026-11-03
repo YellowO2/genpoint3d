@@ -382,6 +382,7 @@ def main() -> int:
         # them scores the model in a space it was not trained in, and the result
         # is not a bad score but a meaningless one.
         ClipDataset(clips, points, resample=False, level=bool(targs.get("level", 0)),
+                    query_before=args.eval_cutoff,
                     norm_mode=targs.get("norm_mode", "median"),
                     target=targs.get("target", "absolute"),
                     # Absent means trained on the ID cards as they were cached.

@@ -39,7 +39,7 @@ class ClipDataset(Dataset):
                  norm_mode: str = "median", target: str = "absolute",
                  fix_idcard: bool = True, frames: Path | None = None,
                  features: bool = True, depth: bool = False, flow: Path | None = None,
-                 level: bool = False):
+                 level: bool = False, query_before: int = 0):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         # Level the scene: turn the frame-0 camera frame about its origin so
         # that up is -y in every clip (the camera's own up, once levelled),
@@ -47,6 +47,11 @@ class ClipDataset(Dataset):
         # fixed direction, not one each clip tilts its own way. Needs the
         # clip's `up`; distances, and so every score, are unchanged.
         self.level = level
+        # Scoring a forecast from frame C: only points first seen before C, the
+        # ones the model can have been handed; one first seen in the forecast
+        # would sit at its true position there, scored as a perfect forecast.
+        # 0 keeps every point.
+        self.query_before = query_before
         # The RGB frames, for the relative finder: a directory from
         # `scripts/cache_frames.py` (checked by `frames_dir`) holding one uint8 array per clip, named
         # like the clip. Every frame is served, in order and untouched --
@@ -135,6 +140,11 @@ class ClipDataset(Dataset):
                 fixed[m] = sample_at(ft.T.reshape(1, -1, g, g), clip.query_uv[m][None].float(),
                                      clip.hw)[0].to(id_card.dtype)
             id_card = fixed
+        if self.query_before:
+            keep = query_t < self.query_before
+            traj, anchor, vis, query_t, offset = traj[:, keep], anchor[keep], vis[:, keep], query_t[keep], offset[:, keep]
+            if id_card is not None:
+                id_card = id_card[keep]
         n_pts = traj.shape[1]
         if self.num_points < n_pts:
             idx = (torch.randperm(n_pts)[: self.num_points] if self.resample
