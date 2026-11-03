@@ -100,6 +100,7 @@ class PointDiT(nn.Module):
         group_oracle: bool = False,
         group_vis_bias: bool = False,
         hidden_blank: bool = False,
+        bidirectional: bool = False,
         motion_waves: bool = False,
         buddies: bool = False,
         buddy_bias: bool = False,
@@ -443,6 +444,14 @@ class PointDiT(nn.Module):
         if hidden_blank and not visibility:
             raise ValueError("hidden_blank uses the visibility head's calls: needs visibility")
         self.hidden_blank = hidden_blank
+        # [time's direction] with `bidirectional` the refinement also runs a
+        # backward pass over the windows (`regress_loss`'s back_iters), and every
+        # call is told which way time runs: +1 or -1 times one learned vector,
+        # added to the conditioning. Zeros at first. Physics is not the same
+        # both ways -- a bounce loses height forward and gains it backward.
+        self.bidirectional = bidirectional
+        if bidirectional:
+            self.dir_emb = nn.Parameter(torch.zeros(cond_dim))
         if vis_feedback and not visibility:
             raise ValueError("vis_feedback feeds the visibility head back, which needs visibility")
         self.vis_feedback = vis_feedback
@@ -767,6 +776,7 @@ class PointDiT(nn.Module):
         vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
         group_pairs: torch.Tensor | None = None,
+        direction: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -819,6 +829,8 @@ class PointDiT(nn.Module):
         group_prev:  (B, N, E)       the group vectors the previous round
                                      said (`group_feedback`); None before the
                                      first, read as zeros.
+        direction:   (B,)            +1 forward, -1 backward: exactly when the
+                                     model was built `bidirectional`.
         group_pairs: (B, N, N) bool  the truth's pairs that move as one, in
                                      place of the vectors' affinity; given
                                      exactly to a model built with
@@ -1066,6 +1078,10 @@ class PointDiT(nn.Module):
             cond = cond + self.fine_cond(fine).to(cond.dtype)  # "and this, to the pixel"
         if flow is not None:
             cond = cond + self.flow_cond(flow).to(cond.dtype)  # "and how it turned"
+        if self.bidirectional != (direction is not None):
+            raise ValueError("direction is given exactly when the model was built bidirectional")
+        if direction is not None:
+            cond = cond + (direction[:, None, None, None] * self.dir_emb).to(cond.dtype)
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         # --- [feature adapter] raw backbone width -> model width, plus position ---

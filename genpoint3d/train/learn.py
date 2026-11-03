@@ -84,7 +84,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
                                        iters=settings.refine_iters, backward=1 / settings.accum,
                                        param=settings.param, carry=bool(settings.carry),
                                        window=settings.window, overlap=settings.overlap,
-                                       reach=settings.reach,
+                                       reach=settings.reach, back_iters=settings.back_iters,
                                        vel_weight=settings.vel_loss,
                                        acc_weight=settings.acc_loss, **rigid,
                                        context=ctx, visual_mask=vm, id_card=idc, patch_xyz=pxyz,

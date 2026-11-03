@@ -169,6 +169,29 @@ def _group_error(emb: torch.Tensor, groups: torch.Tensor) -> torch.Tensor:
     return (p + n) / 2
 
 
+def _backward_steps(step: torch.Tensor, param: str) -> torch.Tensor:
+    """`_integrate` run from a window's last frame back to its first: on the
+    backward pass a frame's output is its step from the frame after it, so an
+    output of zero holds a frame level with the next one, and the window's
+    last frame, settled by the window after it, gets no correction."""
+    return _integrate(step.flip(1), param).flip(1)
+
+
+def _check_backward(model: nn.Module, back_iters: int) -> None:
+    """The backward pass is built for the plain model and its hidden blanking:
+    nothing fed back from round to round (visibility, groups, a rigid fit)."""
+    if back_iters and (model.vis_feedback or getattr(model, "group_feedback", 0) or model.rigid_fit):
+        raise ValueError("the backward pass does not carry fed-back visibility, groups or a rigid fit")
+
+
+def _direction(model: nn.Module, sign: float, B: int, device) -> dict:
+    """The model call's `direction` argument, (B,) +1 forward or -1 backward,
+    for a model built with `bidirectional`; nothing for any other."""
+    if not getattr(model, "bidirectional", False):
+        return {}
+    return {"direction": torch.full((B,), sign, device=device)}
+
+
 def _blank_hidden(cond: dict, logits: torch.Tensor, start: int, end: int, num_frames: int) -> dict:
     """`cond` for the next round of a model built with `hidden_blank`: in the
     window's frames `start` to `end`, each point the visibility head (logits
@@ -262,6 +285,7 @@ def regress_loss(
     group_weight: float = 0.0,
     fit_weight: float = 0.0,
     reach: str = "hold",
+    back_iters: int = 0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -307,20 +331,32 @@ def regress_loss(
               window is scored on its own frames, and the windows' losses are
               averaged.
 
+    back_iters: after the forward pass over the windows, a backward pass over
+              them from the clip's end to its start, this many rounds a
+              window, each from where the forward pass left it, the model told
+              time runs backward (`direction`) and each output a step from
+              the frame after (`_backward_steps`): later frames inform earlier
+              ones without a window that holds both. Rounds are weighted and
+              clocked over both passes together; windows of both passes are
+              averaged.
+
     Frame 0 is scored before it is pinned again: the network is asked for a
     zero correction there, as the flow loss asks for a zero velocity. With a
     velocity or an acceleration its correction there is zero by construction.
     """
     if window and carry:
         raise ValueError("windows and carry both restart the later frames: use one")
+    _check_backward(model, back_iters)
     B, T = x1.shape[:2]
-    w = [gamma ** (iters - 1 - i) for i in range(iters)]
+    R = iters + back_iters
+    w = [gamma ** (R - 1 - i) for i in range(R)]
     w = [v / sum(w) for v in w]
     spans = _windows(T, window, overlap)
-    share = 1 / len(spans)
+    share = 1 / (len(spans) * (2 if back_iters else 1))
 
     whole = _pin(torch.zeros_like(x1), known_x0)
     total = vis_total = x1.new_zeros(())
+    seen_all = None
     done = 0
     for start, end in spans:
         whole = _reach(whole, done, end, start, reach)
@@ -332,13 +368,15 @@ def regress_loss(
         rot = {}
         blank = getattr(model, "hidden_blank", False)
         c = cond
+        fwd = _direction(model, 1.0, B, x1.device)
         for i in range(iters):
-            k = _clock(i, iters, B, x1.device)
+            k = _clock(i, R, B, x1.device)
             vis_loss = x1.new_zeros(())
             if visible_w is None and prev is None and not blank:
-                step = model(g.detach(), k, anchor, **at, **rot, **c)
+                step = model(g.detach(), k, anchor, **at, **rot, **fwd, **c)
             else:
-                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot, **c)
+                step, logits = model(g.detach(), k, anchor, visibility=True, vis_prev=prev, **at, **rot,
+                                     **fwd, **c)
                 if visible_w is not None:
                     vis_loss = share * w[i] * visibility_error(logits, visible_w)
                 if prev is not None:
@@ -371,7 +409,48 @@ def regress_loss(
             if carry:
                 g = _carry(g.detach(), i, iters)
         whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
+        if blank:
+            if seen_all is None:
+                seen_all = logits.new_zeros(B, T, logits.shape[-1])
+            seen_all[:, start:end] = logits.detach()
         done = end
+
+    for start, end in (reversed(spans) if back_iters else ()):
+        g, x1_w = whole[:, start:end], x1[:, start:end]
+        mask_w, weight_w, visible_w = (_cut(t, start, end) for t in (mask, weight, visible))
+        kx0 = known_x0 if start == 0 else None
+        at = {} if len(spans) == 1 else {"frames": (start, end)}
+        blank = getattr(model, "hidden_blank", False)
+        # Hidden points stay blanked from the forward pass's last call on.
+        c = _blank_hidden(cond, seen_all[:, start:end], start, end, T) if blank else cond
+        bwd = _direction(model, -1.0, B, x1.device)
+        for j in range(back_iters):
+            i = iters + j
+            vis_loss = x1.new_zeros(())
+            out = model(g.detach(), _clock(i, R, B, x1.device), anchor, visibility=model.visibility,
+                        **at, **bwd, **c)
+            step, logits = out if model.visibility else (out, None)
+            if visible_w is not None:
+                vis_loss = share * w[i] * visibility_error(logits, visible_w)
+            if blank:
+                c = _blank_hidden(cond, logits, start, end, T)
+            g = g.detach() + _backward_steps(step, param)
+            loss = w[i] * masked_error(g, x1_w, mask_w, weight_w, loss_type)
+            if vel_weight:
+                loss = loss + w[i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 1)
+            if acc_weight:
+                loss = loss + w[i] * acc_weight * _motion_error(g, x1_w, mask_w, weight_w, loss_type, 2)
+            if rigid_weight:
+                loss = loss + w[i] * rigid_weight * _rigid_error(g, x1_w, pairs, loss_type)
+            loss = share * loss
+            if backward is not None:
+                with torch.autocast(device_type=x1.device.type, enabled=False):
+                    ((loss + vis_weight * vis_loss) * backward).backward()
+                loss, vis_loss = loss.detach(), vis_loss.detach()
+            total = total + loss
+            vis_total = vis_total + vis_loss
+            g = _pin(g, kx0)
+        whole = torch.cat([whole[:, :start], g.detach(), whole[:, end:]], dim=1)
 
     if backward is None:
         total = total + vis_weight * vis_total
@@ -392,6 +471,7 @@ def refine(
     overlap: int = 0,
     rounds: Optional[list] = None,
     reach: str = "hold",
+    back_iters: int = 0,
     **cond,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """The prediction: `iters` corrections to a guess that starts at zero.
@@ -410,13 +490,17 @@ def refine(
     windows, each frame from the last window that covers it.
 
     `reach`: how a window's frames past the last one start (`_reach`).
+    `back_iters`: rounds a window of the backward pass, as `regress_loss`.
     """
     if window and carry:
         raise ValueError("windows and carry both restart the later frames: use one")
+    _check_backward(model, back_iters)
     B, N, _ = anchor.shape
+    R = iters + back_iters
     spans = _windows(num_frames, window, overlap)
     whole = _pin(torch.zeros(B, num_frames, N, 3, device=anchor.device), known_x0)
     seen = whole.new_zeros(B, num_frames, N) if visibility else None
+    seen_all = None
     done = 0
     for start, end in spans:
         whole = _reach(whole, done, end, start, reach)
@@ -428,13 +512,15 @@ def refine(
         rot = {}
         blank = getattr(model, "hidden_blank", False)
         c = cond
+        fwd = _direction(model, 1.0, B, anchor.device)
         if rounds is not None:
             if not rounds:
-                rounds.extend(whole.clone() for _ in range(iters + 1))
+                rounds.extend(whole.clone() for _ in range(R + 1))
             rounds[0] = torch.cat([rounds[0][:, :start], g, rounds[0][:, end:]], dim=1)
         for i in range(iters):
-            out = model(g, _clock(i, iters, B, anchor.device), anchor,
-                        visibility=visibility or prev is not None or blank, vis_prev=prev, **at, **rot, **c)
+            out = model(g, _clock(i, R, B, anchor.device), anchor,
+                        visibility=visibility or prev is not None or blank, vis_prev=prev, **at, **rot,
+                        **fwd, **c)
             if visibility or prev is not None or blank:
                 out, logits = out
             if prev is not None:
@@ -450,5 +536,29 @@ def refine(
         whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
         if visibility:
             seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
+        if blank:
+            if seen_all is None:
+                seen_all = logits.new_zeros(B, num_frames, N)
+            seen_all[:, start:end] = logits
         done = end
+    for start, end in (reversed(spans) if back_iters else ()):
+        g = whole[:, start:end]
+        kx0 = known_x0 if start == 0 else None
+        at = {} if len(spans) == 1 else {"frames": (start, end)}
+        blank = getattr(model, "hidden_blank", False)
+        c = _blank_hidden(cond, seen_all[:, start:end], start, end, num_frames) if blank else cond
+        bwd = _direction(model, -1.0, B, anchor.device)
+        for j in range(back_iters):
+            i = iters + j
+            want = visibility or blank
+            out = model(g, _clock(i, R, B, anchor.device), anchor, visibility=want, **at, **bwd, **c)
+            out, logits = out if want else (out, None)
+            if blank:
+                c = _blank_hidden(cond, logits, start, end, num_frames)
+            g = _pin(g + _backward_steps(out, param), kx0)
+            if rounds is not None:
+                rounds[i + 1] = torch.cat([rounds[i + 1][:, :start], g, rounds[i + 1][:, end:]], dim=1)
+        whole = torch.cat([whole[:, :start], g, whole[:, end:]], dim=1)
+        if visibility:
+            seen = torch.cat([seen[:, :start], logits.to(seen.dtype), seen[:, end:]], dim=1)
     return (whole, seen) if visibility else whole
