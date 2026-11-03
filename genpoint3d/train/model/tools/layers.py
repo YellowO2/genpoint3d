@@ -1,27 +1,7 @@
-"""The transformer building blocks the model is assembled from.
-
-The machinery. You rarely need to open this file.
-
-These are the standard transformer building blocks, adapted from
-`tesfaldet/genpt` (whose transformer descends from HDiT, Crowson et al.,
-ICML 2024). `model/PointDiT.py` assembles them into our architecture -- read that one
-to see the design; read this one only to check the maths.
-
-What each piece is for:
-
-  RMSNorm      cheaper LayerNorm, no mean subtraction. The 2026 default.
-  AdaRMSNorm   how conditioning enters the network: it predicts a per-channel
-               scale for the norm. This is what "AdaLN" means.
-  Attention    with QK-norm -- q and k are L2-normalised and given a learnable
-               per-head temperature, which stops attention logits exploding.
-  RoPE         relative position baked into attention rather than added to the
-               token. 1 axis = time, 3 axes = a point's xyz.
-  GEGLU        gated feed-forward. Slightly better than plain GELU per param.
-  zero_init    every residual branch starts as a no-op, so an untrained block
-               is the identity and depth costs nothing at initialisation.
-
-Shapes: B batch, N tokens, D model dim, H heads, Dh head dim.
-"""
+"""The transformer blocks `PointDiT.py` is built from, adapted from
+`tesfaldet/genpt` (HDiT): RMSNorm, AdaRMSNorm (the conditioning scales each
+channel), attention with QK-norm and RoPE, GEGLU feed-forward, and residual
+branches that start at zero."""
 
 import math
 from typing import Optional
@@ -45,18 +25,8 @@ def zero_init(layer: nn.Linear, almost: bool = True) -> nn.Linear:
 
 
 def rms_norm(x: torch.Tensor, scale: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """RMSNorm that does not undo autocast.
-
-    The obvious spelling upcasts `x` itself -- `x.float() * scale.float() *
-    rsqrt(...)` -- which under bf16 autocast materialises three full-size fp32
-    copies of the input. On the context tensor, 226 MB per batch of 16, that ran
-    once per cross block and dominated the step's memory.
-
-    `mean(dtype=torch.float32)` accumulates the reduction in fp32 without
-    materialising an fp32 copy, which is the part that actually needs the
-    precision. The reciprocal is a single scalar per row, so scaling stays in
-    the input dtype.
-    """
+    """RMSNorm with the mean taken in fp32 but no fp32 copy of `x`, which
+    under autocast was the step's largest memory cost."""
     mean_sq = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
     inv = torch.rsqrt(mean_sq + eps).to(x.dtype)     # (..., 1), cheap
     return x * inv * scale.to(x.dtype)
@@ -73,15 +43,8 @@ class RMSNorm(nn.Module):
 
 
 class AdaRMSNorm(nn.Module):
-    """RMSNorm whose scale is predicted from the conditioning vector (= AdaLN).
-
-    Zero-init means it starts at `scale = 1`, i.e. an ordinary RMSNorm, and the
-    conditioning only takes effect as training moves the weights off zero.
-
-    Note this conditioning is purely *multiplicative*. `rms_norm(0) = 0`, so a
-    token stream of exact zeros stays zero through the whole network and no
-    gradient flows -- never feed zeros as tokens.
-    """
+    """RMSNorm whose scale comes from the conditioning (AdaLN), starting at 1.
+    It only multiplies: a token of exact zeros stays zero."""
 
     def __init__(self, dim: int, cond_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -118,17 +81,9 @@ def apply_rope(x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
 
 
 class RoPE(nn.Module):
-    """Rotary position embedding over `n_axes` continuous coordinates.
-
-    `n_axes=1` with the frame's time gives standard temporal RoPE. `n_axes=3`
-    with a point's xyz gives the axial variant the paper uses for spatial
-    attention -- the head's rotary channels are split evenly across x, y, z.
-
-    Frequencies are log-spaced and differ per head, so heads attend at
-    different wavelengths. The ladder runs from pi to `max_freq * pi` radians
-    per unit of position, so it expects positions in roughly [-1, 1]: the
-    slowest channel then turns once across the whole range.
-    """
+    """Rotary position embedding over `n_axes` coordinates (1: time, 3: xyz,
+    channels split evenly), log-spaced from pi to `max_freq` pi per unit and
+    different per head: built for positions in about [-1, 1]."""
 
     def __init__(self, head_dim: int, num_heads: int, n_axes: int = 1, max_freq: float = 10.0) -> None:
         super().__init__()
@@ -144,8 +99,7 @@ class RoPE(nn.Module):
 
     def forward(self, pos: torch.Tensor) -> torch.Tensor:
         """`pos`: (..., N, n_axes) -> theta (..., H, N, n_axes*per_axis)."""
-        # fp32 whatever autocast says: the top channel turns 10*pi per unit, and
-        # bf16's 8 bits of mantissa cannot hold an angle that large.
+        # fp32: bf16 cannot hold an angle of up to 10 pi per unit.
         with torch.autocast(device_type=pos.device.type, enabled=False):
             theta = pos.float()[..., None, None] * self.freqs  # (..., N, n_axes, H, per_axis)
         theta = theta.movedim(-2, -3)                            # (..., N, H, n_axes, per_axis)
@@ -156,15 +110,8 @@ class RoPE(nn.Module):
 # ----------------------------------------------------------------- attention
 
 class Attention(nn.Module):
-    """Self- or cross-attention with QK-norm and optional RoPE.
-
-    The learnable per-head `scale` replaces the usual `1/sqrt(d)`: q and k are
-    L2-normalised first, so logits are bounded cosine similarities and the
-    model learns how sharp it wants each head to be.
-
-    Passing `context` makes this cross-attention -- that is the hook step 3
-    uses to let point tokens query the DINOv3 feature map.
-    """
+    """Self- or cross-attention (with `context`), q and k L2-normalised with a
+    learned temperature per head, and optional RoPE."""
 
     def __init__(self, dim: int, num_heads: int, context_dim: Optional[int] = None) -> None:
         super().__init__()
@@ -204,11 +151,8 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
-    """One attention + one feed-forward, both residual and both AdaLN-conditioned.
-
-    The same class serves temporal and spatial attention -- only the tensor
-    reshape and the RoPE positions differ, and `PointDiT.py` handles those.
-    """
+    """Attention then feed-forward, both residual and AdaLN-conditioned; the
+    temporal and spatial blocks differ only in how `PointDiT` lays out tokens."""
 
     def __init__(self, dim: int, num_heads: int, mlp_mult: int, cond_dim: int) -> None:
         super().__init__()
@@ -251,12 +195,8 @@ class CrossBlock(nn.Module):
 # --------------------------------------------------------------- embeddings
 
 class FourierEmbedding(nn.Module):
-    """Map a low-dimensional continuous value to a high-dimensional vector.
-
-    A raw scalar like `k = 0.31` is a terrible network input -- nearby values
-    look nearly identical. Projecting onto random sinusoids of many frequencies
-    makes small differences immediately distinguishable.
-    """
+    """A low-dimensional value as sines and cosines of random frequencies, so
+    nearby values are told apart."""
 
     def __init__(self, in_dim: int, out_dim: int, std: float = 16.0) -> None:
         super().__init__()
@@ -265,10 +205,7 @@ class FourierEmbedding(nn.Module):
         self.register_buffer("freqs", torch.randn(in_dim, out_dim // 2) * std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # fp32 whatever autocast says, and the output stays fp32. Under bf16 the
-        # matmul rounded `x` to 8 bits of mantissa before multiplying by
-        # frequencies of std 16, and a small error in `x` is a large one in phase:
-        # the result had cosine 0.88 with the fp32 embedding of the same position.
+        # fp32 in and out: bf16 rounds `x` enough to scramble the phase.
         with torch.autocast(device_type=x.device.type, enabled=False):
             proj = 2 * math.pi * (x.float() @ self.freqs)
             return torch.cat((proj.sin(), proj.cos()), dim=-1)

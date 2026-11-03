@@ -12,10 +12,8 @@ def image_projection(intrinsics: torch.Tensor, extrinsics: torch.Tensor, hw: tor
     hw          (B, 2) native frame size (H, W)
     scale, mean (B,), (B, 3) the clip's normalisation: metres = p * scale + mean
 
-    One matrix does normalisation, camera pose and intrinsics, in that order,
-    and its output is `(u * z, v * z, z)` with u, v in [0, 1] across the frame
-    -- see `project`. Dividing by the frame size here is what makes the result
-    independent of the resolution anything was resized to.
+    One matrix for normalisation, pose and intrinsics, giving `(u z, v z, z)`
+    with u, v in [0, 1] across the frame, whatever it was resized to.
     """
     K = intrinsics.float().clone()
     K[..., 0, :] /= hw[:, 1, None, None].float()
@@ -30,9 +28,8 @@ def project(pos: torch.Tensor, proj: torch.Tensor) -> tuple[torch.Tensor, torch.
     """pos (B, T, N, 3) scene-normalised, proj (B, T, 3, 4), both fp32 ->
     (B, T, N, 2) `(u, v)` in [0, 1] across the frame, and (B, T, N) depth.
 
-    A point behind the camera has no pixel. Its depth is floored and the
-    result held to within one frame-width of the frame, so it reads a window
-    of zeros rather than an infinity.
+    Behind the camera the depth is floored and uv held within a frame-width
+    of the frame, so it reads zeros rather than an infinity.
     """
     q = torch.einsum("btij,btnj->btni", proj[..., :3], pos) + proj[:, :, None, :, 3]
     z = q[..., 2]
@@ -43,11 +40,7 @@ def project(pos: torch.Tensor, proj: torch.Tensor) -> tuple[torch.Tensor, torch.
 def unproject(uv: torch.Tensor, z: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:
     """The inverse of `project`: uv (B, T, N, 2) in [0, 1] across the frame,
     z (B, T, N) depth in metres, proj (B, T, 3, 4), all fp32 -> (B, T, N, 3)
-    scene-normalised positions.
-
-    Solved in float64: the matrix carries the clip's scale and the frame size,
-    and a point that comes back a millimetre off is the error this exists to
-    remove.
+    scene-normalised positions, solved in float64 to stay sub-millimetre.
     """
     q = torch.cat([uv * z[..., None], z[..., None]], dim=-1).double()
     inv = torch.linalg.inv(proj[..., :3].double())                     # (B, T, 3, 3)

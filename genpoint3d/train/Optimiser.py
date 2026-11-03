@@ -10,11 +10,8 @@ log = logging.getLogger(__name__)
 
 
 class Optimiser:
-    """AdamW, its learning-rate schedule, the gradient clip, and the EMA.
-
-    The EMA is what gets scored and saved: `swap_in_average` puts it in the
-    model for that, and `swap_out_average` puts the live weights back.
-    """
+    """AdamW with warmup then cosine, the gradient clip, and the EMA of the
+    weights, which is what gets scored and saved (`swap_in_average`)."""
 
     def __init__(self, model, settings, hardware: Hardware) -> None:
         self.clip = settings.clip
@@ -30,9 +27,7 @@ class Optimiser:
                  f" | wdecay {settings.wdecay:g} | amp {'bf16' if hardware.amp else 'off'}")
 
     def step(self, model) -> float:
-        """One optimiser step on the gradient the micro-batches left. Returns
-        the gradient's norm before the clip, to tell how often the clip bites:
-        a clip under the usual norm shrinks every step, like a smaller rate."""
+        """One step on the micro-batches' gradient; returns its norm before the clip."""
         norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip or float("inf")))
         self.opt.step()
         self.opt.zero_grad(set_to_none=True)
@@ -45,9 +40,7 @@ class Optimiser:
         return self.sched.get_last_lr()[0]
 
     def swap_in_average(self, model) -> None:
-        """Score the averaged weights, which are also what gets saved --
-        evaluating the live weights and shipping the EMA ones would report a
-        number for a checkpoint nobody has."""
+        """Put the averaged weights in, to score and save them."""
         if self.ema is not None:
             self.live = {k: v.detach().clone() for k, v in model.state_dict().items()}
             model.load_state_dict(self.ema.state_dict(model))
@@ -60,16 +53,8 @@ class Optimiser:
 
 
 class _Average:
-    """A slowly-following copy of the weights, used for evaluation.
-
-    SGD leaves the weights jittering around a minimum rather than sitting in
-    it, and an average over recent steps lands closer to the middle than any
-    single step does. Diffusion models gain more from this than most, and the
-    paper lists EMA among its training ingredients (section 4.1).
-
-    `decay` warms up: averaging over 1000 steps is meaningless at step 10, when
-    the initialisation would still dominate.
-    """
+    """A slowly following average of the weights, its decay warming up over
+    the first steps so the initialisation does not dominate."""
 
     def __init__(self, model, decay: float = 0.999):
         self.decay = decay

@@ -43,17 +43,12 @@ class ClipDataset(Dataset):
             c = torch.load(c, weights_only=False)
         clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
 
-        # traj_scale=1.0 leaves both in scene-normalised units, so the offset
-        # below is subtracted before the target is scaled, not after.
         if self.level:
             clip = _levelled(clip)
+        # Positions, anchors and patches scene-normalised alike; only the
+        # target is then divided by traj_scale.
         n = clip.norm(traj_scale=1.0)
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
-        # Patch positions share the ANCHOR's normalisation, not the target's:
-        # `traj_scale` divides only what gets denoised. A patch position has to be
-        # comparable with `anchor` -- that is the whole point of a feature cloud --
-        # so it goes through the same `n.apply`. Done here, not further down,
-        # because `n` is rebound below.
         pxyz = None if clip.patch_xyz is None else n.apply(clip.patch_xyz)
         # Each point's own start, as the model is given it.
         offset = anchor[None].clone()      # (1, N, 3)
@@ -89,14 +84,8 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
-        # A dict rather than a tuple: evaluation needs the geometry that scoring
-        # in metres depends on, and a positional tuple of eight was already
-        # hard to read. Empty tensors rather than None so default collate works.
-        #
-        # Features stay in the fp16 they were cached in. Upcasting here cost
-        # 452 MB per batch of 16 -- the single largest tensor in the step --
-        # only for autocast to cast it straight back down. `to_device` restores
-        # fp32 when autocast is off.
+        # Empty tensors rather than None, for the default collate; features
+        # stay fp16 until `to_device`.
         ctx = clip.context
         frames = depth = torch.zeros(0)
         if self.frames is not None:
@@ -111,16 +100,12 @@ class ClipDataset(Dataset):
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),
-            # (T, R, R, 3) uint8, and it stays uint8 until the CNN takes a
-            # clip of it: as floats a batch of 16 is 2 GB.
+            # (T, R, R, 3) uint8 until the CNN takes it.
             "frames": frames,
             # (T, R / 4, R / 4) float32 z-depth in metres at each CNN cell.
             "depth": depth,
-            # metrics only -- the model never sees these
             "intrinsics": clip.intrinsics,
-            # The benchmark's pixel thresholds are defined on a frame whose
-            # short side is 256 px. Kubric frames are larger, so scoring with
-            # the native intrinsics makes every threshold too tight.
+            # The benchmark's thresholds are for a 256 px short side.
             "intrinsics_256": resize_intrinsics(clip.intrinsics, clip.hw),
             "extrinsics": clip.extrinsics,
             # (H, W) of the native frame.

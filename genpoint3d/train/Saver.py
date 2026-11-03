@@ -34,8 +34,6 @@ class Saver:
         out, m = self.out, report.scores
         self.log.append({"step": report.step, "train_loss": report.train_loss, **m})
         (out / "log.json").write_text(json.dumps(self.log, indent=2))
-        # Config and commit alongside the curve, in their own file so
-        # log.json stays a plain list that plot_log.py can read.
         (out / "run.json").write_text(json.dumps(
             {"commit": self.commit, "args": vars(self.settings),
              "clips": {"train": len(clips.train), "val": len(clips.val)}},
@@ -43,11 +41,7 @@ class Saver:
         ckpt = {"model": model.state_dict(), "step": report.step,
                 "args": vars(self.settings), "val": m, "commit": self.commit}
         torch.save(ckpt, out / "ckpt.pt")
-        # Keep the best separately: val typically bottoms out and then
-        # drifts up as the model overfits, so the LAST checkpoint is
-        # not the one you want.
-        # Maximise APD, as genpt's model_checkpoint does
-        # (monitor: val/d_all_avg/avg, mode: max).
+        # The best val APD so far, kept apart from the latest.
         if m["average_pts_within_thresh"] > self.best:
             self.best = m["average_pts_within_thresh"]
             torch.save(ckpt, out / "best.pt")
@@ -55,12 +49,7 @@ class Saver:
 
 
 def _git_commit() -> str:
-    """The commit this run is from, so a number can always be traced to code.
-
-    train.pbs prints this to the live log, but that log lives on scratch and is
-    purged. A result whose code cannot be identified is not reproducible, so it
-    goes in the log and the checkpoint too.
-    """
+    """The commit this run is from, "-dirty" with uncommitted changes."""
     repo = Path(__file__).resolve().parents[2]
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -70,7 +59,5 @@ def _git_commit() -> str:
         if out.returncode:
             return "unknown"
         return out.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
-    except Exception:
-        # Compute nodes have no git on PATH; an unknown commit is not worth
-        # killing a run over.
+    except Exception:      # compute nodes have no git
         return "unknown"
