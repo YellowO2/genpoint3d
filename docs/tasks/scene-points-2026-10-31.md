@@ -48,8 +48,11 @@ with each other, so a turning surface is never seen turning as a whole.
    of frame 0; seen once, it exists in every frame. Surfaces never seen
    (imagined points, the set loss) come after this works.
 2. One mechanism for every frame without evidence: a hidden point, a forecast
-   frame and a frame before a point was first seen all get no image and are
-   carried by the rest of the scene (`--hidden-blank`).
+   frame, a gap and a frame before a point was first seen are all predicted
+   from the rest of the scene, and none is final: a frame with no image is
+   null input, a hidden one keeps its image beside the model's own fed-back
+   visibility, so a point can always be found again (4 Nov; the first
+   version blanked hidden points for good, `--hidden-blank`).
 3. Two passes over the clip's windows, with an input saying which way time
    runs, alternating forward, back, forward, back, one round a window each,
    four in all: each sweep starts from what the one before left, so later

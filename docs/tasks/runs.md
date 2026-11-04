@@ -519,3 +519,27 @@ exactly as before the cleanup: predictions identical, the step's loss
 identical and its gradients within the GPU's run-to-run noise (6e-5). A
 100-step run of the default design (`cleanup_check`, from fyT) trained,
 validated and saved end to end; validation is one pass now, 80 s for 24 clips.
+
+## Fixes after the cleanup, 4 Nov (`f35cca2`, `c0d0077`)
+
+From a review of the lean code against the design:
+
+1. Unseen is never final. The visibility head used to blank a point's image
+   in a frame it called hidden, for every later round: with no image there,
+   nothing could call it seen again, so a point that came back was never
+   re-found. Now what the head last said about every frame is fed back to
+   the token (carried through windows and sweeps), the image stays, and a
+   fact beside it says whether the frame is before the point's query frame,
+   or is it. `--hidden-blank` is gone. Half the training clips now lose a
+   span of 2 to `--max-gap` (12) frames in the middle instead of their end,
+   so re-finding a point after it was unseen is practised by every point.
+2. The matcher's frame-before comparison compared a window's first frame
+   with itself (always a perfect match); it now reads the clip's frame
+   before, and is off unless both frames have their image.
+3. A point first seen in a later window started from the group vector it
+   said before it was in any window; now from zeros.
+4. Scoring measured from frame 0: the static baseline, moving points and the
+   hidden baseline's fallback now use each point's query frame. Only the
+   scores in use are kept (26 a clip).
+
+These change what fyT and fzN predict; no run of the fixed design exists yet.
