@@ -23,13 +23,13 @@ class ClipDataset(Dataset):
 
     The target is each point's displacement from its anchor, over
     TRAJ_SCALE_DISP. `frames` is a directory from `scripts/cache_frames.py`
-    (RGB and depth per clip; None serves neither). `level` turns each clip so
+    (RGB and depth per clip), or one per cache directory; None serves neither. `level` turns each clip so
     up is -y (`_levelled`). `query_before` C keeps only points first seen
     before frame C: a forecast from C is scored on points it was handed.
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
-                 frames: Path | None = None, level: bool = False, query_before: int = 0):
+                 frames: Path | dict[Path, Path] | None = None, level: bool = False, query_before: int = 0):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         self.frames, self.level, self.query_before = frames, level, query_before
         self.traj_scale = TRAJ_SCALE_DISP
@@ -39,6 +39,7 @@ class ClipDataset(Dataset):
 
     def __getitem__(self, i: int):
         c = self.clips[i]
+        frames_dir = self.frames.get(c.parent) if isinstance(self.frames, dict) else self.frames
         if isinstance(c, Path):
             c = torch.load(c, weights_only=False)
         clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
@@ -88,12 +89,12 @@ class ClipDataset(Dataset):
         # stay fp16 until `to_device`.
         ctx = clip.context
         frames = depth = torch.zeros(0)
-        if self.frames is not None:
-            frames = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}.npy"))
+        if frames_dir is not None:
+            frames = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}.npy"))
             if frames.shape[0] != traj.shape[0]:
                 raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
                                  f"for a {traj.shape[0]}-frame track")
-            depth = torch.from_numpy(np.load(self.frames / f"{clip.seq_id}{DEPTH}"))
+            depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
         norm = clip.norm(traj_scale=self.traj_scale)
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t,

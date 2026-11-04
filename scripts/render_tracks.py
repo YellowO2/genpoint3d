@@ -219,7 +219,7 @@ def main() -> int:
     if args.clip:
         clips = [Path(args.cache) / f"{c}.pt" for c in args.clip]
     else:
-        clips = split_clips(args.cache, rs.val_frac, rs.seed).val[: args.clips]
+        clips = split_clips([args.cache], rs.val_frac, rs.seed).val[: args.clips]
     # As many points as are drawn: a clip's first points are often all of one object.
     ds = run.dataset(clips, args.frames_cache, points=max(rs.points, args.points), query_before=args.eval_cutoff)
     loader = DataLoader(ds, batch_size=args.batch or rs.batch, shuffle=False, num_workers=2)

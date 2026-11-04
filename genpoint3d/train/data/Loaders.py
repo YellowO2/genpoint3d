@@ -1,22 +1,24 @@
 """Batches of a run's clips: an endless stream to train on, and val passes."""
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from genpoint3d.train.data.ClipDataset import ClipDataset
 from genpoint3d.train.data.Clips import Clips
 
 
 class Loaders:
-    """`train` shuffles and is drawn from without end; `val` and `fit` are
-    scored in order. `fit` is `--train-eval` clips of the TRAIN split, None
-    without it."""
+    """`train` is drawn from without end, by the clips' weights; `val` and
+    `fit` are scored in order. `fit` is `--train-eval` clips of the TRAIN
+    split, None without it."""
 
     def __init__(self, clips: Clips, settings) -> None:
         # What every loader shares: how a clip is turned into a sample.
         how_data = dict(frames=clips.frames, level=bool(settings.level))
+        drawn = (dict(sampler=WeightedRandomSampler(clips.weights, len(clips.train)))
+                 if clips.weights else dict(shuffle=True))
         self.train = DataLoader(
             ClipDataset(clips.train, settings.points, **how_data),
-            batch_size=settings.batch, shuffle=True, num_workers=settings.workers,
+            batch_size=settings.batch, num_workers=settings.workers, **drawn,
             drop_last=True, persistent_workers=settings.workers > 0,
         )
         self.val = DataLoader(

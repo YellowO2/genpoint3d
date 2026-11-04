@@ -14,8 +14,11 @@ class Settings(argparse.Namespace):
             prog="python -m genpoint3d.train.main",
             description="Train the tracker on cached clips and save its checkpoints.")
         # Data and run
-        p.add_argument("--cache", required=True, help="cache directory from genpoint3d.prepare")
-        p.add_argument("--frames-cache", required=True, help="RGB and depth from scripts/cache_frames.py")
+        p.add_argument("--cache", nargs="+", required=True,
+                       help="cache directories from genpoint3d.prepare, drawn from alike; the first's "
+                            "val split picks best.pt")
+        p.add_argument("--frames-cache", nargs="+", required=True,
+                       help="each cache's RGB and depth, from scripts/cache_frames.py")
         p.add_argument("--fine-res", type=int, default=384, help="side of the cached frames")
         p.add_argument("--out", default="local/outputs/run")
         p.add_argument("--init", default=None, metavar="CKPT",
