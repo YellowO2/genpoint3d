@@ -127,6 +127,7 @@ class PointDiT(nn.Module):
         alive: torch.Tensor | None = None,
         vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
+        group_known: torch.Tensor | None = None,
         direction: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
         x_before: torch.Tensor | None = None,
@@ -148,6 +149,7 @@ class PointDiT(nn.Module):
         alive        (B, N) bool     points the others may attend to
         vis_prev     (B, T, N)       the visibility logits last said (with the head)
         group_prev   (B, N, E)       the group vectors the last call said
+        group_known  (B, N) bool     the points that have said one (None: all)
         direction    (B,)            +1 forward, -1 backward (bidirectional)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
@@ -234,7 +236,9 @@ class PointDiT(nn.Module):
         if self.visibility != (vis_prev is not None):
             raise ValueError("vis_prev is given exactly to a model with the visibility head")
         if vis_prev is not None:
-            h = h + (self.feedback_scale * vis_prev[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
+            # As a probability less a half: 0 before the head has said anything.
+            belief = torch.sigmoid(vis_prev.float()) - 0.5
+            h = h + (self.feedback_scale * belief[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
         t = torch.arange(start, start + T, device=dev)[None, :, None]
         q = query_t[:, None]
         h = h + ((t < q)[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
@@ -247,6 +251,9 @@ class PointDiT(nn.Module):
                  else torch.zeros(B, N, self.group_feedback, device=dev))
             h = h + self.feedback_scale * self.group_in(v.to(h.dtype))[:, None]
             a = 2 * torch.sigmoid(-_sq_dist(v))                                  # (B, N, N)
+            if group_known is not None:
+                # A point with no vector yet is biased towards nobody.
+                a = a * (group_known[:, :, None] & group_known[:, None, :])
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
             biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
                       for d in range(self.depth)]

@@ -51,7 +51,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
-                       help="multiplies what the group vector adds")
+                       help="multiplies what the fed-back visibility and group vector add")
         # Refinement
         p.add_argument("--window", type=int, default=16, help="frames per window, 0 = the whole clip")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")

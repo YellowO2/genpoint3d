@@ -4,8 +4,8 @@ The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
 e.g. "fbfb", one round a window each; empty is `iters` rounds forward). Each
 round the model gives a velocity per frame, summed from each point's fixed
-frame (`_integrate`), and the point is held at its anchor in its query frame
-(`_pin`). A frame without its image is an input like any other: what the
+frame (`_integrate`): its query frame when the window has it, where it stays
+at its anchor. A frame without its image is an input like any other: what the
 visibility head last said about every frame is fed back, so a point that looks
 hidden can stop trusting the image there, and look again.
 """
@@ -16,8 +16,6 @@ from typing import Optional
 import torch
 from torch import nn
 
-from genpoint3d.train.tools.batch import seen_at
-from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.visibility import visibility_error
 
 
@@ -63,38 +61,27 @@ def _integrate(step: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
     return torch.where(t > a, c - c_a, torch.where(t < a, c_a1 - before, torch.zeros_like(c)))
 
 
-def _handed_over(cond: dict, anchor: torch.Tensor) -> torch.Tensor:
-    """(B, N) the points whose query pixel is seen in their query frame: the
-    others were never given to the model."""
+def _handed_over(cond: dict) -> torch.Tensor:
+    """(B, N) the points whose query frame is seen whole: the others were never
+    given to the model (a partly hidden frame's DINOv3, their id card, would
+    see the hidden part)."""
     q, view = cond["query_t"], cond.get("visual_mask")
     if view is None:
         return torch.ones_like(q, dtype=torch.bool)
-    proj = cond["fine_proj"].float().gather(1, q[..., None, None].expand(-1, -1, 3, 4))
-    uv = project(anchor.float()[:, :, None], proj)[0][:, :, 0]                       # (B, N, 2)
-    return seen_at(view.gather(1, q[..., None, None].expand(-1, -1, 2, 2)), uv[:, :, None])[:, :, 0]
+    return view.flatten(2).all(-1).gather(1, q)
 
 
 def _window_points(cond: dict, seen: torch.Tensor, start: int, end: int, backward: bool, every: bool):
-    """For one window: `alive` (B, N), the points it has (forward, those first
-    seen by its end, or all once a backward sweep has run, `every`; backward,
-    all), only points handed over (`seen`); `at` (B, N), the frame each
-    point's steps run from: its query frame when inside the window, else the
-    window's first frame forward and its last backward; `inside` (B, N)."""
+    """For one window: `alive` (B, N), the points it has, only points handed
+    over (`seen`): forward, those first seen by its end, or all once an
+    earlier sweep has run (`every`); backward, all. `at` (B, N), the frame
+    each point's steps run from: its query frame when inside the window, else
+    the window's first frame forward and its last backward."""
     q = cond["query_t"]
     inside = (q >= start) & (q < end)
     alive = seen if backward or every else seen & (q < end)
     at = torch.where(inside, q - start, torch.full_like(q, end - start - 1 if backward else 0))
-    return alive, at, inside
-
-
-def _pin(g: torch.Tensor, at: torch.Tensor, inside: torch.Tensor) -> torch.Tensor:
-    """Hold each point whose query frame is in the window at its anchor
-    there: a displacement of zero."""
-    if not bool(inside.any()):
-        return g
-    idx = at[:, None, :, None].expand(-1, 1, -1, 3)
-    held = torch.where(inside[:, None, :, None], 0.0, g.gather(1, idx))
-    return g.scatter(1, idx, held)
+    return alive, at
 
 
 def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
@@ -138,7 +125,9 @@ class Sweeps:
         # What the head last said about each frame; 0 before it has.
         self.vis = torch.zeros(B, T, N, device=anchor.device)
         self.groups = None
-        self.seen = _handed_over(cond, anchor)
+        self.seen = _handed_over(cond)
+        # Points that have said a group vector: the others have none yet.
+        self.known = torch.zeros(B, N, dtype=torch.bool, device=anchor.device)
 
     def __iter__(self):
         model, anchor = self.model, self.anchor
@@ -153,23 +142,24 @@ class Sweeps:
                 if not back:
                     self.whole = _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
-                alive, at, inside = _window_points(self.cond, self.seen, start, end, back, every=r0 > 0)
+                alive, at = _window_points(self.cond, self.seen, start, end, back, every=r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
                 before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):
                     vis = self.vis[:, start:end] if model.visibility else None
                     step, logits, emb = model(g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive,
-                                              vis_prev=vis, group_prev=self.groups, direction=direction,
+                                              vis_prev=vis, group_prev=self.groups, group_known=self.known,
+                                              direction=direction,
                                               frames=frames, x_before=before, **self.cond)
                     if emb is not None:
                         # A point not yet in the window keeps what it had: nothing, at first.
                         kept = self.groups if self.groups is not None else torch.zeros_like(emb)
                         self.groups = torch.where(alive[..., None], emb.detach(), kept)
+                        self.known = self.known | alive
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive)
-                    g = _pin(g, at, inside)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 if not back:
                     done = end
@@ -264,7 +254,7 @@ def regress_loss(
         loss = share * loss
         vis_loss = x1.new_zeros(())
         if visible is not None:
-            vis_loss = share * w[r.i] * visibility_error(r.logits, _cut(visible, r.start, r.end))
+            vis_loss = share * w[r.i] * visibility_error(r.logits, _cut(visible, r.start, r.end), r.alive)
         if backward is not None:
             with torch.autocast(device_type=x1.device.type, enabled=False):
                 ((loss + vis_weight * vis_loss) * backward).backward()

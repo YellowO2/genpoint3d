@@ -4,7 +4,7 @@
 # first cache's val split picks best.pt). ARGS holds what the experiment changes.
 #
 #   qsub -v OUT=fzP_name,ARGS="--steps 2000" scripts/train.pbs
-#   qsub -v OUT=...,CACHE="cache/kubric_dense",FRAMES="cache/kubric_frames384" scripts/train.pbs
+#   qsub -v OUT=...,CACHE="cache/kubric_dense",FRAMES="cache/kubric_frames384",ARGS="--eval-cutoff 12" scripts/train.pbs
 #
 #PBS -N train
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb

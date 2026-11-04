@@ -11,7 +11,10 @@ def visible_target(vis: torch.Tensor, imaged: torch.Tensor) -> torch.Tensor:
     return vis & imaged
 
 
-def visibility_error(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """The mean binary cross-entropy of (B, T, N) logits against `target`,
-    over every (point, frame). In fp32: the logits may come out of autocast."""
-    return F.binary_cross_entropy_with_logits(logits.float(), target.float())
+def visibility_error(logits: torch.Tensor, target: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+    """The mean binary cross-entropy of (B, T, N) logits against `target`
+    over the points `points` (B, N) has, every frame. In fp32: the logits
+    may come out of autocast."""
+    bce = F.binary_cross_entropy_with_logits(logits.float(), target.float(), reduction="none")
+    w = points[:, None].expand_as(bce).float()
+    return (bce * w).sum() / w.sum().clamp(min=1)

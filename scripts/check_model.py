@@ -21,7 +21,7 @@ from genpoint3d.train.tools.batch import black_out, fine_inputs, to_device
 from genpoint3d.train.tools.regress import refine
 
 torch.manual_seed(0)
-B, T, N, P, F, R = 1, 12, 6, 16, 24, 64       # R: frame side, CNN map R/4
+B, T, N, P, F, R = 1, 16, 6, 16, 24, 64       # R: frame side, CNN map R/4; windows of 8 sharing 4: three
 
 
 def batch():
@@ -101,6 +101,7 @@ for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4,
                                                            dtype=torch.uint8)
     b2["depth"][:, 5:8, :R // 8, :R // 8] = 5.0
     b2["context"][:, 5:8] = torch.randn_like(b2["context"][:, 5:8])      # no DINOv3 in a partial frame
+    b2["id_card"][:, 4] = torch.randn_like(b2["id_card"][:, 4])          # its point, first seen at 5, is never handed over
     part = (masked_tracks(m, b, sched, view) - masked_tracks(m, b2, sched, view)).abs().max().item()
     seen = (masked_tracks(m, b, sched, view) - masked_tracks(m, changed(b, slice(5, 8)), sched, view)).abs().max().item()
     print(f"  top-left quarter of 5-7 hidden: change when it changes {part:.2e} (want 0), "

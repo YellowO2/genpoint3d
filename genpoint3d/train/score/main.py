@@ -12,7 +12,7 @@ from genpoint3d.train.score.visibility_scores import visibility_scores
 @torch.no_grad()
 def score(model, loader, judging: ScoreSettings, split: str) -> dict:
     """The mean scores over `loader`'s clips, logged under `split`: val_loss
-    (the training objective), APD in metres (TAPVid-3D's
+    (the position error over visible frames, as training measures it), APD in metres (TAPVid-3D's
     `average_pts_within_thresh`), its static baseline, and AJ and OA with a
     visibility head."""
     predictor = Predictor(model, judging)

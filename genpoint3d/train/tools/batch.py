@@ -28,8 +28,9 @@ def random_visual_mask(b: dict, min_context: int, max_gap: int) -> torch.Tensor:
                          "frame 0 always keeps its image")
     t = torch.arange(T)[None]
     cut = torch.randint(min_context, T + 1, (B, 1))
-    start = torch.randint(min_context, T - 1, (B, 1))
-    length = torch.randint(2, max(max_gap, 2) + 1, (B, 1))
+    length = torch.randint(2, min(max(max_gap, 2), T - min_context - 1) + 1, (B, 1))
+    # Ends before the last frame, so the clip is seen again after it.
+    start = min_context + (torch.rand(B, 1) * (T - length - min_context)).long()
     gap = (torch.rand(B, 1) < 0.5) & (max_gap > 0)
     lost = torch.where(gap, (t >= start) & (t < start + length), t >= cut)             # (B, T)
     # The quarters lost: one, a half, all but one, or all, turned a random
