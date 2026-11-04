@@ -49,8 +49,6 @@ class Settings(argparse.Namespace):
                        help="width of each point's group vector, fed back each call (0: none)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
                        help="multiplies what the group vector adds")
-        p.add_argument("--hidden-blank", type=int, default=1, choices=[0, 1],
-                       help="no image where the visibility head calls a point hidden")
         # Refinement
         p.add_argument("--window", type=int, default=16, help="frames per window, 0 = the whole clip")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")
@@ -58,7 +56,10 @@ class Settings(argparse.Namespace):
                        help="sweeps over the windows, one round each: f forward, b backward")
         p.add_argument("--refine-iters", type=int, default=4, help="rounds forward, with no --schedule")
         p.add_argument("--min-context", type=int, default=2,
-                       help="training cutoffs are uniform in [this, T]")
+                       help="training cutoffs and gaps start at or after this frame")
+        p.add_argument("--max-gap", type=int, default=12,
+                       help="half the training clips lose a span of 2 to this many frames "
+                            "instead of their end (0: cutoffs only)")
         p.add_argument("--eval-cutoff", type=int, default=24, metavar="C",
                        help="validate with images before frame C only (0: every frame)")
         # Losses
@@ -80,8 +81,6 @@ class Settings(argparse.Namespace):
             p.error("--window needs 0 < --overlap < --window")
         if settings.schedule and not settings.window:
             p.error("--schedule sweeps over the windows: needs --window W")
-        if settings.hidden_blank and settings.vis_loss <= 0:
-            p.error("--hidden-blank uses the visibility head's calls: needs --vis-loss W")
         if bool(settings.group_feedback) != (settings.group_loss > 0):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss) < 0:

@@ -37,7 +37,6 @@ class PointDiT(nn.Module):
         cross_window: int = 49,
         fine_neigh: int = 32,
         visibility: bool = False,
-        hidden_blank: bool = False,
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
         bidirectional: bool = False,
@@ -79,16 +78,17 @@ class PointDiT(nn.Module):
         self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, dim), almost=False)
         self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
-        # One logit per (point, frame): can the point be seen there?
+        # One logit per (point, frame): can the point be seen there? What it
+        # last said is fed back, so a point that looks hidden can stop
+        # trusting the image there, and look again.
         self.visibility = visibility
         if visibility:
             self.vis_weight = nn.Parameter(torch.zeros(dim))
-            # With hidden_blank the head's calls blank hidden points, so it
-            # starts out calling every point seen.
-            self.vis_bias = nn.Parameter(torch.full((), 3.0 if hidden_blank else 0.0))
-        if hidden_blank and not visibility:
-            raise ValueError("hidden_blank uses the visibility head's calls: needs visibility")
-        self.hidden_blank = hidden_blank
+            self.vis_bias = nn.Parameter(torch.zeros(()))
+            self.vis_in = nn.Parameter(torch.zeros(dim))
+        # Whether a frame is before the point's query frame, or is it: a fact,
+        # beside the head's belief.
+        self.query_in = nn.Parameter(torch.zeros(2, dim))
         # A backward sweep is told time runs backward: +-1 times one vector.
         self.bidirectional = bidirectional
         if bidirectional:
@@ -125,9 +125,11 @@ class PointDiT(nn.Module):
         query_t: torch.Tensor,
         visual_mask: torch.Tensor | None = None,
         alive: torch.Tensor | None = None,
+        vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
         direction: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
+        x_before: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         x            (B, T, N, 3)    the guess, displacement / traj_scale
@@ -142,17 +144,20 @@ class PointDiT(nn.Module):
         query_t      (B, N) long     each point's query frame in the clip
         visual_mask  (B, Tc) or (B, Tc, N) bool, False = no image there
         alive        (B, N) bool     points the others may attend to
+        vis_prev     (B, T, N)       the visibility logits last said (with the head)
         group_prev   (B, N, E)       the group vectors the last call said
         direction    (B,)            +1 forward, -1 backward (bidirectional)
         frames       (start, end)    the clip frames `x` covers; None = all
+        x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
 
         returns the velocity (B, T, N, 3), the visibility logits (B, T, N) and
         the group vectors (B, N, E), the last two None without their heads.
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
-        # The templates are read in the whole clip, before the window cut.
-        clip_map, clip_proj, clip_xyz = fine_map, fine_proj, fine_xyz
+        start = 0 if frames is None else frames[0]
+        # The templates and the frame before are read in the whole clip, before the window cut.
+        clip_map, clip_proj, clip_xyz, clip_mask = fine_map, fine_proj, fine_xyz, visual_mask
         if frames is not None:
             cut = slice(*frames)
             context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz = (
@@ -183,10 +188,27 @@ class PointDiT(nn.Module):
         if point_mask is not None:
             window = window * point_mask.reshape(B * T, -1, 1)
 
-        fine = self._fine_at_queries(fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos,
-                                     anchor, query_t)
-        if point_mask is not None:
-            fine = fine * point_mask[..., None]
+        # The matcher's second comparison reads each frame and the frame
+        # before (the clip's, before the window's first): off unless both
+        # have their image.
+        seen = torch.ones(B, T, N, dtype=torch.bool, device=dev) if point_mask is None else point_mask.expand(B, T, N)
+        if start > 0:
+            b_map, b_proj, b_xyz = (t[:, start - 1:start] for t in (clip_map, clip_proj, clip_xyz))
+            with torch.autocast(device_type=dev.type, enabled=False):
+                pos_b = self.lookup_pos(x_before.float(), anchor.float())
+            ok0 = (torch.ones(B, 1, N, dtype=torch.bool, device=dev) if clip_mask is None else
+                   (clip_mask if clip_mask.dim() == 3 else clip_mask[..., None])[:, start - 1:start].expand(B, 1, N))
+        else:
+            b_map, b_proj, b_xyz, pos_b = fine_map[:, :1], fine_proj[:, :1], fine_xyz[:, :1], pos[:, :1]
+            ok0 = torch.zeros(B, 1, N, dtype=torch.bool, device=dev)
+        with torch.autocast(device_type=dev.type, enabled=False):
+            uv_b, _ = project(pos_b, b_proj.float())
+        fine = self._fine_at_queries(torch.cat([b_map, fine_map], 1), torch.cat([b_xyz, fine_xyz], 1),
+                                     clip_map, clip_proj, clip_xyz, torch.cat([uv_b, uv], 1),
+                                     torch.cat([pos_b, pos], 1), anchor, query_t)
+        half = self.fine.out_dim // 2
+        prev_ok = torch.cat([ok0, seen[:, :-1]], 1) & seen
+        fine = torch.cat([fine[..., :half] * seen[..., None], fine[..., half:] * prev_ok[..., None]], -1)
 
         cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
         cond = cond + self.id_feature_proj(id_card)[:, None]
@@ -214,6 +236,13 @@ class PointDiT(nn.Module):
             motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
         h = h + self.motion_proj(motion.to(h.dtype))
         h = h + self.fine_tok(fine).to(h.dtype)
+        if self.visibility != (vis_prev is not None):
+            raise ValueError("vis_prev is given exactly to a model with the visibility head")
+        if vis_prev is not None:
+            h = h + (self.feedback_scale * vis_prev[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
+        t = torch.arange(start, start + T, device=dev)[None, :, None]
+        q = query_t[:, None]
+        h = h + ((t < q)[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
 
         biases = [None] * self.depth
         if group_prev is not None and not self.group_feedback:

@@ -1,6 +1,6 @@
 """The model and its loops at toy size, on the CPU in seconds: one training
-step reaches every weight, and a forecast is unchanged by anything in the
-frames it has no image of. Run after any change to the model or the loops:
+step reaches every weight, and the tracks are unchanged by anything in the
+frames they have no image of, after a cutoff or in a gap. Run after any change to the model or the loops:
 
   .venv/bin/python scripts/check_model.py
 """
@@ -14,6 +14,8 @@ from genpoint3d.train.learn import learn
 from genpoint3d.train.model.PointDiT import PointDiT
 from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.tools.batch import fine_inputs, to_device
+from genpoint3d.train.tools.regress import refine
 
 torch.manual_seed(0)
 B, T, N, P, F, R = 1, 12, 6, 16, 24, 64       # R: frame side, CNN map R/4
@@ -38,16 +40,37 @@ def batch():
     }
 
 
+def changed(b: dict, frames: slice) -> dict:
+    """`b` with everything the images give in `frames` replaced."""
+    b2 = {k: v.clone() for k, v in b.items()}
+    b2["context"][:, frames] = torch.randn_like(b2["context"][:, frames])
+    b2["frames"][:, frames] = torch.randint(0, 255, b2["frames"][:, frames].shape, dtype=torch.uint8)
+    b2["depth"][:, frames] = 5.0
+    b2["patch_xyz"][:, frames] += 1.0
+    return b2
+
+
+def gap_tracks(m, b: dict, sched: str) -> torch.Tensor:
+    """The tracks with frames 5 to 7 given no image, a gap seen again after."""
+    b = to_device(b, torch.device("cpu"))
+    vm = torch.ones(B, T, dtype=torch.bool)
+    vm[:, 5:8] = False
+    cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
+                **fine_inputs(m, b))
+    return refine(m, b["anchor"], T, iters=2, window=8, overlap=4, schedule=sched, **cond)[0]
+
+
 def model(**kw):
     return PointDiT(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, **kw)
 
 
-for kw, sched in ((dict(), ""), (dict(visibility=True, hidden_blank=True, group_feedback=4,
+for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4,
                                       feedback_scale=10.0, bidirectional=True, rope_current=True), "fbfb")):
     m = model(**kw)
-    for p in m.parameters():          # off the zero inits, so every reader is live
-        torch.nn.init.normal_(p, std=0.05) if p.dim() > 1 else None
-    s = types.SimpleNamespace(min_context=2, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
+    with torch.no_grad():             # off the zero inits, so every reader is live
+        for p in m.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+    s = types.SimpleNamespace(min_context=2, max_gap=4, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
                               group_loss=1.0 if kw else 0.0, vis_loss=1.0 if kw else 0.0, refine_iters=2,
                               accum=1, window=8, overlap=4, schedule=sched)
     m.train()
@@ -58,12 +81,10 @@ for kw, sched in ((dict(), ""), (dict(visibility=True, hidden_blank=True, group_
     j = ScoreSettings(device=torch.device("cpu"), refine_iters=2, window=8, overlap=4, schedule=sched, cutoff=6)
     b = batch()
     pred = Predictor(m, j)(b)
-    b2 = {k: v.clone() for k, v in b.items()}
-    b2["context"][:, 6:] = torch.randn_like(b2["context"][:, 6:])
-    b2["frames"][:, 6:] = torch.randint(0, 255, b2["frames"][:, 6:].shape, dtype=torch.uint8)
-    b2["depth"][:, 6:] = 5.0
-    b2["patch_xyz"][:, 6:] += 1.0
+    b2 = changed(b, slice(6, None))
     pred2 = Predictor(m, j)(b2)
     leak = (pred.tracks - pred2.tracks).abs().max().item()
     print(f"  tracks {tuple(pred.tracks.shape)}, vis {None if pred.visibility is None else tuple(pred.visibility.shape)}, "
           f"forecast change when frames >= 6 change: {leak:.2e} (want 0)")
+    gap = (gap_tracks(m, b, sched) - gap_tracks(m, changed(b, slice(5, 8)), sched)).abs().max().item()
+    print(f"  change anywhere when the frames of a gap (5-7) change: {gap:.2e} (want 0)")

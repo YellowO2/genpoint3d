@@ -10,7 +10,6 @@ def build_model(settings, feat_dim: int) -> PointDiT:
     return PointDiT(dim=settings.dim, depth=settings.depth, num_heads=settings.heads, feat_dim=feat_dim,
                     cross_window=a("cross_window", 49), fine_neigh=a("fine_neigh", 32),
                     visibility=a("vis_loss", 0.0) > 0,
-                    hidden_blank=bool(a("hidden_blank", 0)),
                     group_feedback=a("group_feedback", 0),
                     feedback_scale=a("feedback_scale", 1.0),
                     bidirectional="b" in a("schedule", ""),

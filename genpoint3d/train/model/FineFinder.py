@@ -65,15 +65,15 @@ class FineFinder(nn.Module):
                 xyz: torch.Tensor, xyz0: torch.Tensor, pos: torch.Tensor, pos0: torch.Tensor,
                 query_t: torch.Tensor) -> torch.Tensor:
         """
-        fmap  (B, T, C, h, w)    the frames being tracked
+        fmap  (B, T+1, C, h, w)  the frames being tracked, after the frame before the first
         fmap0 (B, Tq, C, h, w)   the clip's maps, the templates read from them
-        uv    (B, T, N, 2)       the guess in each frame, [0, 1] across, fp32
+        uv    (B, T+1, N, 2)     the guess in each of those frames, [0, 1] across, fp32
         uv0   (B, N, 2)          each point in its query frame
-        xyz   (B, T, 3, h, w)    each cell's 3D position; xyz0 the clip's
-        pos   (B, T, N, 3)       the guess in 3D; pos0 (B, N, 3) the query
+        xyz   (B, T+1, 3, h, w)  each cell's 3D position; xyz0 the clip's
+        pos   (B, T+1, N, 3)     the guess in 3D; pos0 (B, N, 3) the query
         query_t (B, N) long      each point's query frame in `fmap0`
 
-        returns (B, T, N, out_dim)
+        returns (B, T, N, out_dim) for the T frames after the first
         """
         out = []
         clips = max(1, self.chunk // uv.shape[2])
@@ -92,8 +92,10 @@ class FineFinder(nn.Module):
                         pos0: torch.Tensor, query_t: torch.Tensor) -> torch.Tensor:
         """TAPIP3D's lookup (`knn_feature_4d_optimized.py`) per level: the K
         cells nearest the guess in 3D against the template, then against the
-        frame before; both returned, the template's first."""
+        frame before; both returned, the template's first. Every input holds
+        the frame before the first tracked one first."""
         b, T, C, h, w = fmap.shape
+        T -= 1
         N = pos.shape[2]
         size = uv0.new_tensor([w, h])
         q = (uv0 * size - 0.5 / STRIDE)                                    # (b, N, 2) level-0 cells
@@ -109,8 +111,7 @@ class FineFinder(nn.Module):
         xyz0 = (xyz0 - mean[:, None, :, None, None]) / std[:, None, None, None, None]
         pos = (pos - mean[:, None, None]) / std[:, None, None, None]
         pos0 = (pos0 - mean[:, None]) / std[:, None, None]
-        # The frame before each frame, the first standing in for its own.
-        before = lambda t: torch.cat([t[:, :1], t[:, :-1]], dim=1)
+        uv_b, pos_b, uv, pos = uv[:, :-1], pos[:, :-1], uv[:, 1:], pos[:, 1:]
         out, out_prev = [], []
         for lvl in range(self.levels):
             s = 2 ** lvl
@@ -121,8 +122,9 @@ class FineFinder(nn.Module):
             # rim cell and the wall behind it is a point in mid-air.
             pick_xyz = lambda t: F.interpolate(t, size=(hl, wl), mode="nearest-exact")
             x = pick_xyz(xyz.flatten(0, 1))
-            f = f.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, C)      # (b, T, P, C)
-            x = x_cells = x.flatten(2).transpose(1, 2).reshape(b, T, hl * wl, 3)  # (b, T, P, 3)
+            f_all = f.flatten(2).transpose(1, 2).reshape(b, T + 1, hl * wl, C)      # (b, T+1, P, C)
+            x_all = x.flatten(2).transpose(1, 2).reshape(b, T + 1, hl * wl, 3)      # (b, T+1, P, 3)
+            f, x = f_all[:, 1:], x_all[:, 1:]
             k = min(self.neigh, hl * wl)
             with torch.no_grad():
                 near = torch.cdist(pos, x).topk(k, dim=-1, largest=False).indices      # (b, T, N, k)
@@ -159,22 +161,22 @@ class FineFinder(nn.Module):
             x = sup_f + enc(_posenc(sup_off))                                # (b, N, k+1, D)
             x = x[:, None].expand(b, T, *x.shape[1:]).flatten(0, 2)
             out.append(self.transformers[lvl](x, y.flatten(0, 2)).reshape(b, T, N, -1))
-            out_prev.append(self._before(f, x_cells, pick, before, uv, pos, hl, wl, s, enc,
+            out_prev.append(self._before(f_all[:, :-1], x_all[:, :-1], pick, uv_b, pos_b, hl, wl, s, enc,
                                          self.prev_transformers[lvl], y))
         return torch.cat(out + out_prev, dim=-1)
 
-    def _before(self, f, x, pick, before, uv, pos, hl, wl, s, enc, transformer, y):
+    def _before(self, f_b, x_b, pick, uv_b, pos_b, hl, wl, s, enc, transformer, y):
         """One level's comparison of the guess's neighbourhood `y` against the
-        K cells nearest the guess in the frame before, led by that guess's own
-        feature. (b, T, N, D)."""
-        b, T, P, C = f.shape
-        N = pos.shape[2]
-        f_b, x_b, pos_b = before(f), before(x), before(pos)
+        K cells nearest the guess in the frame before (`f_b` its cells'
+        features, `x_b` positions, `uv_b` and `pos_b` the guess there), led by
+        that guess's own feature. (b, T, N, D)."""
+        b, T, P, C = f_b.shape
+        N = pos_b.shape[2]
         k = min(self.neigh, P)
         with torch.no_grad():
             near = torch.cdist(pos_b, x_b).topk(k, dim=-1, largest=False).indices
         sup_f, sup_x = pick(f_b, near), pick(x_b, near)                       # (b, T, N, k, .)
-        at = (before(uv) * uv.new_tensor([wl * s, hl * s]) - 0.5 / STRIDE - (s - 1) / 2) / s
+        at = (uv_b * uv_b.new_tensor([wl * s, hl * s]) - 0.5 / STRIDE - (s - 1) / 2) / s
         grid = 2 * at / at.new_tensor([wl - 1, hl - 1]) - 1                   # (b, T, N, 2)
         maps = f_b.transpose(2, 3).reshape(b * T, C, hl, wl).float()
         own = F.grid_sample(maps, grid.flatten(0, 1)[:, :, None], align_corners=True)[..., 0]

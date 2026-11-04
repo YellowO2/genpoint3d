@@ -4,10 +4,10 @@ The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
 e.g. "fbfb", one round a window each; empty is `iters` rounds forward). Each
 round the model gives a velocity per frame, summed from each point's fixed
-frame (`_integrate`), and the point is held at its anchor in its query
-frame (`_pin`). A point gets no image where it has no evidence: before
-its query frame, and where the visibility head calls it hidden
-(`_blank_hidden`).
+frame (`_integrate`), and the point is held at its anchor in its query frame
+(`_pin`). A frame without its image is an input like any other: what the
+visibility head last said about every frame is fed back, so a point that looks
+hidden can stop trusting the image there, and look again.
 """
 
 from dataclasses import dataclass
@@ -97,25 +97,6 @@ def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
     return [("f", iters)]
 
 
-def _blank_hidden(cond: dict, logits: Optional[torch.Tensor], start: int, end: int, T: int,
-                  N: int) -> dict:
-    """`cond` for the window `start` to `end` with no image where a point has
-    no evidence: before its query frame, and, given `logits` (B, L, N), where
-    the head calls it hidden. Its query frame keeps its image."""
-    q = cond["query_t"]
-    B = q.shape[0]
-    vm = cond.get("visual_mask")
-    if vm is None:
-        vm = torch.ones(B, T, dtype=torch.bool, device=q.device)
-    full = (vm[..., None].expand(B, T, N) if vm.dim() == 2 else vm).clone()
-    t = torch.arange(start, end, device=q.device)[None, :, None]
-    seen = t >= q[:, None]
-    if logits is not None:
-        seen &= (logits.detach() > 0) | (t == q[:, None])
-    full[:, start:end] &= seen
-    return {**cond, "visual_mask": full}
-
-
 def _clock(i: int, rounds: int, B: int, device) -> torch.Tensor:
     """(B,) `k` for round `i` of `rounds`; a single round is the last."""
     return torch.full((B,), i / (rounds - 1) if rounds > 1 else 1.0, device=device)
@@ -139,22 +120,20 @@ class Sweeps:
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, iters: int, schedule: str,
                  window: int, overlap: int, cond: dict) -> None:
-        self.model, self.anchor, self.T, self.cond = model, anchor, T, cond
+        self.model, self.anchor, self.cond = model, anchor, cond
         self.plan = _schedule(iters, schedule)
         self.R = sum(n for _, n in self.plan)
         self.spans = _windows(T, window, overlap)
         B, N = anchor.shape[:2]
         self.whole = torch.zeros(B, T, N, 3, device=anchor.device)
-        # Visibility so far: seen everywhere until a window has called it.
-        self.vis = torch.full((B, T, N), 20.0, device=anchor.device)
+        # What the head last said about each frame; 0 before it has.
+        self.vis = torch.zeros(B, T, N, device=anchor.device)
         self.groups = None
 
     def __iter__(self):
-        model, anchor, T = self.model, self.anchor, self.T
+        model, anchor = self.model, self.anchor
         B, N = anchor.shape[:2]
         dev = anchor.device
-        blank = model.hidden_blank
-        groups = None                       # each point's group vector, carried throughout
         done = r0 = 0
         for sweep, n in self.plan:
             back = sweep == "b"
@@ -166,23 +145,22 @@ class Sweeps:
                 g = self.whole[:, start:end]
                 alive, at, inside = _window_points(self.cond, B, N, start, end, back, every=r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
-                c = _blank_hidden(self.cond, self.vis[:, start:end] if blank else None, start, end, T, N)
-                logits = None
+                before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):
+                    vis = self.vis[:, start:end] if model.visibility else None
                     step, logits, emb = model(g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive,
-                                              group_prev=groups, direction=direction, frames=frames, **c)
+                                              vis_prev=vis, group_prev=self.groups, direction=direction,
+                                              frames=frames, x_before=before, **self.cond)
                     if emb is not None:
-                        groups = emb.detach() if groups is None else torch.where(alive[..., None], emb.detach(),
-                                                                                 groups)
-                        self.groups = groups
-                    if blank:
-                        c = _blank_hidden(self.cond, logits, start, end, T, N)
+                        # A point not yet in the window keeps what it had: nothing, at first.
+                        kept = self.groups if self.groups is not None else torch.zeros_like(emb)
+                        self.groups = torch.where(alive[..., None], emb.detach(), kept)
+                    if logits is not None:
+                        self.vis[:, start:end] = logits.detach()
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive)
                     g = _pin(g, at, inside)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
-                if logits is not None:
-                    self.vis[:, start:end] = logits.detach()
                 if not back:
                     done = end
             r0 += n

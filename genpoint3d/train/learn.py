@@ -5,8 +5,7 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, fine_inputs, hidden_weight, random_cutoff, rigid_groups, rigid_pairs,
-    to_device, visual_mask,
+    apd_weight, fine_inputs, hidden_weight, random_visual_mask, rigid_groups, rigid_pairs, to_device,
 )
 from genpoint3d.train.tools.regress import regress_loss
 from genpoint3d.train.tools.visibility import visible_target
@@ -18,8 +17,8 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     amp = hardware.amp
     b = to_device(batch, hardware.device)
     traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-    # Each clip sees its frames before its own random cutoff and forecasts the rest.
-    vm = visual_mask(b, random_cutoff(b, settings.min_context))
+    # Each clip forecasts from a random cutoff, or over a random gap and tracks again after.
+    vm = random_visual_mask(b, settings.min_context, settings.max_gap)
     mask, w = hidden_weight(vis, apd_weight(b, traj), settings.hidden_loss)
     extra = dict(vel_weight=settings.vel_loss)
     if settings.rigid_loss:

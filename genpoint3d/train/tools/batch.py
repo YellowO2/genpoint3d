@@ -15,14 +15,23 @@ def to_device(batch: dict, device) -> dict:
     return b
 
 
-def random_cutoff(b: dict, min_context: int) -> torch.Tensor:
-    """(B,) a cutoff per clip, uniform in [min_context, T] (T: pure tracking),
-    drawn on the CPU so a seed gives the same cutoffs on any device."""
+def random_visual_mask(b: dict, min_context: int, max_gap: int) -> torch.Tensor:
+    """(B, T) which frames of each training clip keep their image: half the
+    clips lose every frame from a cutoff uniform in [min_context, T] (T: none),
+    the other half a span of 2 to `max_gap` frames starting at or after
+    min_context, seen again after it (0: cutoffs only). Drawn on the CPU, so a
+    seed gives the same masks on any device."""
     B, T = b["traj"].shape[:2]
-    if not 1 <= min_context <= T:
-        raise ValueError(f"--min-context {min_context} must be in [1, {T}]: "
-                         "frame 0 is the query and always keeps its image")
-    return torch.randint(min_context, T + 1, (B,)).to(b["traj"].device)
+    if not 1 <= min_context < T - 1:
+        raise ValueError(f"--min-context {min_context} must be in [1, {T - 2}]: "
+                         "frame 0 always keeps its image")
+    t = torch.arange(T)[None]
+    cut = torch.randint(min_context, T + 1, (B, 1))
+    start = torch.randint(min_context, T - 1, (B, 1))
+    length = torch.randint(2, max(max_gap, 2) + 1, (B, 1))
+    gap = (torch.rand(B, 1) < 0.5) & (max_gap > 0)
+    mask = torch.where(gap, (t < start) | (t >= start + length), t < cut)
+    return mask.to(b["traj"].device)
 
 
 def visual_mask(b: dict, cutoff: torch.Tensor | None) -> torch.Tensor:
