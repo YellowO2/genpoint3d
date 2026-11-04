@@ -10,9 +10,7 @@ from typing import Optional
 
 import torch
 
-from genpoint3d.NormStats import NormStats
 from genpoint3d.ScaleStats import ScaleStats
-from genpoint3d.tools.traj_scale import TRAJ_SCALE
 
 
 @dataclass
@@ -45,14 +43,6 @@ class CachedClip:
     points: Optional[int] = None
     feat_dim: Optional[int] = None
     image_size: Optional[int] = None
-
-    def norm(self, mode: str = "median", traj_scale: float = TRAJ_SCALE) -> NormStats:
-        if self.stats is None:
-            raise ValueError(
-                f"clip {self.seq_id} was cached without scale statistics -- "
-                "re-run python -m genpoint3d.prepare.main"
-            )
-        return self.stats.norm(mode, traj_scale)
 
     def to_dict(self) -> dict:
         d = {

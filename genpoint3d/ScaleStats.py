@@ -5,8 +5,6 @@ from typing import Optional
 
 import torch
 
-from genpoint3d.NormStats import NormStats
-from genpoint3d.tools.traj_scale import TRAJ_SCALE
 
 
 @dataclass
@@ -28,18 +26,6 @@ class ScaleStats:
     max_from_centroid: torch.Tensor  # () furthest point from that centre
     mean_dist: torch.Tensor          # () mean distance to the camera
     median_dist: torch.Tensor        # () median distance to the camera
-
-    def norm(self, mode: str = "median", traj_scale: float = TRAJ_SCALE) -> NormStats:
-        """Build the `NormStats` for one scheme. `mode` matches `compute_norm_stats`."""
-        ts = torch.as_tensor(traj_scale, dtype=torch.float32)
-        zero = torch.zeros(3)
-        if mode == "median":
-            return NormStats(zero, self.median_dist, ts)
-        if mode == "mean":
-            return NormStats(zero, self.mean_dist, ts)
-        if mode == "centroid_max":   # the pre-2026-09-18 behaviour
-            return NormStats(self.centroid, self.max_from_centroid, ts)
-        raise ValueError(f"bad norm mode {mode!r}")
 
     def to_dict(self) -> dict:
         return {f"stats_{k}": getattr(self, k) for k in

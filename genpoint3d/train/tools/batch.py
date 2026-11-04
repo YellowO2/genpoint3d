@@ -2,6 +2,7 @@
 
 import torch
 
+from genpoint3d.tools.traj_scale import RADIUS
 from genpoint3d.train.tools.camera import image_projection, unproject
 from genpoint3d.train.tools.metrics import _to_camera_t
 
@@ -141,10 +142,11 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
 def _cell_xyz(depth: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:
     """depth (B, T, h, w) metres at each CNN cell, proj (B, T, 3, 4) ->
     (B, T, 3, h, w) each cell's 3D position in `anchor`'s space. Cell j is
-    centred at `(j + 1/8) / w` across, where `cache_frames.py` reads its depth."""
+    centred at `(j + 1/8) / w` across, where `cache_frames.py` reads its depth;
+    depth beyond RADIUS held at it."""
     B, T, h, w = depth.shape
     v = (torch.arange(h, device=depth.device, dtype=torch.float32) + 0.125) / h
     u = (torch.arange(w, device=depth.device, dtype=torch.float32) + 0.125) / w
     uv = torch.stack(torch.meshgrid(u, v, indexing="xy"), dim=-1).reshape(1, 1, -1, 2)
-    xyz = unproject(uv.expand(B, T, -1, -1), depth.flatten(2), proj.float())
+    xyz = unproject(uv.expand(B, T, -1, -1), depth.flatten(2).clamp(max=RADIUS), proj.float())
     return xyz.transpose(2, 3).reshape(B, T, 3, h, w)

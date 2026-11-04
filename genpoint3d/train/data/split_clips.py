@@ -19,8 +19,8 @@ def split_clips(caches: list[str], val_frac: float, seed: int) -> Clips:
         if not clips:
             raise SystemExit(f"no cached clips in {path} -- run python -m genpoint3d.prepare.main first")
         probe = CachedClip.from_dict(torch.load(clips[0], weights_only=False, mmap=True))
-        if probe.stats is None or probe.context is None or probe.patch_xyz is None:
-            raise SystemExit(f"cache in {path} lacks scale statistics or DINOv3 features -- "
+        if probe.context is None or probe.patch_xyz is None:
+            raise SystemExit(f"cache in {path} lacks DINOv3 features -- "
                              "run python -m genpoint3d.prepare.main --features")
         if feat_dim not in (None, probe.feat_dim):
             raise SystemExit(f"cache in {path} has {probe.feat_dim}-wide features, the first {feat_dim}")

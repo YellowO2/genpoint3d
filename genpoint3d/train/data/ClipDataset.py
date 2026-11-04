@@ -10,7 +10,8 @@ from torch.utils.data import Dataset
 
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import sample_at
-from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
+from genpoint3d.NormStats import NormStats
+from genpoint3d.tools.traj_scale import RADIUS, SCENE_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
 # Each clip's depth beside its frames, as `scripts/cache_frames.py` writes it.
@@ -46,11 +47,14 @@ class ClipDataset(Dataset):
 
         if self.level:
             clip = _levelled(clip)
-        # Positions, anchors and patches scene-normalised alike; only the
-        # target is then divided by traj_scale.
-        n = clip.norm(traj_scale=1.0)
+        # Positions, anchors and patches in the one ruler; only the target is
+        # then divided by traj_scale. Patches beyond RADIUS held at it.
+        n = NormStats(torch.zeros(3), torch.tensor(SCENE_SCALE), torch.tensor(1.0))
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
-        pxyz = None if clip.patch_xyz is None else n.apply(clip.patch_xyz)
+        pxyz = None
+        if clip.patch_xyz is not None:
+            p = clip.patch_xyz.float()
+            pxyz = n.apply(p * (RADIUS / p.norm(dim=-1, keepdim=True).clamp_min(1e-6)).clamp(max=1))
         # Each point's own start, as the model is given it.
         offset = anchor[None].clone()      # (1, N, 3)
         traj = traj - offset
@@ -95,7 +99,7 @@ class ClipDataset(Dataset):
                 raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
                                  f"for a {traj.shape[0]}-frame track")
             depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
-        norm = clip.norm(traj_scale=self.traj_scale)
+        norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t,
             "context": ctx if ctx is not None else torch.zeros(0),

@@ -1,4 +1,14 @@
-"""The constants that bring each training target to unit variance."""
+"""The constants that set the units the model sees."""
+
+# One ruler for every clip, in metres per unit: positions are divided by it,
+# never by anything a clip's own frames say, so nothing of a forecast frame
+# leaks into the units, and gravity is one number everywhere. Kubric's typical
+# scene distance (the median per clip is 8.9 m on our clips, 9.3 m on the old
+# Kubric, 2.5-12 m across), so a typical scene keeps the sizes the model knows.
+SCENE_SCALE = 9.0
+# Inputs further than this from the camera (metres) are held at it: beyond
+# Kubric's background (tracked points to 51 m), so it cuts only real video's sky.
+RADIUS = 60.0
 
 # Dataset-level constant: the spread of scene-normalised trajectories.
 # Scene normalisation makes *geometry* O(1), but leaves trajectories at ~0.26 --
