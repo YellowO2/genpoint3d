@@ -35,10 +35,11 @@ model, settings = run.model, run.settings
 clips = sorted(Path(args.cache).glob("*.pt"))[: args.clips]
 
 if args.train_against:
-    ds = run.dataset(clips[:1], args.frames_cache)
+    # The batch before the seed: a loader's iterator draws from the generator too.
+    batch = next(iter(DataLoader(run.dataset(clips[:1], args.frames_cache), batch_size=1)))
     model.train()
     torch.manual_seed(0)
-    losses = learn(model, next(iter(DataLoader(ds, batch_size=1))), settings, Hardware(dev, True))
+    losses = learn(model, batch, settings, Hardware(dev, True))
     ref = torch.load(args.train_against, weights_only=False)
     grads = {n: q.grad.float().cpu() for n, q in model.named_parameters() if q.grad is not None}
     # Each parameter's largest change, over its largest gradient.
