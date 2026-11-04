@@ -38,16 +38,27 @@ if args.train_against:
     # The batch before the seed: a loader's iterator draws from the generator too.
     batch = next(iter(DataLoader(run.dataset(clips[:1], args.frames_cache), batch_size=1)))
     model.train()
-    torch.manual_seed(0)
-    losses = learn(model, batch, settings, Hardware(dev, True))
+    steps = []
+    for _ in range(2):
+        model.zero_grad(set_to_none=True)
+        torch.manual_seed(0)
+        losses = learn(model, batch, settings, Hardware(dev, True))
+        steps.append((losses, {n: q.grad.float().cpu() for n, q in model.named_parameters() if q.grad is not None}))
     ref = torch.load(args.train_against, weights_only=False)
-    grads = {n: q.grad.float().cpu() for n, q in model.named_parameters() if q.grad is not None}
-    # Each parameter's largest change, over its largest gradient.
-    rel = max(((grads[n] - g).abs().max() / g.abs().max().clamp_min(1e-12)).item() for n, g in ref["grads"].items())
+    (losses, grads), (_, again) = steps
+    # The largest gradient change and the whole gradient's relative change,
+    # against the reference and against the same code run twice (the GPU's
+    # backward is not deterministic).
+    gap = lambda a, b: (max((a[n] - b[n]).abs().max().item() for n in b),
+                        sum((a[n] - b[n]).pow(2).sum() for n in b).sqrt().item()
+                        / sum(b[n].pow(2).sum() for n in b).sqrt().item())
+    (d_abs, d_rel), (n_abs, n_rel) = gap(grads, ref["grads"]), gap(grads, again)
+    same = (losses.method == ref["method"] and set(grads) == set(ref["grads"])
+            and d_abs <= 3 * max(n_abs, 1e-12) and d_rel <= 3 * max(n_rel, 1e-12))
     print(f"{args.ckpt}: training loss {losses.method:.6f} vs {ref['method']:.6f}, visibility "
-          f"{losses.visibility:.6f} vs {ref['visibility']:.6f}; {len(grads)} vs {len(ref['grads'])} "
-          f"params with gradients, largest relative gradient change {rel:.2e}"
-          f" -> {'SAME' if rel < 1e-3 and set(grads) == set(ref['grads']) else 'CHANGED'}")
+          f"{losses.visibility:.6f} vs {ref['visibility']:.6f}; gradients against the reference: largest "
+          f"change {d_abs:.2e}, relative {d_rel:.2e}; run twice: {n_abs:.2e}, {n_rel:.2e}"
+          f" -> {'SAME' if same else 'CHANGED'}")
     raise SystemExit
 
 ds = run.dataset(clips, args.frames_cache, query_before=args.cutoff)

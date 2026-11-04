@@ -6,6 +6,7 @@
 #
 #   qsub -v MODE=save scripts/snapshot.pbs      # before
 #   qsub -v MODE=check scripts/snapshot.pbs     # after, with one training step each
+#   qsub -v MODE=train scripts/snapshot.pbs     # the training step only
 #
 #PBS -N snapshot
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
@@ -24,15 +25,15 @@ module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
 S=$ROOT/snapshot && mkdir -p $S
 flag() { [ "${MODE:?}" = save ] && echo "--out $S/$1.pt" || echo "--against $S/$1.pt"; }
-for C in 0 12; do
+[ "$MODE" = train ] || for C in 0 12; do
   python scripts/snapshot.py --ckpt outputs/fyT_dense_reference/best.pt --cache $ROOT/fit_check/std_fyP_0/val \
     --frames-cache $ROOT/cache/kubric_frames384 --clips 6 --cutoff $C $(flag fyT_c$C) 2>&1 | grep -v "Warn\|warn"
 done
-for C in 0 5; do
+[ "$MODE" = train ] || for C in 0 5; do
   python scripts/snapshot.py --ckpt outputs/fzN_scene_points_any_frame/best.pt --cache $ROOT/fall_test/val \
     --frames-cache $ROOT/cache/kubric_movi48_frames384 --clips 4 --cutoff $C $(flag fzN_c$C) 2>&1 | grep -v "Warn\|warn"
 done
-if [ "$MODE" = check ]; then
+if [ "$MODE" != save ]; then
   python scripts/snapshot.py --ckpt outputs/fyT_dense_reference/best.pt --cache $ROOT/fit_check/std_fyP_0/val \
     --frames-cache $ROOT/cache/kubric_frames384 --train-against $S/train_fyT.pt 2>&1 | grep -v "Warn\|warn"
   python scripts/snapshot.py --ckpt outputs/fzN_scene_points_any_frame/best.pt --cache $ROOT/fall_test/val \
