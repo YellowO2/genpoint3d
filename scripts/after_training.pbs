@@ -1,0 +1,47 @@
+#!/bin/bash
+# The tests every new checkpoint gets, in one job:
+#   standard   100 val clips of the old Kubric, 256 points: every frame seen, then forecast from 12
+#   fall test  our Kubric's val clips, forecast from 3: thrown objects fall, bounce and tumble
+#   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5 and 2
+#   ball       the spinning ball (spin_up_10), error by how the point faces the camera
+#
+#   qsub -v CKPT=outputs/RUN/best.pt scripts/after_training.pbs
+#
+#PBS -N after_training
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=01:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/after_training.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+CKPT=${CKPT:?}
+OUT=$(dirname $CKPT)
+quiet() { grep -v "Warn\|warn" || true; }
+echo "########## $CKPT"
+for C in 0 12; do
+  echo "--- standard, cutoff $C"
+  python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 \
+    --points 256 --batch 1 --eval-cutoff $C --out $OUT/standard_c$C.json 2>&1 | quiet \
+    | grep -E "average_pts_within|apd_static|apd_moving |apd_hidden |apd_moving_hidden |apd_fut |apd_moving_fut |apd_moving_obs |average_jaccard|occlusion"
+done
+echo "--- fall test, forecast from 3"
+python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fall_test/val --frames-cache $ROOT/cache/kubric_movi48_frames384 \
+  --points 500 --batch 1 --eval-cutoff 3 --out $OUT/fall_test.json 2>&1 | quiet \
+  | grep -E "apd_moving_obs |apd_moving_fut |apd_moving_stop_fut |apd_moving_cv_fut |apd_fut "
+for C in 5 2; do
+  echo "--- drop test, images up to frame $((C - 1))"
+  python scripts/drop_curve.py --ckpt $CKPT --cache $ROOT/drop_kubric/cache --frames-cache $ROOT/drop_kubric/frames \
+    --cutoff $C 2>&1 | quiet
+done
+echo "--- ball, spin_up_10"
+python scripts/ball_view_angle.py --ckpt $CKPT --cache $ROOT/ball_test/by_motion/spin_up_10 \
+  --frames-cache $ROOT/ball_test/frames --raw $ROOT/ball_test/raw_centres 2>&1 | quiet | tail -7
+echo "=== AFTER TRAINING DONE ==="

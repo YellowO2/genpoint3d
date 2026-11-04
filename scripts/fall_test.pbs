@@ -23,7 +23,7 @@ module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
 
 V=$ROOT/fall_test/val
-python scripts/split_dir.py --cache $ROOT/${CACHE:-cache/kubric_movi48q} --split val --n 1000 \
+python scripts/split_dir.py --cache $ROOT/${CACHE:-cache/kubric_movi48q1} --split val --n 1000 \
   --val-frac 0.1 --seed 0 --out $V
 for CKPT in ${CKPTS:?}; do
   echo "########## $CKPT"

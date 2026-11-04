@@ -84,6 +84,8 @@ class Settings(argparse.Namespace):
             p.error("--window needs 0 < --overlap < --window")
         if settings.schedule and not settings.window:
             p.error("--schedule sweeps over the windows: needs --window W")
+        if settings.schedule and "--refine-iters" in (argv if argv is not None else __import__("sys").argv):
+            p.error("--refine-iters is the rounds without a schedule; a schedule sets one round a sweep")
         if bool(settings.group_feedback) != (settings.group_loss > 0):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss) < 0:
