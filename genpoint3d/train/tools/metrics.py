@@ -15,22 +15,13 @@ import torch
 THRESHOLDS = (1, 2, 4, 8, 16)
 PIXEL_TO_FIXED_METRIC_THRESH = {1: 0.01, 2: 0.04, 4: 0.16, 8: 0.64, 16: 2.56}
 
-# The moving-points score is also logged at each threshold.
-MOVING_THRESHOLDS = (1, 2, 4, 8, 16)
+# The hidden-point scores, beside their last-seen baseline.
+HIDDEN_KEYS = ("apd_hidden", "apd_hidden_lastseen", "apd_moving_hidden", "apd_moving_hidden_lastseen")
 
-# The scores of points nobody can see on the observed frames, all points and
-# moving ones: hidden, then split into occluded and out of the frame, each
-# beside its two last-seen baselines; and the share of hidden entries that
-# are out of the frame.
-HIDDEN_KEYS = tuple(f"{name}{suffix}"
-                    for name in ("apd_hidden", "apd_moving_hidden", "apd_still_hidden",
-                                 "apd_occluded", "apd_moving_occluded", "apd_still_occluded",
-                                 "apd_outside", "apd_moving_outside", "apd_still_outside",
-                                 "apd_returns", "apd_moving_returns", "apd_still_returns",
-                                 "apd_gone", "apd_moving_gone", "apd_still_gone")
-                    for suffix in ("", "_lastseen", "_lastcv", "_interp", "_buddy", "_buddypred")) + (
-    "hidden_outside_frac",) + tuple(f"apd_moving_seen_{part}{s}" for part in ("early", "mid", "late")
-                                    for s in ("", "_static"))
+
+def at_query(pts: torch.Tensor, query_t: torch.Tensor) -> torch.Tensor:
+    """(B, T, N, 3) -> (B, 1, N, 3): each point at its query frame `query_t` (B, N)."""
+    return pts.gather(1, query_t[:, None, :, None].expand(-1, 1, -1, pts.shape[-1]))
 
 
 def resize_intrinsics(K: torch.Tensor, hw, short_side: int = 256) -> torch.Tensor:
@@ -79,27 +70,17 @@ def _scale_factor(pred: torch.Tensor, gt: torch.Tensor, valid: torch.Tensor,
     return (num / den.clamp(min=1e-12))[:, None, None, None]
 
 
-def in_image(gt: torch.Tensor, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
-             hw: torch.Tensor) -> torch.Tensor:
-    """(B, T, N) whether each true position (frame-0 camera) is in front of
-    its frame's camera and inside the image, native pixels `intrinsics`, `hw`."""
-    gt_cam = _to_camera_t(gt, extrinsics)
-    uv = _project(gt_cam, intrinsics)
-    h, w = hw[:, 0, None, None], hw[:, 1, None, None]
-    return ((gt_cam[..., 2] > 0)
-            & (uv[..., 0] >= 0) & (uv[..., 0] < w)
-            & (uv[..., 1] >= 0) & (uv[..., 1] < h))
-
-
 @torch.no_grad()
 def motion_px(gt: torch.Tensor, visible: torch.Tensor, intrinsics: torch.Tensor,
-              extrinsics: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """(B, N) how far each point ever gets from its frame-0 position while
-    visible, in the metric's pixels (back-projected at its depth)."""
+              extrinsics: Optional[torch.Tensor] = None,
+              query_t: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """(B, N) how far each point ever gets from its query position (frame 0
+    without `query_t`) while visible, in the metric's pixels."""
     gt_cam = _to_camera_t(gt, extrinsics) if extrinsics is not None else gt
     focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
     mult = (gt_cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
-    disp = (gt - gt[:, :1]).norm(dim=-1) / mult                   # (B, T, N)
+    start = gt[:, :1] if query_t is None else at_query(gt, query_t)
+    disp = (gt - start).norm(dim=-1) / mult                       # (B, T, N)
     return disp.masked_fill(~visible, 0).amax(dim=1)
 
 
@@ -189,16 +170,16 @@ def clip_mean(values: list[torch.Tensor]) -> float:
 
 
 def error_and_motion(pred: torch.Tensor, gt: torch.Tensor, visible: torch.Tensor,
-                     intrinsics: torch.Tensor, extrinsics: torch.Tensor):
-    """For every visible (point, frame) after frame 0, flat: the error and how
-    far the point has moved since frame 0, in the metric's pixels."""
+                     intrinsics: torch.Tensor, extrinsics: torch.Tensor, query_t: torch.Tensor):
+    """For every visible (point, frame) but its query frame, flat: the error
+    and how far the point has moved from its query position, in the metric's
+    pixels."""
     gt_cam = _to_camera_t(gt, extrinsics)
     focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
     mult = (gt_cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
     err = (pred - gt).norm(dim=-1) / mult
-    disp = (gt - gt[:, :1]).norm(dim=-1) / mult
-    keep = visible.bool().clone()
-    keep[:, 0] = False
+    disp = (gt - at_query(gt, query_t)).norm(dim=-1) / mult
+    keep = visible.bool() & (torch.arange(gt.shape[1], device=gt.device)[None, :, None] != query_t[:, None])
     return err[keep].float().cpu(), disp[keep].float().cpu()
 
 

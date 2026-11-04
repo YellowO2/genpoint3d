@@ -51,43 +51,21 @@ class Tally:
 
 def _line(m: dict) -> str:
     """The scores worth a glance, each group only if it was scored: loss and
-    APD beside the static baseline; in 2D and on moving points; hidden points;
-    observed and forecast frames; the matcher; the visibility head."""
+    APD beside the static baseline, moving points, hidden points beside last
+    seen, observed and forecast frames beside the stop and constant-speed
+    baselines, and the visibility head."""
     line = (f"  loss {m['val_loss']:.4f}"
             f"  APD {m['average_pts_within_thresh']:.3f} (static {m['apd_static']:.3f})")
-    if "apd_2d" in m:
-        line += f"  2D {m['apd_2d']:.3f} (static {m['apd_2d_static']:.3f})"
     if "apd_moving" in m:
-        line += f"  MOVING {m['apd_moving']:.3f} (static {m['apd_moving_static']:.3f})"
-    return line + _hidden(m) + _forecast(m) + _visible(m)
-
-
-def _hidden(m: dict) -> str:
-    """APD where the point is hidden on the observed frames, all/moving
-    points, the moving one beside its last-seen and constant-speed baselines;
-    then split into occluded and out of the frame, all/moving; then the share
-    of hidden entries out of the frame."""
-    if "apd_hidden" not in m:
-        return ""
-    return (f"  hid {m['apd_hidden']:.3f} mv {m['apd_moving_hidden']:.3f}"
-            f" (last {m['apd_moving_hidden_lastseen']:.3f}"
-            f" cv {m['apd_moving_hidden_lastcv']:.3f})"
-            f" (occ {m['apd_occluded']:.3f}/{m['apd_moving_occluded']:.3f}"
-            f" out {m['apd_outside']:.3f}/{m['apd_moving_outside']:.3f}"
-            f" outFrac {m['hidden_outside_frac']:.2f})")
-
-
-def _forecast(m: dict) -> str:
-    """With a cutoff: APD on the observed frames, then on the forecast ones
-    beside the stop, constant-velocity and own-stop baselines, all points and
-    then moving points."""
-    if "apd_fut" not in m:
-        return ""
-    return (f"  OBS {m['apd_obs']:.3f} mv {m['apd_moving_obs']:.3f}"
-            f"  FUT {m['apd_fut']:.3f} (stop {m['apd_stop_fut']:.3f}"
-            f" cv {m['apd_cv_fut']:.3f} own {m['apd_ownstop_fut']:.3f})"
-            f" mv {m['apd_moving_fut']:.3f} (stop {m['apd_moving_stop_fut']:.3f}"
-            f" cv {m['apd_moving_cv_fut']:.3f} own {m['apd_moving_ownstop_fut']:.3f})")
+        line += (f"  MOVING {m['apd_moving']:.3f} (static {m['apd_moving_static']:.3f})"
+                 f"  hid {m['apd_hidden']:.3f} (last {m['apd_hidden_lastseen']:.3f})"
+                 f" mv {m['apd_moving_hidden']:.3f} (last {m['apd_moving_hidden_lastseen']:.3f})")
+    if "apd_fut" in m:
+        line += (f"  OBS {m['apd_obs']:.3f} mv {m['apd_moving_obs']:.3f}"
+                 f"  FUT {m['apd_fut']:.3f} (stop {m['apd_stop_fut']:.3f} cv {m['apd_cv_fut']:.3f})"
+                 f" mv {m['apd_moving_fut']:.3f} (stop {m['apd_moving_stop_fut']:.3f}"
+                 f" cv {m['apd_moving_cv_fut']:.3f})")
+    return line + _visible(m)
 
 
 def _visible(m: dict) -> str:

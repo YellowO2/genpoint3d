@@ -14,6 +14,8 @@ from genpoint3d.train.learn import learn
 from genpoint3d.train.model.PointDiT import PointDiT
 from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.track_scores import track_scores
+from genpoint3d.train.score.visibility_scores import visibility_scores
 from genpoint3d.train.tools.batch import fine_inputs, to_device
 from genpoint3d.train.tools.regress import refine
 
@@ -86,5 +88,7 @@ for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4,
     leak = (pred.tracks - pred2.tracks).abs().max().item()
     print(f"  tracks {tuple(pred.tracks.shape)}, vis {None if pred.visibility is None else tuple(pred.visibility.shape)}, "
           f"forecast change when frames >= 6 change: {leak:.2e} (want 0)")
+    scores = {**track_scores(pred, j), **visibility_scores(pred)}
+    print(f"  {len(scores)} scores: {' '.join(sorted(scores))}")
     gap = (gap_tracks(m, b, sched) - gap_tracks(m, changed(b, slice(5, 8)), sched)).abs().max().item()
     print(f"  change anywhere when the frames of a gap (5-7) change: {gap:.2e} (want 0)")

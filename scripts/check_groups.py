@@ -62,7 +62,7 @@ with torch.no_grad():
         mult = (cam[..., 2].abs() / focal[..., None]).clamp_min(1e-6)                # (B, T, N) m per px
         disp = gt - gt[:, :1]
         gap = ((disp[:, :, :, None] - disp[:, :, None]).norm(dim=-1) / mult[..., None]).amax(dim=1)   # px
-        moved = motion_px(gt, b["visibility"].bool(), b["intrinsics_256"], b["extrinsics"])
+        moved = motion_px(gt, b["visibility"].bool(), b["intrinsics_256"], b["extrinsics"], b["query_t"])
         off = ~torch.eye(same.shape[1], dtype=torch.bool, device=dev)
         sel = same & off
         n = sel.sum(-1).clamp_min(1)

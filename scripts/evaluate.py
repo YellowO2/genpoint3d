@@ -22,9 +22,9 @@ from genpoint3d.train.tools.regress import refine
 
 @torch.no_grad()
 def per_frame_apd(run: Run, loader, device) -> list[float]:
-    """APD by frame over the visible points that move more than 4 px, every
-    frame given its image, with no rescale; and printed, every seen point's
-    error against how far it has moved."""
+    """APD by frame over the visible points that move more than 4 px from
+    their query position, every frame given its image, with no rescale; and
+    printed, every seen point's error against how far it has moved."""
     model, s = run.model, run.settings
     amp = device.type == "cuda"
     vals, errs, disps = None, [], []
@@ -37,17 +37,17 @@ def per_frame_apd(run: Run, loader, device) -> list[float]:
             pred, _ = refine(model, b["anchor"], traj.shape[1], iters=s.refine_iters,
                              window=s.window, overlap=s.overlap, schedule=s.schedule, **cond)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(traj, b)
-        e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"])
+        e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"])
         errs.append(e)
         disps.append(d)
-        seen = vis.bool() & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"]) > 4)[:, None]
+        seen = vis.bool() & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > 4)[:, None]
         vals = vals or [[] for _ in range(traj.shape[1])]
         for t in range(traj.shape[1]):
             m = tapvid3d_metrics(pred_m[:, t:t + 1], gt_m[:, t:t + 1], seen[:, t:t + 1],
                                  b["intrinsics_256"][:, t:t + 1], b["extrinsics"][:, t:t + 1],
                                  scaling="none", per_clip=True)
             vals[t].append(m["average_pts_within_thresh"].cpu())
-    print("\n    every seen point after frame 0: error against how far it has moved")
+    print("\n    every seen point but at its query frame: error against how far it has moved")
     print(motion_table(torch.cat(errs), torch.cat(disps)))
     return [clip_mean(v) for v in vals]
 

@@ -246,7 +246,7 @@ def main() -> int:
         vis = b["visibility"].bool()
         # The scorer's moving-point APD: points that move more than 4 px, no
         # rescale (`track_scores`).
-        moving_px = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"])
+        moving_px = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"])
         mv = vis & (moving_px > 4)[:, None]
         apd_mv = tapvid3d_metrics(pr_m, gt_m, mv, b["intrinsics_256"], b["extrinsics"],
                                   scaling="none", per_clip=True)["average_pts_within_thresh"]
