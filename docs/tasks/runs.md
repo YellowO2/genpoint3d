@@ -515,4 +515,7 @@ The training flags' defaults are now fzN's design, so a run names only what
 it changes (`scripts/train.pbs`). Only fyT and fzN are kept loadable (their
 two dead finder weights stripped); fyP and older checkpoints no longer load.
 `scripts/snapshot.pbs` checks that fyT and fzN predict, and train one step,
-exactly as before the cleanup.
+exactly as before the cleanup: predictions identical, the step's loss
+identical and its gradients within the GPU's run-to-run noise (6e-5). A
+100-step run of the default design (`cleanup_check`, from fyT) trained,
+validated and saved end to end; validation is one pass now, 80 s for 24 clips.
