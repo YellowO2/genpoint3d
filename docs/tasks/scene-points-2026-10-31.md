@@ -75,6 +75,12 @@ with each other, so a turning surface is never seen turning as a whole.
 
 ## Still to settle
 
+- Each window handed each point's past positions from the clip record (the
+  side the sweep came from), as offsets from its guess at the window's edge,
+  "don't know" before clip frame 0 and before the point's query frame until a
+  backward sweep has filled it: a long memory of the motion at the cost of a
+  few numbers, so the overlap can shrink (4 Nov).
+
 - What a point is matched against. Frame 0's look only (now); then the latest
   frame it was clearly seen in, which looks more like it does now; then a
   template the model keeps and learns when to update (SAM2's memory of recent
