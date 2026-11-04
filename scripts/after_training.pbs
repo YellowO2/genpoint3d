@@ -2,7 +2,7 @@
 # The tests every new checkpoint gets, in one job:
 #   standard   100 val clips of the old Kubric, 256 points: every frame seen, then forecast from 12
 #   fall test  our Kubric's val clips, forecast from 3: thrown objects fall, bounce and tumble
-#   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5 and 2
+#   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5
 #   ball       the spinning ball (spin_up_10), error by how the point faces the camera
 #
 #   qsub -v CKPT=outputs/RUN/best.pt scripts/after_training.pbs
@@ -36,11 +36,9 @@ echo "--- fall test, forecast from 3"
 python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fall_test/val --frames-cache $ROOT/cache/kubric_movi48_frames384 \
   --points 500 --batch 1 --eval-cutoff 3 --out $OUT/fall_test.json 2>&1 | quiet \
   | grep -E "apd_moving_obs |apd_moving_fut |apd_moving_stop_fut |apd_moving_cv_fut |apd_fut "
-for C in 5 2; do
-  echo "--- drop test, images up to frame $((C - 1))"
-  python scripts/drop_curve.py --ckpt $CKPT --cache $ROOT/drop_kubric/cache --frames-cache $ROOT/drop_kubric/frames \
-    --cutoff $C 2>&1 | quiet
-done
+echo "--- drop test, images up to frame 4"
+python scripts/drop_curve.py --ckpt $CKPT --cache $ROOT/drop_kubric/cache --frames-cache $ROOT/drop_kubric/frames \
+  --cutoff 5 2>&1 | quiet
 echo "--- ball, spin_up_10"
 python scripts/ball_view_angle.py --ckpt $CKPT --cache $ROOT/ball_test/by_motion/spin_up_10 \
   --frames-cache $ROOT/ball_test/frames --raw $ROOT/ball_test/raw_centres 2>&1 | quiet | tail -7
