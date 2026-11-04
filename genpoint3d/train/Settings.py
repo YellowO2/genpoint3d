@@ -57,7 +57,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")
         p.add_argument("--schedule", default="fbfb", metavar="SWEEPS",
                        help="sweeps over the windows, one round each: f forward, b backward")
-        p.add_argument("--refine-iters", type=int, default=4, help="rounds forward, with no --schedule")
+        p.add_argument("--refine-iters", type=int, default=None, help="rounds forward, with no --schedule (4)")
         p.add_argument("--min-context", type=int, default=2,
                        help="training cutoffs and gaps start at or after this frame")
         p.add_argument("--max-gap", type=int, default=12,
@@ -84,8 +84,9 @@ class Settings(argparse.Namespace):
             p.error("--window needs 0 < --overlap < --window")
         if settings.schedule and not settings.window:
             p.error("--schedule sweeps over the windows: needs --window W")
-        if settings.schedule and "--refine-iters" in (argv if argv is not None else __import__("sys").argv):
+        if settings.schedule and settings.refine_iters is not None:
             p.error("--refine-iters is the rounds without a schedule; a schedule sets one round a sweep")
+        settings.refine_iters = settings.refine_iters or 4
         if bool(settings.group_feedback) != (settings.group_loss > 0):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss) < 0:
