@@ -8,7 +8,7 @@ import torch
 @dataclass
 class Prediction:
     batch: dict                          # the batch, on the device
-    visual_mask: torch.Tensor | None     # (B, T) which frames had their image
+    visual_mask: torch.Tensor            # (B, T, 2, 2) which quarters of each frame were seen
     tracks: torch.Tensor                 # (B, T, N, 3) in model units
     loss: float                          # the training objective on the batch
     visibility: torch.Tensor | None = None  # (B, T, N) the visibility head's logits

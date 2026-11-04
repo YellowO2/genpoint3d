@@ -33,17 +33,13 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--raw", required=True, help="the rendered clips, with the ball's centre")
-p.add_argument("--hide-hidden", action="store_true",
-               help="a diagnostic that reads the truth: blank each point's image wherever it "
-                    "is truly hidden (evaluate.py --ablate hide-hidden), so a hidden point gets "
-                    "no match rather than a wrong one")
 args = p.parse_args()
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 run = Run.load(args.ckpt, dev)
 ds = run.dataset(args.cache, args.frames_cache, points=1000)
 clips = ds.clips
-predictor = Predictor(run.model, run.judging(dev, hide_hidden=args.hide_hidden))
+predictor = Predictor(run.model, run.judging(dev))
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():
@@ -74,7 +70,7 @@ with torch.no_grad():
             m = m.clone()
             m[0] = False
             errs[name].append(err[m].cpu())
-print(f"{Path(args.cache).name} | {args.ckpt}" + (" | hidden points' images blanked" if args.hide_hidden else ""))
+print(f"{Path(args.cache).name} | {args.ckpt}")
 print(f"  {'class':>9} {'point-frames':>13} {'median px':>10} {'within 4 px':>12}")
 for name in names:
     e = torch.cat(errs[name]) if errs[name] else torch.zeros(0)

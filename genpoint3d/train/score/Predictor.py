@@ -26,14 +26,7 @@ class Predictor:
                 raise ValueError(f"cutoff {j.cutoff} leaves none of {traj.shape[1]} frames to forecast")
             cutoff = torch.full((traj.shape[0],), j.cutoff, device=j.device)
         vm = visual_mask(b, cutoff)
-        shown = vm
-        if j.hide_hidden:
-            # A diagnostic that reads the truth (`evaluate.py --ablate
-            # hide-hidden`): each point blanked where it is truly hidden.
-            in_view = vis.bool().clone()
-            in_view[:, 0] = True
-            shown = vm[..., None] & in_view
-        cond = dict(context=b["context"], visual_mask=shown, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
+        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
                     **fine_inputs(model, b, j.amp))
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):

@@ -4,13 +4,11 @@ import torch
 import torch.nn.functional as F
 
 
-def visible_target(vis: torch.Tensor, visual_mask: torch.Tensor | None) -> torch.Tensor:
-    """(B, T, N) True where the model can see the point: the point is in view
-    (not occluded, not out of the frame) and its frame keeps its image. A
-    forecast frame has no image, so nothing in it is visible to the model."""
-    if visual_mask is None:
-        return vis
-    return vis & visual_mask[:, :, None]
+def visible_target(vis: torch.Tensor, imaged: torch.Tensor) -> torch.Tensor:
+    """(B, T, N) True where the model can see the point: in view (not
+    occluded, not out of the frame) and where the model has the image
+    (`imaged`, (B, T, N) or (B, T, 1))."""
+    return vis & imaged
 
 
 def visibility_error(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

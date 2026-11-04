@@ -59,7 +59,7 @@ FRAMES=${FRAMES:-cache/kubric_frames384}
 # CUTOFF=12 forecasts: frames 12 on get no image, scored apart (_obs, _fut).
 CUTOFF=${CUTOFF:-}
 [ -n "$CUTOFF" ] && FC="--eval-cutoff $CUTOFF" || FC=""
-# ABLATE="hide-hidden" (or any of evaluate.py's --ablate kinds, space
+# ABLATE="swap-frames" (or any of evaluate.py's --ablate kinds, space
 # separated) also scores with that input destroyed.
 ABLATE=${ABLATE:-}
 [ -n "$ABLATE" ] && AB="--ablate $ABLATE" || AB=""

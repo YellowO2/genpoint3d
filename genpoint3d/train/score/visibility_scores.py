@@ -20,10 +20,10 @@ def visibility_scores(prediction: Prediction) -> dict:
     logits = prediction.visibility
     if logits is None:
         return {}
-    vis, vm = prediction.batch["visibility"], prediction.visual_mask
-    target = visible_target(vis, vm)
+    vis = prediction.batch["visibility"]
+    observed = prediction.visual_mask.flatten(2).all(-1)[:, :, None]      # whole frames: scoring's masks
+    target = visible_target(vis, observed)
     right = ((logits > 0) == target).float()
-    observed = vm[:, :, None] if vm is not None else vis.new_ones(())
     return {"vis_acc": right.flatten(1).mean(1),
             "vis_acc_hidden": per_clip(right, ~vis & observed),
             "vis_acc_visible": per_clip(right, vis & observed)}

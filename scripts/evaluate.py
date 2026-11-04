@@ -7,7 +7,6 @@ Run:  python scripts/evaluate.py --ckpt outputs/RUN/best.pt --cache DIR --frames
 import argparse
 import json
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -53,9 +52,8 @@ def per_frame_apd(run: Run, loader, device) -> list[float]:
 
 
 # Each ablation destroys one input; a score that does not move names a pathway
-# the model ignores. hide-hidden reads the truth: each point blanked wherever
-# it is truly hidden, as in a forecast frame.
-ABLATIONS = ("swap-features", "noise-features", "shuffle-pos", "swap-id", "swap-frames", "hide-hidden")
+# the model ignores.
+ABLATIONS = ("swap-features", "noise-features", "shuffle-pos", "swap-id", "swap-frames")
 
 
 class Ablated:
@@ -155,16 +153,9 @@ def main() -> int:
         print(f"    {'condition':<16} {'APD':>7} {'vs intact':>10}")
         print(f"    {'intact':<16} {m['average_pts_within_thresh']:>7.4f} {'--':>10}")
         for kind in args.ablate or ABLATIONS:
-            a = (score(run.model, loader, replace(judging, hide_hidden=True), split=kind) if kind == "hide-hidden"
-                 else score(run.model, Ablated(loader, kind), judging, split=kind))
-            apd = a["average_pts_within_thresh"]
+            apd = score(run.model, Ablated(loader, kind), judging, split=kind)["average_pts_within_thresh"]
             print(f"    {kind:<16} {apd:>7.4f} {apd / max(m['average_pts_within_thresh'], 1e-9):>9.2f}x", flush=True)
             m[f"ablate_{kind}"] = apd
-            if kind == "hide-hidden":
-                for k in HIDDEN_KEYS:
-                    if k in a:
-                        print(f"      {k:<30} {a[k]:.4f}  (intact {m.get(k, float('nan')):.4f})")
-                        m[f"ablate_{kind}_{k}"] = a[k]
 
     if args.out:
         Path(args.out).write_text(json.dumps({"ckpt": args.ckpt, "cache": args.cache, "step": run.step,

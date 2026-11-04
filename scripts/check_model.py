@@ -1,6 +1,7 @@
 """The model and its loops at toy size, on the CPU in seconds: one training
 step reaches every weight, and the tracks are unchanged by anything in the
-frames they have no image of, after a cutoff or in a gap. Run after any change to the model or the loops:
+frames or quarters of frames they have no image of: after a cutoff, in a
+gap, or in a hidden quarter. Run after any change to the model or the loops:
 
   .venv/bin/python scripts/check_model.py
 """
@@ -16,7 +17,7 @@ from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.track_scores import track_scores
 from genpoint3d.train.score.visibility_scores import visibility_scores
-from genpoint3d.train.tools.batch import fine_inputs, to_device
+from genpoint3d.train.tools.batch import black_out, fine_inputs, to_device
 from genpoint3d.train.tools.regress import refine
 
 torch.manual_seed(0)
@@ -52,12 +53,11 @@ def changed(b: dict, frames: slice) -> dict:
     return b2
 
 
-def gap_tracks(m, b: dict, sched: str) -> torch.Tensor:
-    """The tracks with frames 5 to 7 given no image, a gap seen again after."""
+def masked_tracks(m, b: dict, sched: str, view: torch.Tensor) -> torch.Tensor:
+    """The tracks with `view` (B, T, 2, 2) the quarters seen, the hidden ones blacked out."""
     b = to_device(b, torch.device("cpu"))
-    vm = torch.ones(B, T, dtype=torch.bool)
-    vm[:, 5:8] = False
-    cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
+    b["frames"] = black_out(b["frames"], view)
+    cond = dict(context=b["context"], visual_mask=view, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
                 **fine_inputs(m, b))
     return refine(m, b["anchor"], T, iters=2, window=8, overlap=4, schedule=sched, **cond)[0]
 
@@ -90,5 +90,18 @@ for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4,
           f"forecast change when frames >= 6 change: {leak:.2e} (want 0)")
     scores = {**track_scores(pred, j), **visibility_scores(pred)}
     print(f"  {len(scores)} scores: {' '.join(sorted(scores))}")
-    gap = (gap_tracks(m, b, sched) - gap_tracks(m, changed(b, slice(5, 8)), sched)).abs().max().item()
+    view = torch.ones(B, T, 2, 2, dtype=torch.bool)
+    view[:, 5:8] = False
+    gap = (masked_tracks(m, b, sched, view) - masked_tracks(m, changed(b, slice(5, 8)), sched, view)).abs().max().item()
     print(f"  change anywhere when the frames of a gap (5-7) change: {gap:.2e} (want 0)")
+    view = torch.ones(B, T, 2, 2, dtype=torch.bool)
+    view[:, 5:8, 0, 0] = False
+    b2 = {k: v.clone() for k, v in b.items()}
+    b2["frames"][:, 5:8, :R // 2, :R // 2] = torch.randint(0, 255, b2["frames"][:, 5:8, :R // 2, :R // 2].shape,
+                                                           dtype=torch.uint8)
+    b2["depth"][:, 5:8, :R // 8, :R // 8] = 5.0
+    b2["context"][:, 5:8] = torch.randn_like(b2["context"][:, 5:8])      # no DINOv3 in a partial frame
+    part = (masked_tracks(m, b, sched, view) - masked_tracks(m, b2, sched, view)).abs().max().item()
+    seen = (masked_tracks(m, b, sched, view) - masked_tracks(m, changed(b, slice(5, 8)), sched, view)).abs().max().item()
+    print(f"  top-left quarter of 5-7 hidden: change when it changes {part:.2e} (want 0), "
+          f"when the rest of those frames does {seen:.2e} (want > 0)")

@@ -16,11 +16,12 @@ def to_device(batch: dict, device) -> dict:
 
 
 def random_visual_mask(b: dict, min_context: int, max_gap: int) -> torch.Tensor:
-    """(B, T) which frames of each training clip keep their image: half the
-    clips lose every frame from a cutoff uniform in [min_context, T] (T: none),
-    the other half a span of 2 to `max_gap` frames starting at or after
-    min_context, seen again after it (0: cutoffs only). Drawn on the CPU, so a
-    seed gives the same masks on any device."""
+    """(B, T, 2, 2) which quarters of each training frame are seen. Each clip
+    loses, over a span of frames, a random quarter, half, three quarters or
+    the whole frame, sizes mixed alike. The span is, for half the clips, every
+    frame from a cutoff uniform in [min_context, T] (T: none), for the other
+    half 2 to `max_gap` frames from min_context on, seen again after (0:
+    cutoffs only). Drawn on the CPU, so a seed gives the same masks anywhere."""
     B, T = b["traj"].shape[:2]
     if not 1 <= min_context < T - 1:
         raise ValueError(f"--min-context {min_context} must be in [1, {T - 2}]: "
@@ -30,20 +31,42 @@ def random_visual_mask(b: dict, min_context: int, max_gap: int) -> torch.Tensor:
     start = torch.randint(min_context, T - 1, (B, 1))
     length = torch.randint(2, max(max_gap, 2) + 1, (B, 1))
     gap = (torch.rand(B, 1) < 0.5) & (max_gap > 0)
-    mask = torch.where(gap, (t < start) | (t >= start + length), t < cut)
-    return mask.to(b["traj"].device)
+    lost = torch.where(gap, (t >= start) & (t < start + length), t >= cut)             # (B, T)
+    # The quarters lost: one, a half, all but one, or all, turned a random
+    # multiple of 90 degrees so that any quarter or half can be the one.
+    shapes = torch.tensor([[[1, 0], [0, 0]], [[1, 1], [0, 0]], [[1, 1], [1, 0]], [[1, 1], [1, 1]]], dtype=torch.bool)
+    grid = torch.stack([torch.rot90(shapes[k], int(r)) for k, r in zip(torch.randint(4, (B,)), torch.randint(4, (B,)))])
+    view = ~(lost[:, :, None, None] & grid[:, None])
+    return view.to(b["traj"].device)
 
 
 def visual_mask(b: dict, cutoff: torch.Tensor | None) -> torch.Tensor:
-    """(B, T) True where a frame keeps its image: the frames before each
-    clip's cutoff, every frame without one."""
+    """(B, T, 2, 2) the whole frame seen before each clip's cutoff, none from it;
+    every frame without one."""
     B, T = b["traj"].shape[:2]
     device = b["traj"].device
     if cutoff is None:
-        return torch.ones(B, T, dtype=torch.bool, device=device)
+        return torch.ones(B, T, 2, 2, dtype=torch.bool, device=device)
     if not (cutoff >= 1).all():
         raise ValueError("a cutoff below 1 would hide frame 0, the query frame")
-    return torch.arange(T, device=device)[None] < cutoff[:, None]
+    seen = torch.arange(T, device=device)[None] < cutoff[:, None]
+    return seen[:, :, None, None].expand(B, T, 2, 2).clone()
+
+
+def black_out(frames: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
+    """(B, T, H, W, 3) uint8 frames with their hidden quarters black, so the
+    CNN cannot see them either (H, W even)."""
+    H, W = frames.shape[2:4]
+    seen = view.repeat_interleave(H // 2, 2).repeat_interleave(W // 2, 3)
+    return frames * seen[..., None].to(frames.dtype)
+
+
+def seen_at(view: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
+    """(B, T, 2, 2) seen quarters and (B, T, N, 2) pixels in [0, 1] -> (B, T, N):
+    whether each pixel is in a seen quarter (a pixel off the frame reads the
+    nearest quarter)."""
+    r, c = (uv[..., 1] >= 0.5).long(), (uv[..., 0] >= 0.5).long()
+    return view.flatten(2).gather(2, r * 2 + c)
 
 
 def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:

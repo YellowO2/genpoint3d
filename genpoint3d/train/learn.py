@@ -5,8 +5,10 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, fine_inputs, hidden_weight, random_visual_mask, rigid_groups, rigid_pairs, to_device,
+    apd_weight, black_out, fine_inputs, hidden_weight, random_visual_mask, rigid_groups, rigid_pairs,
+    seen_at, to_device,
 )
+from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.regress import regress_loss
 from genpoint3d.train.tools.visibility import visible_target
 
@@ -17,18 +19,22 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     amp = hardware.amp
     b = to_device(batch, hardware.device)
     traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
-    # Each clip forecasts from a random cutoff, or over a random gap and tracks again after.
+    # Each clip loses part or all of its frames from a random cutoff, or over
+    # a random gap and is seen again after; the CNN sees only what is left.
     vm = random_visual_mask(b, settings.min_context, settings.max_gap)
+    b["frames"] = black_out(b["frames"], vm)
     mask, w = hidden_weight(vis, apd_weight(b, traj), settings.hidden_loss)
     extra = dict(vel_weight=settings.vel_loss)
     if settings.rigid_loss:
         extra.update(pairs=rigid_pairs(b), rigid_weight=settings.rigid_loss)
     if settings.group_loss:
         extra.update(groups=rigid_groups(b), group_weight=settings.group_loss)
-    if settings.vis_loss:
-        extra.update(visible=visible_target(vis, vm), vis_weight=settings.vis_loss)
     # The CNN's map, shared by every backward pass of the step.
     fine = fine_inputs(model, b, amp, grad=True)
+    if settings.vis_loss:
+        # Where each point truly is in the image, against the quarters seen.
+        uv, _ = project(model.lookup_pos(traj.float(), anchor.float()), fine["fine_proj"].float())
+        extra.update(visible=visible_target(vis, seen_at(vm, uv)), vis_weight=settings.vis_loss)
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         # Back-propagated a round at a time, divided by accum so the
         # accumulated gradient is the effective batch's mean.

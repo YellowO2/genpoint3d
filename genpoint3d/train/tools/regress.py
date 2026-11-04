@@ -16,6 +16,8 @@ from typing import Optional
 import torch
 from torch import nn
 
+from genpoint3d.train.tools.batch import seen_at
+from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.visibility import visibility_error
 
 
@@ -61,17 +63,24 @@ def _integrate(step: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
     return torch.where(t > a, c - c_a, torch.where(t < a, c_a1 - before, torch.zeros_like(c)))
 
 
-def _window_points(cond: dict, B: int, N: int, start: int, end: int, backward: bool, every: bool):
+def _handed_over(cond: dict, anchor: torch.Tensor) -> torch.Tensor:
+    """(B, N) the points whose query pixel is seen in their query frame: the
+    others were never given to the model."""
+    q, view = cond["query_t"], cond.get("visual_mask")
+    if view is None:
+        return torch.ones_like(q, dtype=torch.bool)
+    proj = cond["fine_proj"].float().gather(1, q[..., None, None].expand(-1, -1, 3, 4))
+    uv = project(anchor.float()[:, :, None], proj)[0][:, :, 0]                       # (B, N, 2)
+    return seen_at(view.gather(1, q[..., None, None].expand(-1, -1, 2, 2)), uv[:, :, None])[:, :, 0]
+
+
+def _window_points(cond: dict, seen: torch.Tensor, start: int, end: int, backward: bool, every: bool):
     """For one window: `alive` (B, N), the points it has (forward, those first
     seen by its end, or all once a backward sweep has run, `every`; backward,
-    all), only points whose query frame has its image; `at` (B, N), the frame
-    each point's steps run from: its query frame when inside the window, else
-    the window's first frame forward and its last backward; `inside` (B, N)."""
+    all), only points handed over (`seen`); `at` (B, N), the frame each
+    point's steps run from: its query frame when inside the window, else the
+    window's first frame forward and its last backward; `inside` (B, N)."""
     q = cond["query_t"]
-    vm = cond.get("visual_mask")
-    seen = torch.ones(B, N, dtype=torch.bool, device=q.device)
-    if vm is not None:
-        seen = (vm[..., None].expand(-1, -1, N) if vm.dim() == 2 else vm).gather(1, q[:, None])[:, 0]
     inside = (q >= start) & (q < end)
     alive = seen if backward or every else seen & (q < end)
     at = torch.where(inside, q - start, torch.full_like(q, end - start - 1 if backward else 0))
@@ -129,6 +138,7 @@ class Sweeps:
         # What the head last said about each frame; 0 before it has.
         self.vis = torch.zeros(B, T, N, device=anchor.device)
         self.groups = None
+        self.seen = _handed_over(cond, anchor)
 
     def __iter__(self):
         model, anchor = self.model, self.anchor
@@ -143,7 +153,7 @@ class Sweeps:
                 if not back:
                     self.whole = _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
-                alive, at, inside = _window_points(self.cond, B, N, start, end, back, every=r0 > 0)
+                alive, at, inside = _window_points(self.cond, self.seen, start, end, back, every=r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
                 before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):

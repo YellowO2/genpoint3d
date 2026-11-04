@@ -142,7 +142,9 @@ class PointDiT(nn.Module):
         fine_proj    (B, Tc, 3, 4)   anchor's space -> the image, per frame
         fine_xyz     (B, Tc, 3, h, w) each CNN cell's 3D position
         query_t      (B, N) long     each point's query frame in the clip
-        visual_mask  (B, Tc) or (B, Tc, N) bool, False = no image there
+        visual_mask  (B, Tc, 2, 2) bool, which quarters of each frame are seen:
+                     a frame with any quarter hidden has no DINOv3, and the
+                     matcher reads only its seen cells (`frames` blacked out)
         alive        (B, N) bool     points the others may attend to
         vis_prev     (B, T, N)       the visibility logits last said (with the head)
         group_prev   (B, N, E)       the group vectors the last call said
@@ -156,6 +158,8 @@ class PointDiT(nn.Module):
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
         start = 0 if frames is None else frames[0]
+        if visual_mask is None:
+            visual_mask = torch.ones(B, fine_map.shape[1], 2, 2, dtype=torch.bool, device=dev)
         # The templates and the frame before are read in the whole clip, before the window cut.
         clip_map, clip_proj, clip_xyz, clip_mask = fine_map, fine_proj, fine_xyz, visual_mask
         if frames is not None:
@@ -163,12 +167,9 @@ class PointDiT(nn.Module):
             context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz = (
                 None if t is None else t[:, cut]
                 for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz))
-        # Per point inputs are blanked per point; the shared feature map only
-        # when every point of the frame is.
-        point_mask = frame_mask = None
-        if visual_mask is not None:
-            point_mask = visual_mask if visual_mask.dim() == 3 else visual_mask[..., None]
-            frame_mask = visual_mask.any(-1) if visual_mask.dim() == 3 else visual_mask
+        # A frame is whole (all of it seen: DINOv3 too), partial (the matcher's
+        # seen cells only) or blank.
+        whole, some = visual_mask.flatten(2).all(-1), visual_mask.flatten(2).any(-1)      # (B, T)
 
         # Positions in fp32: bf16 holds a coordinate near 1 to about 1/256.
         with torch.autocast(device_type=dev.type, enabled=False):
@@ -180,35 +181,32 @@ class PointDiT(nn.Module):
                      - 2 * torch.einsum("btnc,btpc->btnp", pos, patch_xyz)).clamp_min(0)
             uv, _ = project(pos, fine_proj.float())
 
-        # Each point reads only the patches nearest its guess; a point with no
-        # image reads them all (they are all null there).
+        # Each point reads only the patches nearest its guess; in a frame
+        # without DINOv3 it reads them all (they are all null there).
         d = dist2.reshape(B * T, N, -1)
         near = d.topk(self.cross_window, dim=-1, largest=False).indices
         window = torch.full_like(d, -CrossBlock.FAR).scatter(-1, near, 0.0)
-        if point_mask is not None:
-            window = window * point_mask.reshape(B * T, -1, 1)
+        window = window * whole.reshape(B * T, 1, 1)
 
         # The matcher's second comparison reads each frame and the frame
         # before (the clip's, before the window's first): off unless both
-        # have their image.
-        seen = torch.ones(B, T, N, dtype=torch.bool, device=dev) if point_mask is None else point_mask.expand(B, T, N)
+        # have something seen.
         if start > 0:
-            b_map, b_proj, b_xyz = (t[:, start - 1:start] for t in (clip_map, clip_proj, clip_xyz))
+            b_map, b_proj, b_xyz, b_view = (t[:, start - 1:start] for t in (clip_map, clip_proj, clip_xyz, clip_mask))
             with torch.autocast(device_type=dev.type, enabled=False):
                 pos_b = self.lookup_pos(x_before.float(), anchor.float())
-            ok0 = (torch.ones(B, 1, N, dtype=torch.bool, device=dev) if clip_mask is None else
-                   (clip_mask if clip_mask.dim() == 3 else clip_mask[..., None])[:, start - 1:start].expand(B, 1, N))
         else:
             b_map, b_proj, b_xyz, pos_b = fine_map[:, :1], fine_proj[:, :1], fine_xyz[:, :1], pos[:, :1]
-            ok0 = torch.zeros(B, 1, N, dtype=torch.bool, device=dev)
+            b_view = torch.zeros_like(visual_mask[:, :1])
         with torch.autocast(device_type=dev.type, enabled=False):
             uv_b, _ = project(pos_b, b_proj.float())
         fine = self._fine_at_queries(torch.cat([b_map, fine_map], 1), torch.cat([b_xyz, fine_xyz], 1),
                                      clip_map, clip_proj, clip_xyz, torch.cat([uv_b, uv], 1),
-                                     torch.cat([pos_b, pos], 1), anchor, query_t)
+                                     torch.cat([pos_b, pos], 1), anchor, query_t,
+                                     torch.cat([b_view, visual_mask], 1), clip_mask)
         half = self.fine.out_dim // 2
-        prev_ok = torch.cat([ok0, seen[:, :-1]], 1) & seen
-        fine = torch.cat([fine[..., :half] * seen[..., None], fine[..., half:] * prev_ok[..., None]], -1)
+        prev_ok = torch.cat([b_view.flatten(2).any(-1), some[:, :-1]], 1) & some
+        fine = torch.cat([fine[..., :half] * some[..., None, None], fine[..., half:] * prev_ok[..., None, None]], -1)
 
         cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
         cond = cond + self.id_feature_proj(id_card)[:, None]
@@ -221,18 +219,15 @@ class PointDiT(nn.Module):
 
         context = self.frame_proj(context)
         context = context + self.patch_pos(patch_xyz).to(context.dtype)
-        if frame_mask is not None:
-            context = torch.where(frame_mask[..., None, None], context, self.null_ctx.to(context.dtype))
+        context = torch.where(whole[..., None, None], context, self.null_ctx.to(context.dtype))
 
         h = self.token_proj(x)                                        # (B, T, N, D)
         with torch.autocast(device_type=dev.type, enabled=False):
             step = pos.diff(dim=1)
             fwd = torch.cat([-step, torch.zeros_like(pos[:, :1])], dim=1)
             bwd = torch.cat([torch.zeros_like(pos[:, :1]), step], dim=1)
-            # The pixel needs the frame's image, like every image input.
-            seen = _posenc(uv)
-            if point_mask is not None:
-                seen = seen * point_mask[..., None]
+            # Where the guess is in the image, from the frame's camera: none without an image.
+            seen = _posenc(uv) * some[..., None, None]
             motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
         h = h + self.motion_proj(motion.to(h.dtype))
         h = h + self.fine_tok(fine).to(h.dtype)
@@ -280,14 +275,7 @@ class PointDiT(nn.Module):
             cs = cond.reshape(B * T, N, -1)
             h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
 
-            frame_ctx = context.reshape(B * T, -1, self.dim)
-            seen = cross(h, cs, frame_ctx, window=window)
-            if visual_mask is not None and visual_mask.dim() == 3:
-                # A point blanked in a frame its neighbours see reads the null
-                # in every patch, as in a fully blanked frame.
-                blank = cross(h, cs, self.null_ctx.to(frame_ctx.dtype).expand_as(frame_ctx), window=window)
-                seen = torch.where(point_mask.reshape(B * T, N, 1), seen, blank)
-            h = seen.view(B, T, N, -1)
+            h = cross(h, cs, context.reshape(B * T, -1, self.dim), window=window).view(B, T, N, -1)
 
         h = self.out_norm(h)
         logits = (F.linear(h, self.vis_weight[None], self.vis_bias[None])[..., 0]
@@ -297,14 +285,22 @@ class PointDiT(nn.Module):
         return self.out(h), logits, groups
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
-                         query_t):
+                         query_t, view, clip_view):
         """The matcher's comparison (B, T, N, out_dim): each point's
-        neighbourhood at its guess against its template in its query frame."""
+        neighbourhood at its guess against its template in its query frame,
+        on seen cells only."""
+        h, w = fine_map.shape[-2:]
         with torch.autocast(device_type=uv.device.type, enabled=False):
             proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
             uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]              # (B, N, 2)
             places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float())
-        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, **places)
+        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, ok=cells(view, h, w),
+                         ok0=cells(clip_view, h, w), **places)
+
+
+def cells(view: torch.Tensor, h: int, w: int) -> torch.Tensor:
+    """(B, T, 2, 2) seen quarters -> (B, T, h, w) seen cells (h, w even)."""
+    return view.repeat_interleave(h // 2, 2).repeat_interleave(w // 2, 3)
 
 
 def _sq_dist(v: torch.Tensor) -> torch.Tensor:

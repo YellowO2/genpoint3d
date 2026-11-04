@@ -43,7 +43,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--heads", type=int, default=4)
         p.add_argument("--cross-window", type=int, default=49, help="DINOv3 patches each point reads")
         p.add_argument("--fine-neigh", type=int, default=32, help="CNN cells per 3D neighbourhood")
-        p.add_argument("--rope-current", type=int, default=0, choices=[0, 1],
+        p.add_argument("--rope-current", type=int, default=1, choices=[0, 1],
                        help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
