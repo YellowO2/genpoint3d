@@ -19,6 +19,10 @@ from torch.utils.checkpoint import checkpoint
 
 from genpoint3d.train.model.BasicEncoder import STRIDE, BasicEncoder
 
+# A typical Kubric frame's spread of cell positions in model units (the
+# median over clips is 0.37 on our clips, 0.33 on the old Kubric).
+MATCH_SPREAD = 0.35
+
 
 class FineFinder(nn.Module):
     """The CNN and the neighbourhood comparisons. The CNN runs once per step
@@ -102,18 +106,10 @@ class FineFinder(nn.Module):
         N = pos.shape[2]
         size = uv0.new_tensor([w, h])
         q = (uv0 * size - 0.5 / STRIDE)                                    # (b, N, 2) level-0 cells
-        # Each clip's point cloud brought to unit spread, as TAPIP3D does
-        # (`norm_mode: isotropic`): the scale its offset encoding is built for.
-        # From frame 0's alone, which every clip sees; TAPIP3D uses the whole
-        # window, which a forecast would leak through.
-        xyz, xyz0, pos, pos0 = xyz.float(), xyz0.float(), pos.float(), pos0.float()
-        first = xyz0[:, 0]                                                  # the clip's frame 0
-        mean = first.mean(dim=(2, 3))                                       # (b, 3)
-        std = (first - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
-        xyz = (xyz - mean[:, None, :, None, None]) / std[:, None, None, None, None]
-        xyz0 = (xyz0 - mean[:, None, :, None, None]) / std[:, None, None, None, None]
-        pos = (pos - mean[:, None, None]) / std[:, None, None, None]
-        pos0 = (pos0 - mean[:, None]) / std[:, None, None]
+        # Offsets in the units TAPIP3D's encoding is built for (unit spread):
+        # the model's one ruler, over a typical Kubric frame's spread, not
+        # each clip's own, so they mean the same in every scene.
+        xyz, xyz0, pos, pos0 = (t.float() / MATCH_SPREAD for t in (xyz, xyz0, pos, pos0))
         uv_b, pos_b, uv, pos = uv[:, :-1], pos[:, :-1], uv[:, 1:], pos[:, 1:]
         fmap, fmap0 = fmap * ok[:, :, None].to(fmap.dtype), fmap0 * ok0[:, :, None].to(fmap0.dtype)
         # A pooled cell is seen if all it pools is; far away, so never a neighbour, if not.
