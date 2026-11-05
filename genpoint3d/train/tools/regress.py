@@ -88,6 +88,49 @@ def _reversed(cond: dict, T: int) -> dict:
     return out
 
 
+def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
+                   member: torch.Tensor, seen: torch.Tensor, start: int, end: int, mates: int = 64) -> torch.Tensor:
+    """(B, L, N, 4) for frames `start` to `end`: where moving with its piece
+    would put each point, as an offset from its guess there, and how much
+    backs it (0 for nothing, towards 1).
+
+    pos (B, T, N, 3) every guess, anchor's space; q (B, N) query frames;
+    groups (B, N, E) the group vectors, member (B, N) the points that count;
+    seen (B, T, N) the belief each point is visible. For each point, its
+    `mates` likeliest group-mates, weighted by that likelihood and by being
+    seen in the frame: the turn and shift that best carry them from where they
+    are in its query frame to where they are now (a weighted Kabsch fit), a
+    shift alone with little behind it, applied to its anchor."""
+    B, T, N, _ = pos.shape
+    K = min(mates, N - 1)
+    a = 2 * torch.sigmoid(-_sq_dist(groups.float())) * (member[:, :, None] & member[:, None, :])
+    a = a.masked_fill(torch.eye(N, dtype=torch.bool, device=pos.device), -1.0)
+    aff, idx = a.topk(K, dim=-1)                                                    # (B, N, K)
+    aff = aff.clamp_min(0)
+    take = lambda x: x.gather(2, idx.reshape(B, 1, N * K, *([1] * (x.dim() - 3))).expand(
+        B, x.shape[1], N * K, *x.shape[3:])).reshape(B, x.shape[1], N, K, *x.shape[3:])
+    w = aff[:, None] * take(seen[:, start:end])                                     # (B, L, N, K)
+    dst = take(pos[:, start:end])                                                   # (B, L, N, K, 3)
+    src = pos[torch.arange(B, device=pos.device)[:, None, None], q[:, :, None], idx][:, None]   # (B, 1, N, K, 3)
+    s = w.sum(-1)
+    mean = lambda x: (w[..., None] * x).sum(-2) / s.clamp_min(1e-6)[..., None]
+    ms, md = mean(src.expand_as(dst)), mean(dst)
+    H = torch.einsum("blnk,blnkx,blnky->blnxy", w, src - ms[..., None, :], dst - md[..., None, :])
+    U, _, Vh = torch.linalg.svd(H)
+    V, Ut = Vh.transpose(-1, -2), U.transpose(-1, -2)
+    flip = torch.ones(*H.shape[:-1], device=pos.device)
+    flip[..., 2] = torch.linalg.det(V @ Ut).sign()
+    R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=pos.device))
+    prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
+    off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
+    return torch.cat([off, (s / (s + 1))[..., None]], -1)
+
+
+def _sq_dist(v: torch.Tensor) -> torch.Tensor:
+    """(B, N, E) -> (B, N, N) squared distances."""
+    return (v[:, :, None] - v[:, None]).pow(2).sum(-1)
+
+
 def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
     """The sweeps in order, each ("f" or "b", rounds a window)."""
     if schedule:
@@ -161,10 +204,15 @@ class Sweeps:
                 before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):
                     vis = self.vis[:, start:end] if model.visibility else None
+                    rigid = None
+                    if model.group_feedback and self.groups is not None:
+                        rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), cond["query_t"], anchor,
+                                               self.groups, self.seen & self.known, torch.sigmoid(self.vis),
+                                               start, end).detach()
                     step, logits, emb = model(g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive,
                                               vis_prev=vis, group_prev=self.groups, group_known=self.known,
                                               direction=direction,
-                                              frames=frames, x_before=before, **cond)
+                                              frames=frames, x_before=before, rigid=rigid, **cond)
                     if emb is not None:
                         # A point not yet in the window keeps what it had: nothing, at first.
                         kept = self.groups if self.groups is not None else torch.zeros_like(emb)

@@ -102,6 +102,9 @@ class PointDiT(nn.Module):
             self.group_out = nn.Linear(dim, group_feedback)
             self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
             self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
+            # Where moving with its piece would put each point (`regress.rigid_proposal`):
+            # the offset from its guess, Fourier-encoded, and how much backs it.
+            self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -131,6 +134,7 @@ class PointDiT(nn.Module):
         direction: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
         x_before: torch.Tensor | None = None,
+        rigid: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         x            (B, T, N, 3)    the guess, displacement / traj_scale
@@ -153,6 +157,8 @@ class PointDiT(nn.Module):
         direction    (B,)            +1 forward, -1 backward (bidirectional)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
+        rigid        (B, T, N, 4)    where moving with its piece would put each point,
+                                     as an offset from its guess, and its support
 
         returns the velocity (B, T, N, 3), the visibility logits (B, T, N) and
         the group vectors (B, N, E), the last two None without their heads.
@@ -233,6 +239,12 @@ class PointDiT(nn.Module):
             motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
         h = h + self.motion_proj(motion.to(h.dtype))
         h = h + self.fine_tok(fine).to(h.dtype)
+        if rigid is not None:
+            if not self.group_feedback:
+                raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
+            with torch.autocast(device_type=dev.type, enabled=False):
+                r = torch.cat([_posenc(rigid[..., :3].float().clamp(-2, 2)), rigid[..., 3:].float()], -1)
+            h = h + self.rigid_in(r.to(h.dtype))
         if self.visibility != (vis_prev is not None):
             raise ValueError("vis_prev is given exactly to a model with the visibility head")
         if vis_prev is not None:
