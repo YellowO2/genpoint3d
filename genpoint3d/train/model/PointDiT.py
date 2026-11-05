@@ -239,9 +239,12 @@ class PointDiT(nn.Module):
             # As a probability less a half: 0 before the head has said anything.
             belief = torch.sigmoid(vis_prev.float()) - 0.5
             h = h + (self.feedback_scale * belief[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
+        # Before the point was first seen, in the video's own time: a backward
+        # sweep runs the clip played backwards.
         t = torch.arange(start, start + T, device=dev)[None, :, None]
         q = query_t[:, None]
-        h = h + ((t < q)[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
+        late = (t - q) * (1 if direction is None else direction.sign().long()[:, None, None]) < 0
+        h = h + (late[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
 
         biases = [None] * self.depth
         if group_prev is not None and not self.group_feedback:

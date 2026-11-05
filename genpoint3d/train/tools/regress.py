@@ -2,7 +2,8 @@
 
 The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
-e.g. "fbfb", one round a window each; empty is `iters` rounds forward). Each
+e.g. "fbfb", one round a window each; empty is `iters` rounds forward); a
+backward sweep runs forward over the clip played backwards. Each
 round the model gives a velocity per frame, summed from each point's fixed
 frame (`_integrate`): its query frame when the window has it, where it stays
 at its anchor. A frame without its image is an input like any other: what the
@@ -46,19 +47,13 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
 
 
 def _integrate(step: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
-    """(B, L, N, 3) velocities -> displacement changes, summed out from each
-    point's fixed frame `at` (B, N), which does not move: a later frame steps
-    from the one before, an earlier one from the one after. Time is in window
-    lengths, a frame being 1 / (L - 1)."""
+    """(B, L, N, 3) velocities -> displacement changes: each frame's step is
+    from the frame before it in the order the window is run, summed, with
+    each point's fixed frame `at` (B, N) held where it is, on both sides of
+    it. Time is in window lengths, a frame being 1 / (L - 1)."""
     L = step.shape[1]
-    t = torch.arange(L, device=step.device)[None, :, None, None]
-    a = at[:, None, :, None]                                                  # (B, 1, N, 1)
-    dt = 1.0 / max(L - 1, 1)
-    c = torch.cumsum(step * dt, dim=1)                                        # (B, L, N, 3)
-    before = torch.cat([torch.zeros_like(c[:, :1]), c[:, :-1]], dim=1)        # c at t - 1
-    pick = lambda v, i: v.gather(1, i.clamp(0, L - 1).expand(-1, -1, -1, 3))
-    c_a, c_a1 = pick(c, a), pick(before, a)
-    return torch.where(t > a, c - c_a, torch.where(t < a, c_a1 - before, torch.zeros_like(c)))
+    c = torch.cumsum(step * (1.0 / max(L - 1, 1)), dim=1)                    # (B, L, N, 3)
+    return c - c.gather(1, at[:, None, :, None].expand(-1, 1, -1, 3))
 
 
 def _handed_over(cond: dict) -> torch.Tensor:
@@ -71,17 +66,26 @@ def _handed_over(cond: dict) -> torch.Tensor:
     return view.flatten(2).all(-1).gather(1, q)
 
 
-def _window_points(cond: dict, seen: torch.Tensor, start: int, end: int, backward: bool, every: bool):
-    """For one window: `alive` (B, N), the points it has, only points handed
-    over (`seen`): forward, those first seen by its end, or all once an
-    earlier sweep has run (`every`); backward, all. `at` (B, N), the frame
-    each point's steps run from: its query frame when inside the window, else
-    the window's first frame forward and its last backward."""
-    q = cond["query_t"]
+def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, every: bool):
+    """For one window, with `q` (B, N) each point's query frame: `alive` (B, N),
+    the points it has, only points handed over (`seen`): those first seen by
+    its end, or all once an earlier sweep has given them a past (`every`).
+    `at` (B, N), the frame each point's steps run from: its query frame when
+    inside the window, else the window's first."""
     inside = (q >= start) & (q < end)
-    alive = seen if backward or every else seen & (q < end)
-    at = torch.where(inside, q - start, torch.full_like(q, end - start - 1 if backward else 0))
+    alive = seen if every else seen & (q < end)
+    at = torch.where(inside, q - start, torch.zeros_like(q))
     return alive, at
+
+
+def _reversed(cond: dict, T: int) -> dict:
+    """`cond` for the clip played backwards: every per-frame input flipped in
+    time, each point's query frame counted from the end."""
+    out = {**cond, "query_t": T - 1 - cond["query_t"]}
+    for k in ("context", "patch_xyz", "fine_map", "fine_proj", "fine_xyz", "visual_mask"):
+        if cond.get(k) is not None:
+            out[k] = cond[k].flip(1)
+    return out
 
 
 def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
@@ -133,16 +137,26 @@ class Sweeps:
         model, anchor = self.model, self.anchor
         B, N = anchor.shape[:2]
         dev = anchor.device
+        T = self.whole.shape[1]
         done = r0 = 0
+        rev = None
         for sweep, n in self.plan:
+            # A backward sweep is a forward one over the clip played backwards,
+            # told which way time runs: a step always comes from the frame just
+            # settled, and only the physics differs.
             back = sweep == "b"
+            if back:
+                rev = _reversed(self.cond, T) if rev is None else rev
+                self.whole, self.vis = self.whole.flip(1), self.vis.flip(1)
+            cond = rev if back else self.cond
+            spans = [(T - e, T - s) for s, e in reversed(self.spans)] if back else self.spans
             direction = (torch.full((B,), -1.0 if back else 1.0, device=dev)
                          if model.bidirectional else None)
-            for start, end in (reversed(self.spans) if back else self.spans):
+            for start, end in spans:
                 if not back:
                     self.whole = _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
-                alive, at = _window_points(self.cond, self.seen, start, end, back, every=r0 > 0)
+                alive, at = _window_points(cond["query_t"], self.seen, start, end, every=back or r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
                 before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):
@@ -150,7 +164,7 @@ class Sweeps:
                     step, logits, emb = model(g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive,
                                               vis_prev=vis, group_prev=self.groups, group_known=self.known,
                                               direction=direction,
-                                              frames=frames, x_before=before, **self.cond)
+                                              frames=frames, x_before=before, **cond)
                     if emb is not None:
                         # A point not yet in the window keeps what it had: nothing, at first.
                         kept = self.groups if self.groups is not None else torch.zeros_like(emb)
@@ -159,10 +173,16 @@ class Sweeps:
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
                     g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
-                    yield _Round(i, start, end, g, logits, emb, alive)
+                    if back:      # the round in the clip's own order
+                        yield _Round(i, T - end, T - start, g.flip(1), None if logits is None else logits.flip(1),
+                                     emb, alive)
+                    else:
+                        yield _Round(i, start, end, g, logits, emb, alive)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 if not back:
                     done = end
+            if back:
+                self.whole, self.vis = self.whole.flip(1), self.vis.flip(1)
             r0 += n
 
 
