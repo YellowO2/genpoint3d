@@ -66,13 +66,13 @@ def model(**kw):
     return PointDiT(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, **kw)
 
 
-for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4,
+for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4, rigid_proposal=True,
                                       feedback_scale=10.0, bidirectional=True, rope_current=True), "fbfb")):
     m = model(**kw)
     with torch.no_grad():             # off the zero inits, so every reader is live
         for p in m.parameters():
             p.add_(torch.randn_like(p) * 0.05)
-    s = types.SimpleNamespace(min_context=2, max_gap=4, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
+    s = types.SimpleNamespace(min_context=2, max_gap=4, partial_masks=1, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
                               group_loss=1.0 if kw else 0.0, vis_loss=1.0 if kw else 0.0, refine_iters=2,
                               accum=1, window=8, overlap=4, schedule=sched)
     m.train()

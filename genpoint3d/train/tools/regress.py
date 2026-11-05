@@ -205,7 +205,7 @@ class Sweeps:
                 for i in range(r0, r0 + n):
                     vis = self.vis[:, start:end] if model.visibility else None
                     rigid = None
-                    if model.group_feedback and self.groups is not None:
+                    if model.rigid_proposal and self.groups is not None:
                         rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), cond["query_t"], anchor,
                                                self.groups, self.seen & self.known, torch.sigmoid(self.vis),
                                                start, end).detach()

@@ -41,6 +41,7 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         bidirectional: bool = False,
         rope_current: bool = False,
+        rigid_proposal: bool = False,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -102,8 +103,12 @@ class PointDiT(nn.Module):
             self.group_out = nn.Linear(dim, group_feedback)
             self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
             self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
-            # Where moving with its piece would put each point (`regress.rigid_proposal`):
-            # the offset from its guess, Fourier-encoded, and how much backs it.
+        # Where moving with its piece would put each point (`regress.rigid_proposal`):
+        # the offset from its guess, Fourier-encoded, and how much backs it.
+        if rigid_proposal and not group_feedback:
+            raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
+        self.rigid_proposal = rigid_proposal
+        if rigid_proposal:
             self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
 
     def num_parameters(self) -> int:
@@ -239,9 +244,9 @@ class PointDiT(nn.Module):
             motion = torch.cat([_posenc(torch.cat([fwd, bwd], -1)), seen], -1)
         h = h + self.motion_proj(motion.to(h.dtype))
         h = h + self.fine_tok(fine).to(h.dtype)
+        if self.rigid_proposal != (rigid is not None) and not (self.rigid_proposal and group_prev is None):
+            raise ValueError("rigid is given exactly to a model built with rigid_proposal, once it has groups")
         if rigid is not None:
-            if not self.group_feedback:
-                raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
             with torch.autocast(device_type=dev.type, enabled=False):
                 r = torch.cat([_posenc(rigid[..., :3].float().clamp(-2, 2)), rigid[..., 3:].float()], -1)
             h = h + self.rigid_in(r.to(h.dtype))

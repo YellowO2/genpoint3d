@@ -50,6 +50,8 @@ class Settings(argparse.Namespace):
                        help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
+        p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],
+                       help="each point told where moving with its piece would put it (needs --group-feedback)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
                        help="multiplies what the fed-back visibility and group vector add")
         # Refinement
@@ -60,6 +62,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--refine-iters", type=int, default=None, help="rounds forward, with no --schedule (4)")
         p.add_argument("--min-context", type=int, default=2,
                        help="training cutoffs and gaps start at or after this frame")
+        p.add_argument("--partial-masks", type=int, default=1, choices=[0, 1],
+                       help="training masks hide a quarter, half or three quarters of a frame too (0: whole frames)")
         p.add_argument("--max-gap", type=int, default=12,
                        help="half the training clips lose a span of 2 to this many frames "
                             "instead of their end (0: cutoffs only)")
@@ -87,6 +91,8 @@ class Settings(argparse.Namespace):
         if settings.schedule and settings.refine_iters is not None:
             p.error("--refine-iters is the rounds without a schedule; a schedule sets one round a sweep")
         settings.refine_iters = settings.refine_iters or 4
+        if settings.rigid_proposal and not settings.group_feedback:
+            p.error("--rigid-proposal is built from the group vectors: needs --group-feedback E")
         if bool(settings.group_feedback) != (settings.group_loss > 0):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss) < 0:
