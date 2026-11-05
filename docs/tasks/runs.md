@@ -4,6 +4,17 @@ Fast setup unless noted: 24-frame Kubric clips, 128 points, 2,500 steps,
 batch 8. Score: APD on visible moving points (val), higher is better.
 TAPIP3D's released model scores 0.926 on the same points.
 
+## Run names
+
+From 5 Nov runs are named by what they are. The earlier ones, as they are referred to now:
+
+| code | name |
+|---|---|
+| fyT | old_design (the reference new runs start from) |
+| fzP | new_design |
+| fzQ | new_design_fixed_ruler |
+| fzR | new_design_reversed |
+
 ## Current thread: what does our tracker lack against TAPIP3D?
 
 | Run | What it is | Step 500 | Best / end | Verdict |
@@ -58,7 +69,8 @@ TAPIP3D's released model scores 0.926 on the same points.
 | fzO | fzN with the attention between points encoding each point's current guess in each frame instead of where it was first seen (`--rope-current 1`), so how near another point is means near now (g1, 1,000 steps) | the drop test's object stops at the floor; hidden points on the ball follow the turn better | | do points need to see where the others are now, for collisions and turning |
 | fzP | The fixed design (the fixes after the cleanup, 4 Nov): the visibility head's last call fed back instead of blanking hidden points for good; training clips that lose a quarter, half, three quarters or all of their frames over a gap or from a cutoff, seen again after; the matcher's real frame before; new points' group vectors from zero; the attention between points on each point's current guess (`--rope-current 1`, now the default); our 240 clips and the old Kubric (fyT's dense cache) drawn alike, from fyT's weights (g1, 1,000 steps) | returned points re-found on the ball; Kubric scores kept (no fzL-style loss) | standard (old Kubric, 100 clips): all 0.873, non-visible 0.472, moving non-visible 0.369; forecast from 12: all 0.601, moving 0.345, seen moving 0.881 (fyT 0.920 / 0.546 / 0.448; 0.625 / 0.385 / 0.907). Fall test moving 0.076. Drop test: still falls through the floor. Ball spin_up_10 median px: facing 1.07, edge 2.42, hidden 29.9, returned 75.9, none within 4 px (fyT 0.58 / 1.54 / 21.8 / 82.9) | below fyT everywhere, visible points too. fyT's own weights under the new code score 0.915 / 0.553 / 0.444, so the code is sound and the drop is fzP's training; it predates the audit's six fixes |
 | fzQ | fzP with the audit's fixes (visibility loss on the window's points only, gaps ending before the clip does, the fed-back visibility bounded, no group bias for points without a vector, points handed over only in a whole frame, the pin removed) and one ruler for every clip (9 m a unit, inputs held within 60 m, instead of each clip's median distance over all its frames, forecast ones included) (g1, 1,000 steps) | as good as fyT on standard scoring; returned points on the ball re-found | standard: all 0.877, non-visible 0.478, moving non-visible 0.369; forecast from 12: all 0.596, moving 0.349, seen moving 0.882. Fall test moving 0.079; the drop still goes through the floor. Ball spin_up_10: facing 108 px, every class lost | the fixes changed nothing on Kubric; the ball broke because the matcher still measured offsets with each clip's own frame-0 spread while the rest used the 9 m ruler (the ball scene is 3 m) |
-| fzR | fzQ with the matcher on the same 9 m ruler (offsets over a typical Kubric frame's spread, 0.35, not each clip's), and the backward sweeps run forward over the clip played backwards, the steps one running sum in the order a window is run: a step always means 'from the frame before', where before, backward rounds had to flip every output keyed off a direction input starting at zero, and the last round is backward (g1, 1,000 steps) | visible points back to fyT's level (0.92 standard); the ball working again | | was the backward sweep's flipped meaning what cost even visible points |
+| fzR | fzQ with the matcher on the same 9 m ruler (offsets over a typical Kubric frame's spread, 0.35, not each clip's), and the backward sweeps run forward over the clip played backwards, the steps one running sum in the order a window is run: a step always means 'from the frame before', where before, backward rounds had to flip every output keyed off a direction input starting at zero, and the last round is backward (g1, 1,000 steps) | visible points back to fyT's level (0.92 standard); the ball working again | standard: all 0.877, non-visible 0.466, moving non-visible 0.356; forecast from 12: all 0.584, moving 0.349, seen moving 0.875. Own val (step 1,000): hidden moving 0.204 (fzQ 0.168), seen moving 0.483 (0.511). Ball spin_up_10 works again: facing 1.41 px, hidden 35.5, returned 90.7. fyT's weights on this code: 0.903 standard, seen moving 0.883 (0.915 / 0.902 before the matcher's ruler) | the backward fix helps hidden points on our clips; the matcher's ruler costs visible points about 0.02; old Kubric level with fzQ, so the main drop from 0.920 is not the scale |
+| reversed_no_rope_current | fzR with the attention between points on each point's start again (`--rope-current 0`), same code (927d14b) (g1, 1,000 steps) | back towards 0.92 if the moving position encoding is what costs the new design | | is rope-current the main drop |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
