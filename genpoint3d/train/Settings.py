@@ -32,7 +32,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--level", type=int, default=0, choices=[0, 1],
                        help="turn every clip so up is -y (needs the cache's up)")
         p.add_argument("--val-frac", type=float, default=0.1)
-        p.add_argument("--val-every", type=int, default=250)
+        p.add_argument("--val-every", type=int, default=500)
         p.add_argument("--train-eval", type=int, default=0, metavar="N",
                        help="also score N train clips at each validation")
         p.add_argument("--overfit", type=int, default=0, metavar="N",

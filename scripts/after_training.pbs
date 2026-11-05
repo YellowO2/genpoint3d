@@ -1,6 +1,7 @@
 #!/bin/bash
 # The tests every new checkpoint gets, in one job:
-#   standard   100 val clips of the old Kubric, 256 points: every frame seen, then forecast from 12
+#   standard   100 val clips of the old Kubric, 256 points, every frame seen (training's own
+#              validation covers forecasting from 12)
 #   fall test  our Kubric's val clips, forecast from 3: thrown objects fall, bounce and tumble
 #   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5
 #   ball       the spinning ball (spin_up_10), error by how the point faces the camera
@@ -26,12 +27,10 @@ CKPT=${CKPT:?}
 OUT=$(dirname $CKPT)
 quiet() { grep -v "Warn\|warn" || true; }
 echo "########## $CKPT"
-for C in 0 12; do
-  echo "--- standard, cutoff $C"
-  python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 \
-    --points 256 --batch 1 --eval-cutoff $C --out $OUT/standard_c$C.json 2>&1 | quiet \
-    | grep -E "average_pts_within|apd_static|apd_moving |apd_hidden |apd_moving_hidden |apd_fut |apd_moving_fut |apd_moving_obs |average_jaccard|occlusion"
-done
+echo "--- standard, every frame seen"
+python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 \
+  --points 256 --batch 1 --out $OUT/standard_c0.json 2>&1 | quiet \
+  | grep -E "average_pts_within|apd_static|apd_moving |apd_hidden |apd_moving_hidden |average_jaccard|occlusion"
 echo "--- fall test, forecast from 3"
 python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fall_test/val --frames-cache $ROOT/cache/kubric_movi48_frames384 \
   --points 500 --batch 1 --eval-cutoff 3 --out $OUT/fall_test.json 2>&1 | quiet \
