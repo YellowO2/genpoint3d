@@ -2,6 +2,8 @@
 # A training run: the current design (the flags' defaults), started from the
 # dense reference, on our Kubric clips and the old Kubric drawn alike (the
 # first cache's val split picks best.pt). ARGS holds what the experiment changes.
+# The tests every checkpoint gets (scripts/after_training.pbs) run at the end,
+# on the same GPU.
 #
 #   qsub -v OUT=fzP_name,ARGS="--steps 2000" scripts/train.pbs
 #   qsub -v OUT=...,CACHE="cache/kubric_dense",FRAMES="cache/kubric_frames384",ARGS="--eval-cutoff 12" scripts/train.pbs
@@ -37,3 +39,4 @@ python -m genpoint3d.train.main --cache $(printf "$ROOT/%s " $CACHE) --frames-ca
   --init $INIT --fine-init $ROOT/weights/tapip3d_finder.pt $ARGS
 
 echo "=== TRAIN DONE ==="
+PBS_JOBNAME=after_training CKPT=outputs/$OUT/best.pt bash scripts/after_training.pbs
