@@ -1,12 +1,13 @@
 #!/bin/bash
 # A training run: the current design (the flags' defaults), started from the
-# dense reference, on our Kubric clips and the old Kubric drawn alike (the
-# first cache's val split picks best.pt). ARGS holds what the experiment changes.
+# dense reference, on the old Kubric and our Kubric clips drawn alike (the
+# first cache's val split validates and picks best.pt: the old Kubric's, as
+# every run before). ARGS holds what the experiment changes.
 # The tests every checkpoint gets (scripts/after_training.pbs) run at the end,
 # on the same GPU.
 #
 #   qsub -v OUT=fzP_name,ARGS="--steps 2000" scripts/train.pbs
-#   qsub -v OUT=...,CACHE="cache/kubric_dense",FRAMES="cache/kubric_frames384",ARGS="--eval-cutoff 12" scripts/train.pbs
+#   qsub -v OUT=...,CACHE="cache/kubric_dense",FRAMES="cache/kubric_frames384" scripts/train.pbs
 #
 #PBS -N train
 #PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
@@ -22,8 +23,8 @@ cd $ROOT/genpoint3d
 
 OUT=${OUT:?}
 ARGS=${ARGS:-}
-CACHE=${CACHE:-cache/kubric_movi48q1 cache/kubric_dense}
-FRAMES=${FRAMES:-cache/kubric_movi48_frames384 cache/kubric_frames384}
+CACHE=${CACHE:-cache/kubric_dense cache/kubric_movi48q1}
+FRAMES=${FRAMES:-cache/kubric_frames384 cache/kubric_movi48_frames384}
 INIT=${INIT:-outputs/fyT_dense_reference/best.pt}
 
 # PBS writes its -o file only when the job ends: tail -f ~/scratch/$OUT.live.log

@@ -63,7 +63,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--max-gap", type=int, default=12,
                        help="half the training clips lose a span of 2 to this many frames "
                             "instead of their end (0: cutoffs only)")
-        p.add_argument("--eval-cutoff", type=int, default=24, metavar="C",
+        p.add_argument("--eval-cutoff", type=int, default=12, metavar="C",
                        help="validate with images before frame C only (0: every frame)")
         # Losses
         p.add_argument("--hidden-loss", type=float, default=1.0, help="weight of a hidden frame's error")
