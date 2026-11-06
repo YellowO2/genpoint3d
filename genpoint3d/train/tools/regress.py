@@ -4,9 +4,8 @@ The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
 e.g. "fbfb", one round a window each; empty is `iters` rounds forward); a
 backward sweep runs forward over the clip played backwards. Each
-round the model gives a velocity per frame, summed from each point's fixed
-frame (`_integrate`): its query frame when the window has it, where it stays
-at its anchor. A frame without its image is an input like any other: what the
+round the model gives a correction to each frame's position (`_corrected`);
+only a point's query frame, where its position is known, is held. A frame without its image is an input like any other: what the
 visibility head last said about every frame is fed back, so a point that looks
 hidden can stop trusting the image there, and look again.
 """
@@ -46,14 +45,12 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
     return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
 
 
-def _integrate(step: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
-    """(B, L, N, 3) velocities -> displacement changes: each frame's step is
-    from the frame before it in the order the window is run, summed, with
-    each point's fixed frame `at` (B, N) held where it is, on both sides of
-    it. Time is in window lengths, a frame being 1 / (L - 1)."""
-    L = step.shape[1]
-    c = torch.cumsum(step * (1.0 / max(L - 1, 1)), dim=1)                    # (B, L, N, 3)
-    return c - c.gather(1, at[:, None, :, None].expand(-1, 1, -1, 3))
+def _corrected(out: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """(B, L, N, 3) the model's correction to each frame's position, with each
+    point's query frame `q` (B, N, an index into the window, -1 outside it)
+    held: the one place its position is known."""
+    t = torch.arange(out.shape[1], device=out.device)[None, :, None]
+    return out * (t != q[:, None])[..., None].to(out.dtype)
 
 
 def _handed_over(cond: dict) -> torch.Tensor:
@@ -70,11 +67,10 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
     """For one window, with `q` (B, N) each point's query frame: `alive` (B, N),
     the points it has, only points handed over (`seen`): those first seen by
     its end, or all once an earlier sweep has given them a past (`every`).
-    `at` (B, N), the frame each point's steps run from: its query frame when
-    inside the window, else the window's first."""
+    `at` (B, N), each point's query frame in the window, -1 when outside it."""
     inside = (q >= start) & (q < end)
     alive = seen if every else seen & (q < end)
-    at = torch.where(inside, q - start, torch.zeros_like(q))
+    at = torch.where(inside, q - start, torch.full_like(q, -1))
     return alive, at
 
 
@@ -220,7 +216,7 @@ class Sweeps:
                         self.known = self.known | alive
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
-                    g = torch.where(alive[:, None, :, None], g.detach() + _integrate(step, at), g.detach())
+                    g = torch.where(alive[:, None, :, None], g.detach() + _corrected(step, at), g.detach())
                     if back:      # the round in the clip's own order
                         yield _Round(i, T - end, T - start, g.flip(1), None if logits is None else logits.flip(1),
                                      emb, alive)
@@ -246,7 +242,7 @@ def _error(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
 
 def _motion_error(g, x1, mask, weight):
     """The error of each frame-to-frame step against the truth's, in window
-    lengths like `_integrate`; a step counts where both its frames do."""
+    lengths; a step counts where both its frames do."""
     s = x1.shape[1] - 1
     w = None if weight is None else (weight[:, :-1] + weight[:, 1:]) / 2
     return _error(g.diff(dim=1) * s, x1.diff(dim=1) * s, mask[:, 1:] & mask[:, :-1], w)

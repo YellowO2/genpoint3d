@@ -6,8 +6,8 @@
                   the matcher, one vector per (frame, point)
     blocks        attention along each point's frames, between the points of a
                   frame, and to the DINOv3 patches nearest its guess, x depth
-    heads         a velocity per frame, and optionally visibility and a group
-                  vector per point
+    heads         a correction to each frame's position, and optionally
+                  visibility and a group vector per point
 """
 
 import torch
@@ -73,7 +73,8 @@ class PointDiT(nn.Module):
         self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
 
         self.out_norm = RMSNorm(dim)
-        self.out = zero_init(nn.Linear(dim, 3, bias=False))
+        # A correction to the point's position in each frame.
+        self.place = zero_init(nn.Linear(dim, 3, bias=False))
 
         self.fine = FineFinder(neigh=fine_neigh)
         self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, dim), almost=False)
@@ -165,7 +166,7 @@ class PointDiT(nn.Module):
         rigid        (B, T, N, 4)    where moving with its piece would put each point,
                                      as an offset from its guess, and its support
 
-        returns the velocity (B, T, N, 3), the visibility logits (B, T, N) and
+        returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N) and
         the group vectors (B, N, E), the last two None without their heads.
         """
         B, T, N, _ = x.shape
@@ -309,7 +310,7 @@ class PointDiT(nn.Module):
                   if self.visibility else None)
         # One group vector per point for the window.
         groups = self.group_out(h).float().mean(1) if self.group_feedback else None
-        return self.out(h), logits, groups
+        return self.place(h), logits, groups
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):
