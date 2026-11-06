@@ -76,8 +76,40 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 | old_recipe_sweeps_positions | reversed_old_recipe (sweeps forward and back) with the model correcting each frame's position directly instead of steps summed from a held frame; only the query frame held; a new output layer from zero (g1, 1,000 steps) | about 0.907 or better: the held frame was why the sweeps hurt (reversed_old_recipe 0.871, forward rounds 0.907) | standard (every frame seen): all 0.846, non-visible 0.382, moving non-visible 0.291. Own val, step 1,000: all 0.833, seen moving 0.893, forecast moving 0.289, hidden moving 0.580. Ball: facing 5.34 px, hidden 49.2, returned 81.6 | worse, not better: not like-for-like, as its output layer starts from zero while the runs it is set against keep old_design's, and frames no window had reached started standing still; the representation alone is not the answer |
 | old_recipe_unified_positions | old_recipe_sweeps_positions with nothing held but what is known: the query frame corrected only along its line of sight (on TAPVid-3D only its pixel is given), and frames no window has reached starting at the point's last speed instead of standing still (d82bf16) (g1, 1,000 steps) | above old_recipe_sweeps_positions (0.846); level with forward rounds (0.907) if a held frame and a standing start were why the sweeps hurt | | the reference for the positions design with the sweeps as they are |
 | old_recipe_unified_forward_rounds | old_recipe_unified_positions with four forward rounds a window instead of the sweeps (`--schedule=`, no direction input), as old_recipe_forward_rounds was for the steps (g1, 1,000 steps) | the positions design's own level without backward sweeps: what the sweeps runs are measured against, as both start their output layer from zero | | do the sweeps still cost tracking under the positions design |
+| old_recipe_unified_lock | old_recipe_unified_positions with each window given two rounds before the next starts from it, forward then back (`--schedule ffbb`; fbfb hands each window on after one), the same four rounds a window (c8a0ca8) (g1, 1,000 steps) | level with old_recipe_unified_forward_rounds, above old_recipe_unified_positions: a window locked before it is handed on, so the next one starts near the truth | | does locking each window before handing it on remove the sweeps' cost |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
+
+## Where the sweeps lose their tracks (scripts/sweep_curve.py, 7 Nov)
+
+Standard test (100 old-Kubric clips, 256 points, every frame seen), the step
+design's checkpoints on its own code (c2eec27). Windows 0-16 and 8-24. APD of
+the seen points, no rescale:
+
+| frame | fbfb after sweep 1 (f) | after 2 (b) | after 3 (f) | after 4 (b) | forward rounds |
+|---|---|---|---|---|---|
+| 4 | 0.868 | 0.932 | 0.962 | 0.964 | 0.968 |
+| 8 | 0.786 | 0.848 | 0.906 | 0.903 | 0.934 |
+| 16 | 0.798 | 0.801 | 0.876 | 0.864 | 0.904 |
+| 23 | 0.787 | 0.787 | 0.837 | 0.837 | 0.890 |
+
+Whole clip (median rescale): fbfb 0.751 / 0.793 / 0.871 / 0.871, forward
+rounds 0.907. Points lost (beyond 16 px at their depth) at frame 23: fbfb 7.0%
+after sweep 1, 3.2% at the end; forward rounds 1.6%. Hidden points at frame 23:
+0.454 against 0.513.
+
+- The first window (frames 0-7) ends level with forward rounds; the whole
+  drop is in the second window and grows towards the clip's end.
+- One round, then handed on: the second window starts from a rough first
+  window and its first round ends at 0.79, where forward rounds' second window
+  starts from a finished first one and ends its first round at 0.85-0.93.
+- The backward sweeps cannot fix the clip's end: frame 23 is a backward
+  window's held frame (where its steps start), so it never moves (0.787 ->
+  0.787, 0.837 -> 0.837) and the frames near it barely do. The second window
+  gets two useful rounds, the forward ones, not four.
+- Both are what the code did, not the idea: the positions design holds no
+  frame (old_recipe_unified_positions), and ffbb locks each window before
+  handing it on (old_recipe_unified_lock).
 
 ## Diagnosis on fyC (scoring only)
 
