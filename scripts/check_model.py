@@ -66,8 +66,9 @@ def model(**kw):
     return PointDiT(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, **kw)
 
 
-for kw, sched in ((dict(), ""), (dict(visibility=True, group_feedback=4, rigid_proposal=True,
-                                      feedback_scale=10.0, bidirectional=True, rope_current=True), "fbfb")):
+full = dict(visibility=True, group_feedback=4, rigid_proposal=True, feedback_scale=10.0, bidirectional=True,
+            rope_current=True)
+for kw, sched in ((dict(), ""), (full, "fbfb"), (full, "ffbb")):
     m = model(**kw)
     with torch.no_grad():             # off the zero inits, so every reader is live
         for p in m.parameters():

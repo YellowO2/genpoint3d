@@ -2,8 +2,10 @@
 
 The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
-e.g. "fbfb", one round a window each; empty is `iters` rounds forward); a
-backward sweep runs forward over the clip played backwards. Each
+a run of one letter is one sweep, as many rounds a window as it is long:
+"fbfb" one round a window each way twice, "ffbb" two forward then two back;
+empty is `iters` rounds forward); a backward sweep runs forward over the clip
+played backwards. Each
 round the model gives a correction to each frame's position (`_corrected`);
 nothing is held but what is known, a point's pixel in its query frame, where
 only its depth may move. Frames no window has reached start moving at the
@@ -13,6 +15,7 @@ hidden can stop trusting the image there, and look again.
 """
 
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Optional
 
 import torch
@@ -145,11 +148,12 @@ def _sq_dist(v: torch.Tensor) -> torch.Tensor:
 
 
 def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
-    """The sweeps in order, each ("f" or "b", rounds a window)."""
+    """The sweeps in order, each ("f" or "b", rounds a window): a window has
+    all of a sweep's rounds before the next one starts from it."""
     if schedule:
         if set(schedule) - {"f", "b"} or schedule[0] != "f":
             raise ValueError(f"a schedule is f and b, starting with f: {schedule!r}")
-        return [(c, 1) for c in schedule]
+        return [(c, len(list(run))) for c, run in groupby(schedule)]
     return [("f", iters)]
 
 

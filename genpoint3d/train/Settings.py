@@ -58,7 +58,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--window", type=int, default=16, help="frames per window, 0 = the whole clip")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")
         p.add_argument("--schedule", default="fbfb", metavar="SWEEPS",
-                       help="sweeps over the windows, one round each: f forward, b backward")
+                       help="sweeps over the windows, f forward, b backward; a run of one letter is one sweep, "
+                            "its length the rounds a window gets before the next: ffbb")
         p.add_argument("--refine-iters", type=int, default=None, help="rounds forward, with no --schedule (4)")
         p.add_argument("--min-context", type=int, default=2,
                        help="training cutoffs and gaps start at or after this frame")
@@ -89,7 +90,7 @@ class Settings(argparse.Namespace):
         if settings.schedule and not settings.window:
             p.error("--schedule sweeps over the windows: needs --window W")
         if settings.schedule and settings.refine_iters is not None:
-            p.error("--refine-iters is the rounds without a schedule; a schedule sets one round a sweep")
+            p.error("--refine-iters is the rounds without a schedule; a schedule sets its own")
         settings.refine_iters = settings.refine_iters or 4
         if settings.rigid_proposal and not settings.group_feedback:
             p.error("--rigid-proposal is built from the group vectors: needs --group-feedback E")
