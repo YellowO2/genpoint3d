@@ -5,7 +5,9 @@ the one before. Sweeps run over the windows forward or backward (`schedule`,
 e.g. "fbfb", one round a window each; empty is `iters` rounds forward); a
 backward sweep runs forward over the clip played backwards. Each
 round the model gives a correction to each frame's position (`_corrected`);
-only a point's query frame, where its position is known, is held. A frame without its image is an input like any other: what the
+nothing is held but what is known, a point's pixel in its query frame, where
+only its depth may move. Frames no window has reached start moving at the
+last settled speed (`_reach`). A frame without its image is an input like any other: what the
 visibility head last said about every frame is fed back, so a point that looks
 hidden can stop trusting the image there, and look again.
 """
@@ -39,18 +41,33 @@ def _cut(t: Optional[torch.Tensor], start: int, end: int) -> Optional[torch.Tens
 
 def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
     """Frames `done` to `end`, which no window has settled, start where the
-    point was in the last settled frame."""
+    point's last settled speed carries it (from the last two settled frames),
+    so a correction of zero keeps it moving."""
     if done == 0 or done >= end:
         return g
-    return torch.cat([g[:, :done], g[:, done - 1:done].expand(-1, end - done, -1, -1), g[:, end:]], dim=1)
+    last = g[:, done - 1:done]
+    speed = last - g[:, done - 2:done - 1] if done >= 2 else torch.zeros_like(last)
+    k = torch.arange(1, end - done + 1, device=g.device, dtype=g.dtype)[None, :, None, None]
+    return torch.cat([g[:, :done], last + k * speed, g[:, end:]], dim=1)
 
 
-def _corrected(out: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-    """(B, L, N, 3) the model's correction to each frame's position, with each
-    point's query frame `q` (B, N, an index into the window, -1 outside it)
-    held: the one place its position is known."""
+def _corrected(out: torch.Tensor, q: torch.Tensor, ray: torch.Tensor) -> torch.Tensor:
+    """(B, L, N, 3) the model's correction to each frame's position; at each
+    point's query frame `q` (B, N, an index into the window, -1 outside it),
+    where only its pixel is known, along its line of sight `ray` (B, N, 3)
+    alone: its depth can be put right, its pixel stays."""
     t = torch.arange(out.shape[1], device=out.device)[None, :, None]
-    return out * (t != q[:, None])[..., None].to(out.dtype)
+    along = (out * ray[:, None]).sum(-1, keepdim=True) * ray[:, None].to(out.dtype)
+    return torch.where((t == q[:, None])[..., None], along, out)
+
+
+def _rays(cond: dict, anchor: torch.Tensor) -> torch.Tensor:
+    """(B, N, 3) each point's line of sight in its query frame: from that
+    frame's camera through its anchor, unit length."""
+    q = cond["query_t"]
+    P = cond["fine_proj"].float().gather(1, q[..., None, None].expand(-1, -1, 3, 4))   # (B, N, 3, 4)
+    centre = -torch.linalg.solve(P[..., :3], P[..., 3:])[..., 0]
+    return torch.nn.functional.normalize(anchor.float() - centre, dim=-1)
 
 
 def _handed_over(cond: dict) -> torch.Tensor:
@@ -169,6 +186,7 @@ class Sweeps:
         self.vis = torch.zeros(B, T, N, device=anchor.device)
         self.groups = None
         self.seen = _handed_over(cond)
+        self.rays = _rays(cond, anchor)
         # Points that have said a group vector: the others have none yet.
         self.known = torch.zeros(B, N, dtype=torch.bool, device=anchor.device)
 
@@ -216,7 +234,8 @@ class Sweeps:
                         self.known = self.known | alive
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
-                    g = torch.where(alive[:, None, :, None], g.detach() + _corrected(step, at), g.detach())
+                    g = torch.where(alive[:, None, :, None], g.detach() + _corrected(step, at, self.rays),
+                                    g.detach())
                     if back:      # the round in the clip's own order
                         yield _Round(i, T - end, T - start, g.flip(1), None if logits is None else logits.flip(1),
                                      emb, alive)
