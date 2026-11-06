@@ -1,0 +1,31 @@
+#!/bin/bash
+# APD by frame after each round (scripts/sweep_curve.py) on the standard test:
+# 100 val clips of the old Kubric, 256 points, every frame seen. CODE runs an
+# older checkout (a git worktree) for checkpoints the current code cannot load.
+#
+#   qsub -v CKPTS="outputs/A/best.pt outputs/B/best.pt",CODE=$HOME/scratch/genpoint3d_steps scripts/sweep_curve.pbs
+#
+#PBS -N sweep_curve
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=01:00:00
+#PBS -q gdev
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/sweep_curve.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+CODE=${CODE:-$ROOT/genpoint3d}
+cd $CODE
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+export PYTHONPATH=$CODE
+python -c "import genpoint3d.train.tools.regress as r; print('code', r.__file__)"
+for CKPT in ${CKPTS:?}; do
+  echo "########## $CKPT"
+  python $ROOT/genpoint3d/scripts/sweep_curve.py --ckpt $ROOT/genpoint3d/$CKPT \
+    --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 2>&1 | grep -v "Warn\|warn" || true
+done
+echo "=== SWEEP CURVE DONE ==="
