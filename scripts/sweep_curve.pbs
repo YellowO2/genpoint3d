@@ -8,7 +8,7 @@
 #PBS -N sweep_curve
 #PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
 #PBS -l walltime=01:00:00
-#PBS -q gdev
+#PBS -q normal
 #PBS -P personal-yhuang01
 #PBS -j oe
 #PBS -o /home/users/ntu/yhuang01/sweep_curve.log
