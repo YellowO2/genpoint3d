@@ -39,7 +39,6 @@ class PointDiT(nn.Module):
         visibility: bool = False,
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
-        bidirectional: bool = False,
         rope_current: bool = False,
         rigid_proposal: bool = False,
     ) -> None:
@@ -91,10 +90,6 @@ class PointDiT(nn.Module):
         # Whether a frame is before the point's query frame, or is it: a fact,
         # beside the head's belief.
         self.query_in = nn.Parameter(torch.zeros(2, dim))
-        # A backward sweep is told time runs backward: +-1 times one vector.
-        self.bidirectional = bidirectional
-        if bidirectional:
-            self.dir_emb = nn.Parameter(torch.zeros(dim))
         # Each point says a vector per window, close for points on one rigid
         # piece; the next call reads it in the token and as an attention bias
         # between points, scaled by feedback_scale so Adam moves it in time.
@@ -137,7 +132,6 @@ class PointDiT(nn.Module):
         vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
         group_known: torch.Tensor | None = None,
-        direction: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
         x_before: torch.Tensor | None = None,
         rigid: torch.Tensor | None = None,
@@ -160,7 +154,6 @@ class PointDiT(nn.Module):
         vis_prev     (B, T, N)       the visibility logits last said (with the head)
         group_prev   (B, N, E)       the group vectors the last call said
         group_known  (B, N) bool     the points that have said one (None: all)
-        direction    (B,)            +1 forward, -1 backward (bidirectional)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
         rigid        (B, T, N, 4)    where moving with its piece would put each point,
@@ -225,10 +218,6 @@ class PointDiT(nn.Module):
         cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
         cond = cond + self.id_feature_proj(id_card)[:, None]
         cond = cond + self.fine_cond(fine).to(cond.dtype)
-        if self.bidirectional != (direction is not None):
-            raise ValueError("direction is given exactly when the model was built bidirectional")
-        if direction is not None:
-            cond = cond + (direction[:, None, None, None] * self.dir_emb).to(cond.dtype)
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         context = self.frame_proj(context)
@@ -257,12 +246,10 @@ class PointDiT(nn.Module):
             # As a probability less a half: 0 before the head has said anything.
             belief = torch.sigmoid(vis_prev.float()) - 0.5
             h = h + (self.feedback_scale * belief[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
-        # Before the point was first seen, in the video's own time: a backward
-        # sweep runs the clip played backwards.
+        # Before the point was first seen, and its query frame.
         t = torch.arange(start, start + T, device=dev)[None, :, None]
         q = query_t[:, None]
-        late = (t - q) * (1 if direction is None else direction.sign().long()[:, None, None]) < 0
-        h = h + (late[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
+        h = h + ((t < q)[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
 
         biases = [None] * self.depth
         if group_prev is not None and not self.group_feedback:

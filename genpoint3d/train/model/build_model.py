@@ -12,6 +12,5 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     visibility=a("vis_loss", 0.0) > 0,
                     group_feedback=a("group_feedback", 0),
                     feedback_scale=a("feedback_scale", 1.0),
-                    bidirectional="b" in a("schedule", ""),
                     rope_current=bool(a("rope_current", 0)),
                     rigid_proposal=bool(a("rigid_proposal", 0)))

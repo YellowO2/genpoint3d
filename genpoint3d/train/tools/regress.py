@@ -4,8 +4,10 @@ The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
 a run of one letter is one sweep, as many rounds a window as it is long:
 "fbfb" one round a window each way twice, "ffbb" two forward then two back;
-empty is `iters` rounds forward); a backward sweep runs forward over the clip
-played backwards. Each
+empty is `iters` rounds forward); a backward sweep visits the windows from
+the clip's end, each still in the video's own time: a round is the same task
+whichever way the windows are visited, only which neighbour was settled last
+differs. Each
 round the model gives a correction to each frame's position (`_corrected`);
 nothing is held but what is known, a point's pixel in its query frame, where
 only its depth may move. Frames no window has reached start moving at the
@@ -92,16 +94,6 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
     alive = seen if every else seen & (q < end)
     at = torch.where(inside, q - start, torch.full_like(q, -1))
     return alive, at
-
-
-def _reversed(cond: dict, T: int) -> dict:
-    """`cond` for the clip played backwards: every per-frame input flipped in
-    time, each point's query frame counted from the end."""
-    out = {**cond, "query_t": T - 1 - cond["query_t"]}
-    for k in ("context", "patch_xyz", "fine_map", "fine_proj", "fine_xyz", "visual_mask"):
-        if cond.get(k) is not None:
-            out[k] = cond[k].flip(1)
-    return out
 
 
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
@@ -198,39 +190,26 @@ class Sweeps:
         model, anchor = self.model, self.anchor
         B, N = anchor.shape[:2]
         dev = anchor.device
-        T = self.whole.shape[1]
         done = r0 = 0
-        rev = None
         for sweep, n in self.plan:
-            # A backward sweep is a forward one over the clip played backwards,
-            # told which way time runs: a step always comes from the frame just
-            # settled, and only the physics differs.
             back = sweep == "b"
-            if back:
-                rev = _reversed(self.cond, T) if rev is None else rev
-                self.whole, self.vis = self.whole.flip(1), self.vis.flip(1)
-            cond = rev if back else self.cond
-            spans = [(T - e, T - s) for s, e in reversed(self.spans)] if back else self.spans
-            direction = (torch.full((B,), -1.0 if back else 1.0, device=dev)
-                         if model.bidirectional else None)
-            for start, end in spans:
+            for start, end in (reversed(self.spans) if back else self.spans):
                 if not back:
                     self.whole = _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
-                alive, at = _window_points(cond["query_t"], self.seen, start, end, every=back or r0 > 0)
+                alive, at = _window_points(self.cond["query_t"], self.seen, start, end, every=back or r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
                 before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):
                     vis = self.vis[:, start:end] if model.visibility else None
                     rigid = None
                     if model.rigid_proposal and self.groups is not None:
-                        rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), cond["query_t"], anchor,
+                        rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], anchor,
                                                self.groups, self.seen & self.known, torch.sigmoid(self.vis),
                                                start, end).detach()
                     step, logits, emb = model(g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive,
                                               vis_prev=vis, group_prev=self.groups, group_known=self.known,
-                                              direction=direction,
-                                              frames=frames, x_before=before, rigid=rigid, **cond)
+                                              frames=frames, x_before=before, rigid=rigid, **self.cond)
                     if emb is not None:
                         # A point not yet in the window keeps what it had: nothing, at first.
                         kept = self.groups if self.groups is not None else torch.zeros_like(emb)
@@ -240,16 +219,10 @@ class Sweeps:
                         self.vis[:, start:end] = logits.detach()
                     g = torch.where(alive[:, None, :, None], g.detach() + _corrected(step, at, self.rays),
                                     g.detach())
-                    if back:      # the round in the clip's own order
-                        yield _Round(i, T - end, T - start, g.flip(1), None if logits is None else logits.flip(1),
-                                     emb, alive)
-                    else:
-                        yield _Round(i, start, end, g, logits, emb, alive)
+                    yield _Round(i, start, end, g, logits, emb, alive)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 if not back:
                     done = end
-            if back:
-                self.whole, self.vis = self.whole.flip(1), self.vis.flip(1)
             r0 += n
 
 
