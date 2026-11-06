@@ -111,6 +111,27 @@ after sweep 1, 3.2% at the end; forward rounds 1.6%. Hidden points at frame 23:
   frame (old_recipe_unified_positions), and ffbb locks each window before
   handing it on (old_recipe_unified_lock).
 
+The same on old_recipe_unified_positions (positions, nothing held, fbfb), on
+the current code:
+
+| frame | after sweep 1 (f) | after 2 (b) | after 3 (f) | after 4 (b) |
+|---|---|---|---|---|
+| 4 | 0.826 | 0.911 | 0.954 | 0.958 |
+| 8 | 0.780 | 0.840 | 0.871 | 0.902 |
+| 16 | 0.778 | 0.815 | 0.860 | 0.863 |
+| 23 | 0.735 | 0.785 | 0.789 | 0.819 |
+
+Whole clip 0.675 / 0.785 / 0.840 / 0.845; lost at frame 23: 5.9% (step fbfb
+3.2%, forward rounds 1.6%).
+
+- With no held frame, the backward sweeps now move the clip's end (frame 23
+  0.735 -> 0.785, and 0.789 -> 0.819), where the step design's never did.
+- But every frame is lower than the step design's, the first window too
+  (frame 4: 0.958 against 0.964; first sweep 0.826 against 0.868): this model
+  corrects less per round. old_recipe_unified_forward_rounds says whether that
+  is the positions design itself, with its output layer started from zero, or
+  the sweeps.
+
 ## Diagnosis on fyC (scoring only)
 
 - Precision on moving points falls every frame (0.97 at frame 1 to 0.55 at
