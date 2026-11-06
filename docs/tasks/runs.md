@@ -78,6 +78,7 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 | old_recipe_unified_forward_rounds | old_recipe_unified_positions with four forward rounds a window instead of the sweeps (`--schedule=`, no direction input), as old_recipe_forward_rounds was for the steps (g1, 1,000 steps) | the positions design's own level without backward sweeps: what the sweeps runs are measured against, as both start their output layer from zero | standard (every frame seen): all 0.898, non-visible 0.491, moving non-visible 0.401. Own val, step 1,000: all 0.838, seen moving 0.914, forecast moving 0.326 (stop 0.331), hidden moving 0.641 (old_recipe_forward_rounds 0.867, 0.923, 0.378, 0.676). Fall test moving 0.075. Ball spin_up_10: facing 3.76 px, edge 4.73, hidden 27.5, returned 80.4. Run on gdev (g1 allows one job a user), validated at step 1,000 only (`--val-every 1000`) to fit its two hours | the positions design costs about 0.01 against the steps without sweeps (0.898 against 0.907), more on hidden points (0.491 against 0.532); with fbfb it is 0.845, so the sweeps still cost 0.05 |
 | old_recipe_unified_lock | old_recipe_unified_positions with each window given two rounds before the next starts from it, forward then back (`--schedule ffbb`; fbfb hands each window on after one), the same four rounds a window (c8a0ca8) (g1, 1,000 steps) | level with old_recipe_unified_forward_rounds, above old_recipe_unified_positions: a window locked before it is handed on, so the next one starts near the truth | standard (every frame seen): all 0.875, non-visible 0.405, moving non-visible 0.309. Own val at 500 / 1,000: all 0.796 / 0.835, seen moving 0.880 / 0.897, forecast moving 0.266 / 0.294, hidden moving 0.556 / 0.594. Fall test moving 0.073. Ball spin_up_10: facing 3.44 px, edge 10.3, hidden 42.0, returned 88.9 (forward rounds: 3.76, 4.73, 27.5, 80.4) | locking wins back 0.03 of the sweeps' 0.05 (0.845 -> 0.875 against 0.898) and forecasts better than fbfb, but hidden points stay far below forward rounds (0.405 against 0.491): what is left is the backward rounds themselves, which play the clip backwards, a world old_design's weights never saw (query frame last, time and gravity reversed) |
 | old_recipe_lock_video_time | old_recipe_unified_lock with each backward sweep visiting the windows from the clip's end, every window still in the video's own time, instead of running forward over the clip played backwards; no direction input (6a561be): a round is the same task whichever way the windows are visited (g1, 1,000 steps) | level with old_recipe_unified_forward_rounds (0.898, non-visible 0.491): the reversed playback was the rest of the sweeps' cost | | is a backward sweep only the order the windows are visited in |
+| old_recipe_lock3_video_time | old_recipe_lock_video_time with three forward rounds a window before the backward sweep's one (`--schedule fffb`, still four rounds a window); gdev, validated at step 1,000 only (6a561be) | above old_recipe_lock_video_time and near 0.898 if how far a window is locked before it is handed on is what is left | | how many rounds lock a window |
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
@@ -132,6 +133,29 @@ Whole clip 0.675 / 0.785 / 0.840 / 0.845; lost at frame 23: 5.9% (step fbfb
   corrects less per round. old_recipe_unified_forward_rounds says whether that
   is the positions design itself, with its output layer started from zero, or
   the sweeps.
+
+The same on old_recipe_unified_lock (ffbb, clip played backwards) and
+old_recipe_unified_forward_rounds. For ffbb, stage 1 is the clip after the
+forward sweep and stages 2-3 the backward rounds; for forward rounds each
+stage is every window's round k:
+
+| frame | ffbb after f, f | after b, b | forward rounds after 2 | after 4 |
+|---|---|---|---|---|
+| 4 | 0.931 | 0.959 | 0.942 | 0.965 |
+| 7 | 0.867 | 0.927 | 0.883 | 0.941 |
+| 8 | 0.869 | 0.911 | 0.904 | 0.914 |
+| 16 | 0.860 | 0.872 | 0.895 | 0.897 |
+| 23 | 0.815 | 0.845 | 0.862 | 0.879 |
+
+- The backward rounds work: on the first window they add as much as forward
+  rounds 3-4 do (frame 7: +0.060 against +0.058), the clip played backwards
+  or not.
+- The rest of the gap is the handover again: the second window starts from a
+  first window two rounds into its four (frame 7 at 0.867, against 0.941), so
+  its first rounds end lower (frame 23 0.815 against 0.862) and the backward
+  rounds do not close it. Two rounds do not lock a window.
+- Hidden points follow the same pattern: level in the first window, below in
+  the second (frame 23: 0.409 against 0.471).
 
 ## Diagnosis on fyC (scoring only)
 
