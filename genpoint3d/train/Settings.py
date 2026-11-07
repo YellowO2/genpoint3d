@@ -15,8 +15,9 @@ class Settings(argparse.Namespace):
             description="Train the tracker on cached clips and save its checkpoints.")
         # Data and run
         p.add_argument("--cache", nargs="+", required=True,
-                       help="cache directories from genpoint3d.prepare, drawn from alike; the first's "
-                            "val split picks best.pt")
+                       help="cache directories from genpoint3d.prepare; the first's val split picks best.pt")
+        p.add_argument("--mix", type=float, nargs="+", default=None,
+                       help="each cache's share of the training draws, in --cache's order (default: alike)")
         p.add_argument("--frames-cache", nargs="+", required=True,
                        help="each cache's RGB and depth, from scripts/cache_frames.py")
         p.add_argument("--fine-res", type=int, default=384, help="side of the cached frames")
@@ -57,7 +58,7 @@ class Settings(argparse.Namespace):
         # Refinement
         p.add_argument("--window", type=int, default=16, help="frames per window, 0 = the whole clip")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")
-        p.add_argument("--schedule", default="fbfb", metavar="SWEEPS",
+        p.add_argument("--schedule", default="ffbb", metavar="SWEEPS",
                        help="sweeps over the windows, f forward, b backward; a run of one letter is one sweep, "
                             "its length the rounds a window gets before the next: ffbb")
         p.add_argument("--refine-iters", type=int, default=None, help="rounds forward, with no --schedule (4)")
@@ -92,6 +93,8 @@ class Settings(argparse.Namespace):
         if settings.schedule and settings.refine_iters is not None:
             p.error("--refine-iters is the rounds without a schedule; a schedule sets its own")
         settings.refine_iters = settings.refine_iters or 4
+        if settings.mix is not None and (len(settings.mix) != len(settings.cache) or min(settings.mix) <= 0):
+            p.error("--mix gives each --cache a share above 0")
         if settings.rigid_proposal and not settings.group_feedback:
             p.error("--rigid-proposal is built from the group vectors: needs --group-feedback E")
         if bool(settings.group_feedback) != (settings.group_loss > 0):

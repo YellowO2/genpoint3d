@@ -26,7 +26,7 @@ from genpoint3d.train.validation_settings import validation_settings
 def train(settings: Settings):
     hardware = Hardware.pick(settings)
     saver = Saver(settings)
-    clips = split_clips(settings.cache, settings.val_frac, settings.seed)
+    clips = split_clips(settings.cache, settings.val_frac, settings.seed, settings.mix)
     clips = apply_run_settings(clips, settings, hardware)
     loaders = Loaders(clips, settings)
     model = build_model(settings, clips.feat_dim)

@@ -8,12 +8,13 @@ from genpoint3d.CachedClip import CachedClip
 from genpoint3d.train.data.Clips import Clips
 
 
-def split_clips(caches: list[str], val_frac: float, seed: int) -> Clips:
+def split_clips(caches: list[str], val_frac: float, seed: int, mix: list[float] | None = None) -> Clips:
     """Each cache's clips split apart, fixed by `seed`, as paths (`ClipDataset`
-    loads them): the train clips of every cache, each weighted so every cache
-    is drawn as often, and the val clips of the first, which picks best.pt."""
+    loads them): the train clips of every cache, each weighted so each cache
+    is drawn its share of `mix` (alike by default), and the val clips of the
+    first, which picks best.pt."""
     train, weights, val, feat_dim = [], [], None, None
-    for cache in caches:
+    for cache, share in zip(caches, mix or [1.0] * len(caches)):
         path = Path(cache)
         clips = sorted(path.glob("*.pt"))
         if not clips:
@@ -29,6 +30,6 @@ def split_clips(caches: list[str], val_frac: float, seed: int) -> Clips:
         n_val = max(1, int(len(clips) * val_frac))
         mine = [clips[i] for i in perm[n_val:]]
         train += mine
-        weights += [1 / len(mine)] * len(mine)
+        weights += [share / len(mine)] * len(mine)
         val = [clips[i] for i in perm[:n_val]] if val is None else val
     return Clips(train=train, val=val, feat_dim=feat_dim, weights=weights)

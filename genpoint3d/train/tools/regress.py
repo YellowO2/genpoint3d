@@ -7,13 +7,14 @@ a run of one letter is one sweep, as many rounds a window as it is long:
 empty is `iters` rounds forward); a backward sweep visits the windows from
 the clip's end, each still in the video's own time: a round is the same task
 whichever way the windows are visited, only which neighbour was settled last
-differs. Each
-round the model gives a correction to each frame's position (`_corrected`);
-nothing is held but what is known, a point's pixel in its query frame, where
-only its depth may move. Frames no window has reached start moving at the
-last settled speed (`_reach`). A frame without its image is an input like any other: what the
-visibility head last said about every frame is fed back, so a point that looks
-hidden can stop trusting the image there, and look again.
+differs. Each round the model gives a correction to each frame's position
+(`_corrected`); nothing is held but what is known, a point's pixel in its
+query frame, where only its depth may move. Frames no window has reached
+start moving at the last settled speed (`_reach`), and a late point's past,
+before a backward sweep reaches it, at its earliest (`_reach_back`). A frame
+without its image is an input like any other: what the visibility head last
+said about every frame is fed back, so a point that looks hidden can stop
+trusting the image there, and look again.
 """
 
 from dataclasses import dataclass
@@ -54,6 +55,21 @@ def _reach(g: torch.Tensor, done: int, end: int) -> torch.Tensor:
     speed = last - g[:, done - 2:done - 1] if done >= 2 else torch.zeros_like(last)
     k = torch.arange(1, end - done + 1, device=g.device, dtype=g.dtype)[None, :, None, None]
     return torch.cat([g[:, :done], last + k * speed, g[:, end:]], dim=1)
+
+
+def _reach_back(g: torch.Tensor, first: torch.Tensor, start: int) -> torch.Tensor:
+    """Each point's frames from `start` up to `first` (B, N), the earliest a
+    window has settled for it (a late point's past, before a backward sweep
+    reaches it), start where its earliest settled speed carries it back."""
+    T = g.shape[1]
+    f = first.clamp(max=T - 1)
+    at = lambda i: g.gather(1, i[:, None, :, None].expand(-1, 1, -1, 3))     # (B, 1, N, 3)
+    p0 = at(f)
+    speed = torch.where((first + 1 < T)[:, None, :, None], at((f + 1).clamp(max=T - 1)) - p0, torch.zeros_like(p0))
+    t = torch.arange(T, device=g.device)[None, :, None]
+    fill = (t >= start) & (t < first[:, None]) & (first < T)[:, None]          # (B, T, N)
+    back = (first[:, None] - t).to(g.dtype)[..., None]
+    return torch.where(fill[..., None], p0 - back * speed, g)
 
 
 def _corrected(out: torch.Tensor, q: torch.Tensor, ray: torch.Tensor) -> torch.Tensor:
@@ -185,6 +201,8 @@ class Sweeps:
         self.rays = _rays(cond, anchor)
         # Points that have said a group vector: the others have none yet.
         self.known = torch.zeros(B, N, dtype=torch.bool, device=anchor.device)
+        # Each point's earliest frame a window has settled; T for none yet.
+        self.first = torch.full((B, N), T, dtype=torch.long, device=anchor.device)
 
     def __iter__(self):
         model, anchor = self.model, self.anchor
@@ -194,8 +212,7 @@ class Sweeps:
         for sweep, n in self.plan:
             back = sweep == "b"
             for start, end in (reversed(self.spans) if back else self.spans):
-                if not back:
-                    self.whole = _reach(self.whole, done, end)
+                self.whole = _reach_back(self.whole, self.first, start) if back else _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
                 alive, at = _window_points(self.cond["query_t"], self.seen, start, end, every=back or r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
@@ -221,6 +238,7 @@ class Sweeps:
                                     g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
+                self.first = torch.where(alive, self.first.clamp(max=start), self.first)
                 if not back:
                     done = end
             r0 += n
