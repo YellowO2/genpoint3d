@@ -18,7 +18,8 @@ class Saver:
 
         log.json   one entry per validation, a plain list `plot_log.py` reads
         run.json   the settings, the commit and the clip counts
-        ckpt.pt    the latest weights, with their settings and scores
+        ckpt.pt    the latest weights, with their settings and scores (none
+                   between validations), so a run cut short keeps them
         best.pt    the weights with the best val APD so far
     """
 
@@ -46,6 +47,12 @@ class Saver:
             self.best = m["average_pts_within_thresh"]
             torch.save(ckpt, out / "best.pt")
             log.info(f"       new best APD {self.best:.3f}")
+
+
+    def keep(self, model, step: int) -> None:
+        """The latest weights to ckpt.pt between validations, without scores."""
+        torch.save({"model": model.state_dict(), "step": step, "args": vars(self.settings), "val": None,
+                    "commit": self.commit}, self.out / "ckpt.pt")
 
 
 def _git_commit() -> str:

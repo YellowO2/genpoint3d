@@ -34,6 +34,8 @@ class Settings(argparse.Namespace):
                        help="turn every clip so up is -y (needs the cache's up)")
         p.add_argument("--val-frac", type=float, default=0.1)
         p.add_argument("--val-every", type=int, default=500)
+        p.add_argument("--save-every", type=int, default=100,
+                       help="steps between saves of the latest weights to ckpt.pt, between validations")
         p.add_argument("--train-eval", type=int, default=0, metavar="N",
                        help="also score N train clips at each validation")
         p.add_argument("--overfit", type=int, default=0, metavar="N",

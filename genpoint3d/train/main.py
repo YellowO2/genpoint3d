@@ -52,6 +52,10 @@ def train(settings: Settings):
             report = merge_scores(interval, scores, fit_scores)
             saver.save(report, model, clips)
             optimiser.swap_out_average(model)
+        elif step % settings.save_every == 0:
+            optimiser.swap_in_average(model)
+            saver.keep(model, step)
+            optimiser.swap_out_average(model)
 
 
 if __name__ == "__main__":
