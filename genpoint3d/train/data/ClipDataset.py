@@ -12,6 +12,7 @@ from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import sample_at
 from genpoint3d.NormStats import NormStats
 from genpoint3d.tools.traj_scale import RADIUS, SCENE_SCALE, TRAJ_SCALE_DISP
+from genpoint3d.train.tools.camera import query_start
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
 # Each clip's depth beside its frames, as `scripts/cache_frames.py` writes it.
@@ -23,9 +24,11 @@ class ClipDataset(Dataset):
     afresh each time with `resample`), loaded lazily so workers stay small.
 
     The target is each point's displacement from its anchor, over
-    TRAJ_SCALE_DISP. `frames` is a directory from `scripts/cache_frames.py`
-    (RGB and depth per clip), or one per cache directory; None serves neither. `level` turns each clip so
-    up is -y (`_levelled`). `query_before` C keeps only points first seen
+    TRAJ_SCALE_DISP; the anchor is the query's pixel at the depth map's depth
+    there (`query_start`). `frames` is a directory from
+    `scripts/cache_frames.py` (RGB and depth per clip), or one per cache
+    directory; None serves neither, and the anchor is then the cache's. `level`
+    turns each clip so up is -y (`_levelled`). `query_before` C keeps only points first seen
     before frame C: a forecast from C is scored on points it was handed.
     """
 
@@ -44,6 +47,21 @@ class ClipDataset(Dataset):
         if isinstance(c, Path):
             c = torch.load(c, weights_only=False)
         clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
+        # Each point's query frame; a cache from before it had them all at 0.
+        query_t = (torch.zeros(clip.traj.shape[1], dtype=torch.long) if clip.query_t is None
+                   else clip.query_t.long())
+        # Empty tensors rather than None, for the default collate.
+        frames = depth = torch.zeros(0)
+        if frames_dir is not None:
+            frames = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}.npy"))
+            if frames.shape[0] != clip.traj.shape[0]:
+                raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
+                                 f"for a {clip.traj.shape[0]}-frame track")
+            depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
+            # A query is its pixel; where it starts in 3D is read off the depth
+            # map, as on real video, not handed over from the true track.
+            clip = dataclasses.replace(clip, anchor=query_start(depth, clip.query_uv.float(), query_t,
+                                                                clip.intrinsics, clip.extrinsics, clip.hw, RADIUS))
 
         if self.level:
             clip = _levelled(clip)
@@ -61,9 +79,6 @@ class ClipDataset(Dataset):
         traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
-        # Each point's query frame; a cache from before it had them all at 0.
-        query_t = (torch.zeros(traj.shape[1], dtype=torch.long) if clip.query_t is None
-                   else clip.query_t.long())
         if id_card is not None and clip.context is not None:
             # Read again in each point's query frame with the exact lookup
             # (`tools/feature_lookup.py`), before the subsampling.
@@ -89,16 +104,8 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
-        # Empty tensors rather than None, for the default collate; features
-        # stay fp16 until `to_device`.
+        # Features stay fp16 until `to_device`.
         ctx = clip.context
-        frames = depth = torch.zeros(0)
-        if frames_dir is not None:
-            frames = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}.npy"))
-            if frames.shape[0] != traj.shape[0]:
-                raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
-                                 f"for a {traj.shape[0]}-frame track")
-            depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t,
