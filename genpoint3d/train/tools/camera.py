@@ -46,22 +46,3 @@ def unproject(uv: torch.Tensor, z: torch.Tensor, proj: torch.Tensor) -> torch.Te
     inv = torch.linalg.inv(proj[..., :3].double())                     # (B, T, 3, 3)
     pos = torch.einsum("btij,btnj->btni", inv, q - proj[:, :, None, :, 3].double())
     return pos.to(uv.dtype)
-
-
-def query_start(depth: torch.Tensor, uv: torch.Tensor, q: torch.Tensor, intrinsics: torch.Tensor,
-                extrinsics: torch.Tensor, hw: tuple[int, int], radius: float) -> torch.Tensor:
-    """Each query's start, read off the depth map the model is given: its pixel
-    `uv` (N, 2) of the native frame in its frame `q` (N,), at the depth of the
-    CNN cell under it in `depth` (T, h, w) metres, held within `radius` as the
-    model's cells are -> (N, 3) metres in the frame-0 camera. Only the pixel
-    is the query's; the depth is the map's, true or estimated."""
-    H, W = hw
-    h, w = depth.shape[1:]
-    col = (uv[:, 0] / W * w).long().clamp(0, w - 1)
-    row = (uv[:, 1] / H * h).long().clamp(0, h - 1)
-    z = depth[q, row, col].float().clamp(max=radius)
-    K = intrinsics[q].float()                                            # (N, 3, 3)
-    x = (uv[:, 0].float() - K[:, 0, 2]) / K[:, 0, 0] * z
-    y = (uv[:, 1].float() - K[:, 1, 2]) / K[:, 1, 1] * z
-    cam = torch.stack([x, y, z, torch.ones_like(z)], dim=-1)             # (N, 4) in camera q
-    return torch.linalg.solve(extrinsics[q].float(), cam[..., None])[:, :3, 0]
