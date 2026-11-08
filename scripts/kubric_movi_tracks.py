@@ -492,10 +492,17 @@ tt, yy, xx = np.meshgrid(np.arange(offset[0], T, stride), np.arange(offset[1], H
 grid = np.stack([tt, yy, xx], -1).reshape(-1, 3)  # (t, y, x) query candidates
 grid_seg = seg[grid[:, 0], grid[:, 1], grid[:, 2]]
 counts = np.bincount(grid_seg, minlength=len(visible_foreground_assets) + 1)
-per_seg = num_to_sample(counts, FLAGS.tracks)
+# [genpoint3d] The objects that move (a box corner more than 1 cm from where it
+# started) get half the points, at up to all their candidates, so the still
+# background does not crowd out the moving surfaces; the rest share the remainder.
+moves = np.array([False] + [bool(np.abs(b - b[:1]).max() > 0.01) for b in boxes])
+per_seg = np.zeros(len(counts), np.int64)
+if moves.any():
+  per_seg[moves] = num_to_sample(counts[moves], FLAGS.tracks // 2, max_frac=1.0)
+per_seg[~moves] = num_to_sample(counts[~moves], FLAGS.tracks - per_seg.sum())
 trust = trusted_normals()
 
-all_uv, all_occ, all_xyz, all_query = [], [], [], []
+all_uv, all_occ, all_xyz, all_query, all_seg = [], [], [], [], []
 for i in range(len(visible_foreground_assets) + 1):
   candidates = grid[grid_seg == i]
   if per_seg[i] == 0 or len(candidates) == 0:
@@ -537,11 +544,13 @@ for i in range(len(visible_foreground_assets) + 1):
   all_occ.append(occ)
   all_xyz.append(world)
   all_query.append(q)
+  all_seg.append(np.full(len(q), i, np.int32))
 
 coords = np.concatenate(all_uv).astype(np.float32)
 occluded = np.concatenate(all_occ)
 traj_3d = np.concatenate(all_xyz).astype(np.float32)
 queries = np.concatenate(all_query).astype(np.int32)
+segment = np.concatenate(all_seg)
 
 # Sanity: each point projects back onto its own query pixel at its query frame.
 n = np.arange(len(queries))
@@ -570,6 +579,7 @@ np.save(output_dir / f"{name}.npy", {
     "matrix_world": matrix_world,     # (T, 4, 4) camera-to-world
     "depth_range": depth_range,
     "queries": queries,               # (N, 3) t, y, x of each point's query
+    "segment": segment,               # (N,) [genpoint3d] its object: 0 the background, k the k-th visible one
 })
 
 kb.done()
