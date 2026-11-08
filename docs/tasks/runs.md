@@ -124,6 +124,17 @@ beside the model's final guess, and the proposal built from the true groups
 - Its backing says about 0.96 whether it is right or wrong: it counts how
   much weight the mates carry, not how well they fit one rigid motion.
 
+The groups themselves (scripts/check_groups.py, old Kubric, 100 clips, 256
+points): of the mates the model puts with a point, the share truly on its
+piece (2 cm) is 0.93 for still points, 0.61-0.72 for points moving 1-16 px
+and 0.75-0.81 for those moving more; it finds 0.81-0.97 of its true mates.
+Mostly right, but a fifth of a moving point's mates are on another piece
+(their motion is 44 px off for points moving over 64 px), and one least-
+squares fit over all of them is pulled far off by that fifth. Fixes to try:
+weight mates more sharply than the affinity (only near-certain ones count),
+a fit that drops mates that disagree with it, and a backing that is how well
+the mates fit one rigid motion.
+
 ## Where the sweeps lose their tracks (scripts/sweep_curve.py, 7 Nov)
 
 Standard test (100 old-Kubric clips, 256 points, every frame seen), the step
