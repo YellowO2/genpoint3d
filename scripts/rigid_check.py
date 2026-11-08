@@ -5,6 +5,9 @@ beside the model's own final guess. Hidden and seen point-frames apart, all
 points and the ones that move more than 4 px. A proposal far better than the
 guess on hidden points, which the model does not follow, is a proposal the
 model has not learned to use; one no better is one it is right to ignore.
+Beside it, the proposal built from the true groups (the training labels'
+pieces) instead of the model's: good with them and poor with the model's
+says the groups are what is wrong; poor with both, the fit.
 
 Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
 """
@@ -15,7 +18,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import Sweeps, rigid_proposal
 
@@ -55,9 +58,15 @@ def main() -> int:
         prop = rigid_proposal(pos, q, b["anchor"].float(), sweeps.groups, sweeps.seen & sweeps.known,
                               torch.sigmoid(sweeps.vis.float()), 0, T)
         proposal = guess + prop[..., :3] / model.traj_scale
+        # The true pieces as group vectors: one axis each, far apart.
+        piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
+        truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
+        true_prop = rigid_proposal(pos, q, b["anchor"].float(), truth, sweeps.seen,
+                                   torch.sigmoid(sweeps.vis.float()), 0, T)
+        true_groups = guess + true_prop[..., :3] / model.traj_scale
         gt = to_metres(traj, b)
         moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > 4)[:, None]
-        for name, pts in (("guess", guess), ("proposal", proposal)):
+        for name, pts in (("guess", guess), ("proposal", proposal), ("true groups", true_groups)):
             m = to_metres(pts, b)
             for kind, mask in (("hidden", ~vis), ("seen", vis)):
                 for which, sel in (("all", mask), ("moving", mask & moving)):
@@ -68,11 +77,12 @@ def main() -> int:
             backing[kind].append(prop[..., 3][mask].float().cpu())
 
     print("\nAPD (no rescale), the model's final guess against where its piece would put it:")
-    print(f"  {'point-frames':<16} {'guess':>8} {'proposal':>9}")
+    print(f"  {'point-frames':<16} {'guess':>8} {'proposal':>9} {'true groups':>12}")
     for kind in ("hidden", "seen"):
         for which in ("all", "moving"):
             print(f"  {kind + ' ' + which:<16} {clip_mean(rows[kind, which, 'guess']):>8.4f} "
-                  f"{clip_mean(rows[kind, which, 'proposal']):>9.4f}")
+                  f"{clip_mean(rows[kind, which, 'proposal']):>9.4f} "
+                  f"{clip_mean(rows[kind, which, 'true groups']):>12.4f}")
     for kind in ("hidden", "seen"):
         v = torch.cat(backing[kind])
         print(f"  how much backs the proposal, {kind}: median {v.median():.3f}, "
