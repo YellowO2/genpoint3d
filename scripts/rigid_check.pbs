@@ -1,0 +1,31 @@
+#!/bin/bash
+# The rigid proposal against the truth and the model's own guess
+# (scripts/rigid_check.py), on the standard test's clips, our clips and the ball.
+#
+#   qsub -v CKPT=outputs/RUN/best.pt scripts/rigid_check.pbs
+#
+#PBS -N rigid_check
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=00:40:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/rigid_check.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+CKPT=${CKPT:?}
+for spec in "fit_check/std_fyP_0/val cache/kubric_frames384 256" \
+            "fall_test/val cache/kubric_movi48_frames384 500" \
+            "ball_test/by_motion/spin_up_10 ball_test/frames 100000"; do
+  set -- $spec
+  echo "########## $CKPT on $1"
+  python scripts/rigid_check.py --ckpt $CKPT --cache $ROOT/$1 --frames-cache $ROOT/$2 --points $3 2>&1 \
+    | grep -v "Warn\|warn" || true
+done
+echo "=== RIGID CHECK DONE ==="
