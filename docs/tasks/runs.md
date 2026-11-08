@@ -96,9 +96,33 @@ weights, the proposal switched off.
 | ball: facing / edge / hidden / returned px | 4.11 / 4.03 / 30.7 / 83.0 | 4.10 / 4.11 / 30.6 / 83.4 |
 
 The model barely uses it: 0.01 on Kubric's non-visible points, nothing on
-forecasting or the ball. Next: is the proposal itself any good (its position
-against the truth, for hidden points), and are the group vectors that build
-it right.
+forecasting or the ball.
+
+Why (scripts/rigid_check.py): the proposal's own position against the truth,
+beside the model's final guess, and the proposal built from the true groups
+(the training labels' pieces) instead of the model's. APD, no rescale:
+
+| clips, point-frames | guess | proposal | proposal, true groups |
+|---|---|---|---|
+| old Kubric, hidden moving | 0.380 | 0.189 | 0.453 |
+| old Kubric, seen moving | 0.802 | 0.492 | 0.813 |
+| our clips, hidden moving | 0.123 | 0.093 | 0.129 |
+| our clips, seen moving | 0.415 | 0.290 | 0.328 |
+| ball, hidden | 0.072 | 0.088 | 0.123 |
+| ball, seen moving | 0.521 | 0.528 | 0.477 |
+
+- The model is right to ignore it: with its own groups the proposal is
+  worse than its guess almost everywhere (half as good on old Kubric's
+  moving hidden points).
+- On old Kubric the groups are what is wrong: with the true ones the
+  proposal beats the guess on hidden points (0.453 against 0.380) and
+  matches it on seen ones. The fit itself is right (exact on a toy turning
+  piece).
+- On our clips and the ball even the true groups help little: the proposal
+  is built from the mates' tracked positions, and those are poor there
+  (seen moving 0.41 and 0.52).
+- Its backing says about 0.96 whether it is right or wrong: it counts how
+  much weight the mates carry, not how well they fit one rigid motion.
 
 ## Where the sweeps lose their tracks (scripts/sweep_curve.py, 7 Nov)
 
