@@ -83,6 +83,23 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
+## Does the full design use its rigid proposal (scripts/without_rigid.pbs, 8 Nov)
+
+full_design_fixed_sweeps with and without its rigid proposal: the same
+weights, the proposal switched off.
+
+| test | with | without |
+|---|---|---|
+| standard: all / non-visible / moving non-visible | 0.888 / 0.485 / 0.380 | 0.884 / 0.475 / 0.376 |
+| same clips, forecast from 12: moving | 0.295 | 0.297 (stop 0.322) |
+| fall test, forecast from 3: moving | 0.064 | 0.063 |
+| ball: facing / edge / hidden / returned px | 4.11 / 4.03 / 30.7 / 83.0 | 4.10 / 4.11 / 30.6 / 83.4 |
+
+The model barely uses it: 0.01 on Kubric's non-visible points, nothing on
+forecasting or the ball. Next: is the proposal itself any good (its position
+against the truth, for hidden points), and are the group vectors that build
+it right.
+
 ## Where the sweeps lose their tracks (scripts/sweep_curve.py, 7 Nov)
 
 Standard test (100 old-Kubric clips, 256 points, every frame seen), the step
