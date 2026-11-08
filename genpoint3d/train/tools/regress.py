@@ -124,10 +124,16 @@ def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, gro
     `mates` likeliest group-mates, weighted by that likelihood and by being
     seen in the frame: the turn and shift that best carry them from where they
     are in its query frame to where they are now (a weighted Kabsch fit), a
-    shift alone with little behind it, applied to its anchor."""
+    shift alone with little behind it, applied to its anchor. In float32:
+    the fit's SVD has no bfloat16 on the GPU."""
+    with torch.autocast(device_type=pos.device.type, enabled=False):
+        return _kabsch(pos.float(), q, anchor.float(), groups.float(), member, seen.float(), start, end, mates)
+
+
+def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates):
     B, T, N, _ = pos.shape
     K = min(mates, N - 1)
-    a = 2 * torch.sigmoid(-_sq_dist(groups.float())) * (member[:, :, None] & member[:, None, :])
+    a = 2 * torch.sigmoid(-_sq_dist(groups)) * (member[:, :, None] & member[:, None, :])
     a = a.masked_fill(torch.eye(N, dtype=torch.bool, device=pos.device), -1.0)
     aff, idx = a.topk(K, dim=-1)                                                    # (B, N, K)
     aff = aff.clamp_min(0)
