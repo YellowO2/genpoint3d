@@ -135,6 +135,16 @@ weight mates more sharply than the affinity (only near-certain ones count),
 a fit that drops mates that disagree with it, and a backing that is how well
 the mates fit one rigid motion.
 
+New clips for group labels by object (8 Nov, 54ce190): neither TAPIP3D's
+Kubric clips nor ours kept which object a point is on, so ~500 of ours are
+being rendered again (`~/scratch/kubric_obj`, seeds 0-495) with each point's
+object saved, 48 frames (the length training reads; before, 48-96 were
+rendered and the rest cut), and the moving objects given half the points
+(30-50% of points move, against 2-20% before, when half the clips failed the
+moving filter). Four review clips: depth within 0.1% (median), every query
+frame visible, every clip past the filter (241-665 moving points seen in
+frame 0); `scripts/render_raw_clip.py` draws them coloured by object.
+
 ## Where the sweeps lose their tracks (scripts/sweep_curve.py, 7 Nov)
 
 Standard test (100 old-Kubric clips, 256 points, every frame seen), the step
