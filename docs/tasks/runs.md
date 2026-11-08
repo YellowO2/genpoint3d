@@ -145,6 +145,13 @@ moving filter). Four review clips: depth within 0.1% (median), every query
 frame visible, every clip past the filter (241-665 moving points seen in
 frame 0); `scripts/render_raw_clip.py` draws them coloured by object.
 
+From 8 Nov, every cache serves only the points within 30 m of the camera in
+their query frame (`REACH`): Kubric's sky is the inside of a dome 40 m out
+with a photo on it, and its points taught the model the sky is 40 m away.
+Dropped: 2.6% of the old Kubric's points, 14% of our clips', 3.4% of the
+standard test's, none of the ball's. Standard scores from here on are on the
+near points only, so earlier runs' are not exactly comparable.
+
 ## Where the sweeps lose their tracks (scripts/sweep_curve.py, 7 Nov)
 
 Standard test (100 old-Kubric clips, 256 points, every frame seen), the step
