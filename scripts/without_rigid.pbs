@@ -1,0 +1,42 @@
+#!/bin/bash
+# The end tests that the rigid proposal should move, with it and without it
+# (scripts/without_rigid.py), on one checkpoint: the standard test, the
+# forecast from 12 on the same clips, the fall test and the ball.
+#
+#   qsub -v CKPT=outputs/RUN/best.pt scripts/without_rigid.pbs
+#
+#PBS -N without_rigid
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=00:50:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/without_rigid.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+CKPT=${CKPT:?}
+quiet() { grep -v "Warn\|warn" || true; }
+STD="--cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 --points 256 --batch 1"
+for WRAP in "" "scripts/without_rigid.py"; do
+  echo "########## $CKPT ${WRAP:+without the rigid proposal}"
+  echo "--- standard, every frame seen"
+  python $WRAP scripts/evaluate.py --ckpt $CKPT $STD 2>&1 | quiet \
+    | grep -E "average_pts_within|apd_hidden |apd_moving_hidden "
+  echo "--- the same clips, forecast from 12"
+  python $WRAP scripts/evaluate.py --ckpt $CKPT $STD --eval-cutoff 12 2>&1 | quiet \
+    | grep -E "apd_moving_obs |apd_moving_fut |apd_moving_stop_fut "
+  echo "--- fall test, forecast from 3"
+  python $WRAP scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fall_test/val \
+    --frames-cache $ROOT/cache/kubric_movi48_frames384 --points 500 --batch 1 --eval-cutoff 3 2>&1 | quiet \
+    | grep -E "apd_moving_fut |apd_moving_stop_fut "
+  echo "--- ball, spin_up_10"
+  python $WRAP scripts/ball_view_angle.py --ckpt $CKPT --cache $ROOT/ball_test/by_motion/spin_up_10 \
+    --frames-cache $ROOT/ball_test/frames --raw $ROOT/ball_test/raw_centres 2>&1 | quiet | tail -6
+done
+echo "=== WITHOUT RIGID DONE ==="
