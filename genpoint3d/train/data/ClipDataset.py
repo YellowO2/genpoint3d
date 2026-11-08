@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import sample_at
 from genpoint3d.NormStats import NormStats
-from genpoint3d.tools.traj_scale import RADIUS, SCENE_SCALE, TRAJ_SCALE_DISP
+from genpoint3d.tools.traj_scale import RADIUS, REACH, SCENE_SCALE, TRAJ_SCALE_DISP
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
 # Each clip's depth beside its frames, as `scripts/cache_frames.py` writes it.
@@ -26,7 +26,8 @@ class ClipDataset(Dataset):
     TRAJ_SCALE_DISP. `frames` is a directory from `scripts/cache_frames.py`
     (RGB and depth per clip), or one per cache directory; None serves neither. `level` turns each clip so
     up is -y (`_levelled`). `query_before` C keeps only points first seen
-    before frame C: a forecast from C is scored on points it was handed.
+    before frame C: a forecast from C is scored on points it was handed. Only
+    points within REACH of the camera in their query frame are served (`_near`).
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
@@ -43,7 +44,7 @@ class ClipDataset(Dataset):
         frames_dir = self.frames.get(c.parent) if isinstance(self.frames, dict) else self.frames
         if isinstance(c, Path):
             c = torch.load(c, weights_only=False)
-        clip = c if isinstance(c, CachedClip) else CachedClip.from_dict(c)
+        clip = _near(c if isinstance(c, CachedClip) else CachedClip.from_dict(c))
 
         if self.level:
             clip = _levelled(clip)
@@ -139,6 +140,23 @@ class ClipDataset(Dataset):
             if got != (size, size):
                 raise SystemExit(f"{kind} in {d} are {got[0]}x{got[1]}, --fine-res {res} needs {size}x{size}")
         return d
+
+
+def _near(clip: CachedClip) -> CachedClip:
+    """The clip with only the points within REACH of the camera in their query
+    frame: not Kubric's sky, a dome 40 m out."""
+    q = (torch.zeros(clip.traj.shape[1], dtype=torch.long) if clip.query_t is None else clip.query_t.long())
+    n = torch.arange(len(q))
+    p = torch.cat([clip.traj[q, n].float(), torch.ones(len(q), 1)], -1)                 # (N, 4) frame-0 camera
+    keep = (clip.extrinsics[q].float() @ p[..., None])[:, :3, 0].norm(dim=-1) <= REACH
+    if keep.all():
+        return clip
+    per_point = dict(traj=clip.traj[:, keep], anchor=clip.anchor[keep], visibility=clip.visibility[:, keep],
+                     query_uv=clip.query_uv[keep])
+    for k in ("query_t", "id_card"):
+        if getattr(clip, k) is not None:
+            per_point[k] = getattr(clip, k)[keep]
+    return dataclasses.replace(clip, **per_point)
 
 
 def _levelled(clip: CachedClip) -> CachedClip:

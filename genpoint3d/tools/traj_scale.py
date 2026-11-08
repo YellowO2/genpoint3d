@@ -9,6 +9,10 @@ SCENE_SCALE = 9.0
 # Inputs further than this from the camera (metres) are held at it: beyond
 # Kubric's background (tracked points to 51 m), so it cuts only real video's sky.
 RADIUS = 60.0
+# Points are tracked only within this distance of the camera at their query
+# frame (metres): Kubric's sky is the inside of a dome 40 m out with a photo
+# on it, a surface real video does not have, and nothing else is that far.
+REACH = 30.0
 
 # Dataset-level constant: the spread of scene-normalised trajectories.
 # Scene normalisation makes *geometry* O(1), but leaves trajectories at ~0.26 --
