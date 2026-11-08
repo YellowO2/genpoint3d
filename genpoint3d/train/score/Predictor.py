@@ -33,7 +33,7 @@ class Predictor:
             loss, out = regress_loss(model, traj, anchor, mask=vis, iters=j.refine_iters, window=j.window,
                                      overlap=j.overlap, schedule=j.schedule, **cond)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
-                          visibility=out["logits"])
+                          visibility=out["logits"], groups=out["groups"])
 
     def done(self) -> None:
         self.model.train()

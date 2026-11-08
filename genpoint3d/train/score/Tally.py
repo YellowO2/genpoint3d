@@ -65,6 +65,8 @@ def _line(m: dict) -> str:
                  f"  FUT {m['apd_fut']:.3f} (stop {m['apd_stop_fut']:.3f} cv {m['apd_cv_fut']:.3f})"
                  f" mv {m['apd_moving_fut']:.3f} (stop {m['apd_moving_stop_fut']:.3f}"
                  f" cv {m['apd_moving_cv_fut']:.3f})")
+    if "group_right" in m:
+        line += f"  groups right {m['group_right']:.2f} found {m['group_found']:.2f}"
     return line + _visible(m)
 
 

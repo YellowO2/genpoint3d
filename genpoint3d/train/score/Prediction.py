@@ -12,3 +12,4 @@ class Prediction:
     tracks: torch.Tensor                 # (B, T, N, 3) in model units
     loss: float                          # the training objective on the batch
     visibility: torch.Tensor | None = None  # (B, T, N) the visibility head's logits
+    groups: torch.Tensor | None = None      # (B, N, E) each point's last group vector

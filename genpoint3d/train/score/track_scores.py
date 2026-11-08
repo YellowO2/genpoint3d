@@ -9,7 +9,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.tools.batch import to_metres
+from genpoint3d.train.tools.batch import rigid_groups, to_metres
 from genpoint3d.train.tools.metrics import at_query, motion_px, tapvid3d_metrics
 
 
@@ -25,6 +25,10 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
     with a cutoff C, on the observed (_obs) and forecast (_fut) frames apart,
     beside two baselines on the forecast frames from the true positions at
     C-1 (_stop) and C-2, C-1 (_cv, constant speed)
+    group_right, group_found                    with group vectors: of the points the
+                                                model puts with each point, the share
+                                                truly on its piece, and of those truly
+                                                on it, the share the model puts with it
     """
     b, j = prediction.batch, judging
     out = {}
@@ -53,6 +57,8 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
     out["apd_static"] = _apd(static, gt_m, vis, b, j.scaling, j.space)
     if prediction.visibility is not None:
         out.update(_jaccard_scores(pred_m, gt_m, prediction, j))
+    if prediction.groups is not None:
+        out.update(_group_scores(prediction.groups, b))
     if j.space == "3d" and not j.min_motion_px:
         moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], q) > 4
         mv = vis & moving[:, None]
@@ -62,6 +68,20 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
         if j.cutoff:
             out.update(_split_scores(pred_m, gt_m, vis, mv, b, j))
     return out
+
+
+def _group_scores(groups: torch.Tensor, b: dict) -> dict:
+    """The group vectors against the training labels' pieces (`rigid_groups`):
+    an affinity 2 sigmoid(-|v_i - v_j|^2) above 0.5 says "same piece". Pairs
+    of a point with itself are left out."""
+    v = groups.float()
+    said = 2 * torch.sigmoid(-(v[:, :, None] - v[:, None]).pow(2).sum(-1)) > 0.5
+    true = rigid_groups(b)
+    off = ~torch.eye(v.shape[1], dtype=torch.bool, device=v.device)
+    said, true = said & off, true & off
+    both = (said & true).flatten(1).sum(1).float()
+    return {"group_right": both / said.flatten(1).sum(1).clamp_min(1),
+            "group_found": both / true.flatten(1).sum(1).clamp_min(1)}
 
 
 def _jaccard_scores(pred_m, gt_m, prediction: Prediction, j: ScoreSettings) -> dict:

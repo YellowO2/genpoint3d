@@ -126,7 +126,9 @@ def main() -> int:
             print(f"  {k:<26} {m[k]:.4f}")
     if "moving_clips" in m:
         print(f"  {'moving_clips':<26} {m['moving_clips']} of {len(ds)}")
-    groups = (("visibility head, and AJ and OA on the observed frames:",
+    groups = (("group vectors against the true pieces (right: of those put with a point, truly on its "
+               "piece; found: of those on it, put with it):", [k for k in ("group_right", "group_found") if k in m]),
+              ("visibility head, and AJ and OA on the observed frames:",
                [k for k in ("vis_acc", "vis_acc_hidden", "vis_acc_visible", "average_jaccard",
                             "occlusion_accuracy") if k in m]),
               ("hidden on the observed frames, beside the last-seen and constant-speed baselines:",
