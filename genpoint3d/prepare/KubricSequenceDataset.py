@@ -204,6 +204,7 @@ class KubricSequenceDataset:
         coords = coords[:, chosen]
         visibility = visibility[:, chosen]
         query_t = query_t[chosen]
+        segment = data["segment"][chosen] if "segment" in data else None
         query_points_3d = traj_3d[query_t, np.arange(len(chosen))]  # 3D position at each query
 
         return KubricSample(
@@ -217,6 +218,7 @@ class KubricSequenceDataset:
             extrinsics=extrinsics,
             query_points_3d=query_points_3d,
             query_t=query_t.astype(np.int64),
+            segment=segment,
         )
 
 

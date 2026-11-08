@@ -78,6 +78,9 @@ class Settings(argparse.Namespace):
         p.add_argument("--vel-loss", type=float, default=1.0, help="frame-to-frame step error")
         p.add_argument("--rigid-loss", type=float, default=1.0, help="rigid pairs' gap error")
         p.add_argument("--group-loss", type=float, default=1.0, help="group vectors against rigid pairs")
+        p.add_argument("--group-labels", default="object", choices=["object", "motion"],
+                       help="the pairs to put together: on one object where the clip says (else as motion), "
+                            "or those whose distance stays within 2 cm")
         p.add_argument("--vis-loss", type=float, default=1.0, help="the visibility head (0: no head)")
         # Optimiser
         p.add_argument("--lr", type=float, default=2e-4)

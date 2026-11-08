@@ -17,6 +17,7 @@ def describe_clip(inputs: ModelInputs, pointmap, settings) -> CachedClip:
         visibility=x.visibility.clone(),  # (T, N) bool
         query_uv=x.query_uv.clone(),      # (N, 2) where to read the ID card
         query_t=x.query_t.clone(),        # (N,) in which frame
+        segment=None if x.segment is None else x.segment.clone(),  # (N,) on which object
         up=x.up.clone(),                  # (3,) which way is up
         hw=tuple(x.frames.shape[1:3]),    # needed to map uv into the grid
         intrinsics=x.intrinsics.clone(),  # (T, 3, 3) pixel units

@@ -116,4 +116,5 @@ def transform(
         up=up_in_frame0(extrinsics_world),
         num_context_frames=num_context_frames,
         norm=norm,
+        segment=None if sample.segment is None else torch.from_numpy(sample.segment).long(),
     )

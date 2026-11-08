@@ -62,6 +62,9 @@ class ClipDataset(Dataset):
         traj = traj / self.traj_scale
         vis = clip.visibility
         id_card = clip.id_card
+        # Each point's object; -1 where the cache does not say.
+        segment = (clip.segment.long() if clip.segment is not None
+                   else torch.full((traj.shape[1],), -1, dtype=torch.long))
         # Each point's query frame; a cache from before it had them all at 0.
         query_t = (torch.zeros(traj.shape[1], dtype=torch.long) if clip.query_t is None
                    else clip.query_t.long())
@@ -79,6 +82,7 @@ class ClipDataset(Dataset):
         if self.query_before:
             keep = query_t < self.query_before
             traj, anchor, vis, query_t, offset = traj[:, keep], anchor[keep], vis[:, keep], query_t[keep], offset[:, keep]
+            segment = segment[keep]
             if id_card is not None:
                 id_card = id_card[keep]
         n_pts = traj.shape[1]
@@ -87,6 +91,7 @@ class ClipDataset(Dataset):
                    else torch.arange(self.num_points))
             traj, anchor, vis, query_t = traj[:, idx], anchor[idx], vis[:, idx], query_t[idx]
             offset = offset[:, idx]
+            segment = segment[idx]
             if id_card is not None:
                 id_card = id_card[idx]
 
@@ -102,7 +107,7 @@ class ClipDataset(Dataset):
             depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
-            "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t,
+            "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t, "segment": segment,
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),
@@ -153,7 +158,7 @@ def _near(clip: CachedClip) -> CachedClip:
         return clip
     per_point = dict(traj=clip.traj[:, keep], anchor=clip.anchor[keep], visibility=clip.visibility[:, keep],
                      query_uv=clip.query_uv[keep])
-    for k in ("query_t", "id_card"):
+    for k in ("query_t", "id_card", "segment"):
         if getattr(clip, k) is not None:
             per_point[k] = getattr(clip, k)[keep]
     return dataclasses.replace(clip, **per_point)

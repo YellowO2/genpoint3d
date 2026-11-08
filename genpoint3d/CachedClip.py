@@ -29,6 +29,7 @@ class CachedClip:
     hw: tuple[int, int]           # frame size, to map uv into the feature grid
     query_t: Optional[torch.Tensor] = None   # (N,) each point's query frame; None is frame 0
     up: Optional[torch.Tensor] = None        # (3,) which way is up, in the frame-0 camera
+    segment: Optional[torch.Tensor] = None   # (N,) each point's object, 0 the background; None if unknown
 
     # --- cameras ---
     intrinsics: Optional[torch.Tensor] = None   # (T, 3, 3) pixel units
@@ -53,6 +54,7 @@ class CachedClip:
             "query_uv": self.query_uv,
             "query_t": self.query_t,
             "up": self.up,
+            "segment": self.segment,
             "hw": self.hw,
             "intrinsics": self.intrinsics,
             "extrinsics": self.extrinsics,
@@ -82,6 +84,7 @@ class CachedClip:
             query_uv=d["query_uv"],
             query_t=d.get("query_t"),
             up=d.get("up"),
+            segment=d.get("segment"),
             hw=d["hw"],
             intrinsics=d.get("intrinsics"),
             extrinsics=d.get("extrinsics"),

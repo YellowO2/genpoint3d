@@ -108,12 +108,20 @@ def rigid_pairs(b: dict) -> torch.Tensor:
     return rigid_buddies(to_metres(b["traj"], b))
 
 
-def rigid_groups(b: dict, tol: float = 0.02) -> torch.Tensor:
-    """(B, N, N) the pairs whose distance never strays more than `tol` metres
-    from frame 0's, moving or not: what the group vectors should put together."""
+def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02) -> torch.Tensor:
+    """(B, N, N) what the group vectors should put together: with `by_object`,
+    in a clip that says which object each point is on (`segment`), the pairs on
+    one object (Kubric's objects are rigid, the background one piece);
+    otherwise the pairs whose distance never strays more than `tol` metres from
+    frame 0's, moving or not."""
     p = to_metres(b["traj"], b)
     d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)
-    return (d - d[:, :1]).abs().amax(dim=1) < tol
+    groups = (d - d[:, :1]).abs().amax(dim=1) < tol
+    if by_object and "segment" in b:
+        seg = b["segment"]
+        labelled = (seg >= 0).all(-1)                                     # (B,)
+        groups = torch.where(labelled[:, None, None], seg[:, :, None] == seg[:, None], groups)
+    return groups
 
 
 def rigid_buddies(p: torch.Tensor, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor:
