@@ -1,0 +1,47 @@
+#!/bin/bash
+# Our rendered Kubric clips (scripts/kubric_movi.pbs) into a training cache, in
+# one job: the clips with too little motion dropped (scripts/crop_raw.py), the
+# clips whose seeds the fall test's clips came from left out (the same seed is
+# the same scene), DINOv3 features and each point's object cached
+# (genpoint3d.prepare, points joining at the frame they are first seen), then
+# the frames and their depth (scripts/cache_frames.py).
+#
+#   qsub -v SRC=kubric_obj,NAME=kubric_obj48 scripts/cache_kubric.pbs
+#
+# Paths are relative to ~/scratch: RAW clips in SRC, the kept ones in
+# NAME_raw, the cache in cache/NAME, its frames in cache/NAME_frames384.
+# About 4 s a clip for the features and well under 1 s for the frames.
+#
+#PBS -N cache_kubric
+#PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
+#PBS -l walltime=01:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/cache_kubric.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+SRC=${SRC:?the rendered clips, e.g. kubric_obj}
+NAME=${NAME:?the cache name, e.g. kubric_obj48}
+EXCLUDE=${EXCLUDE:-fall_test/val}
+
+python scripts/crop_raw.py --src $ROOT/$SRC --dst $ROOT/${NAME}_raw --frames 48
+for f in $ROOT/$EXCLUDE/*.pt; do
+  id=$(basename $f .pt)
+  if [ -d $ROOT/${NAME}_raw/$id ]; then rm -r $ROOT/${NAME}_raw/$id; echo "left out $id (a fall-test scene)"; fi
+done
+echo "$(ls $ROOT/${NAME}_raw | wc -l) clips kept"
+
+python -m genpoint3d.prepare.main --root $ROOT/${NAME}_raw --out $ROOT/cache/$NAME \
+  --features --image-size 384 --points 500 --query-stride 1
+
+export KUBRIC_READ_WORKERS=4
+python scripts/cache_frames.py --src $ROOT/cache/$NAME --raw $ROOT/${NAME}_raw \
+  --dst $ROOT/cache/${NAME}_frames384 --res 384 --workers 16
+
+echo "=== CACHE KUBRIC DONE ==="
