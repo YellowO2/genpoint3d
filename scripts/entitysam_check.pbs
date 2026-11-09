@@ -1,0 +1,25 @@
+#!/bin/bash
+# EntitySAM's masks against our clips' objects, and its speed
+# (scripts/entitysam_check.py), in EntitySAM's own environment
+# (~/scratch/venvs/entitysam, its checkout ~/scratch/entitysam).
+#
+#   qsub -v RAW=kubric_obj48_raw,CLIPS=10 scripts/entitysam_check.pbs
+#
+#PBS -N entitysam_check
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=00:40:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/entitysam_check.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.8.1
+source $ROOT/venvs/entitysam/bin/activate
+cd $ROOT/entitysam
+python $ROOT/genpoint3d/scripts/entitysam_check.py --raw $ROOT/${RAW:-kubric_obj48_raw} \
+  --entitysam $ROOT/entitysam --clips ${CLIPS:-10}
+echo "=== ENTITYSAM CHECK DONE ==="
