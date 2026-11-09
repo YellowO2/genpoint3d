@@ -1,0 +1,22 @@
+#!/bin/bash
+# One command in the project's environment, for short checks that should not
+# run on the login node. CPU only unless the job asks for a GPU.
+#
+#   qsub -v CMD="python scripts/check_appearance.py ~/scratch/cache/kubric_obj48" scripts/run.pbs
+#
+#PBS -N run
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -l walltime=00:20:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/run.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+source $ROOT/venvs/fyp/bin/activate
+eval "${CMD:?set CMD, the command to run}"
+echo "=== RUN DONE ==="
