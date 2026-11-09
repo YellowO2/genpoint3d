@@ -28,12 +28,44 @@ p.add_argument("--ckpt", default="checkpoints/vit-l/model_0009999.pth")
 p.add_argument("--cfg", default="configs/sam2.1_hiera_l.yaml")
 p.add_argument("--decoder-depth", type=int, default=8)
 p.add_argument("--clips", type=int, default=10)
+p.add_argument("--gif", default=None, help="also write each clip as a GIF: EntitySAM's masks | the true objects")
 args = p.parse_args()
 
 root = Path(args.entitysam).expanduser()
 sys.path.insert(0, str(root))
 from sam2.build_sam import build_sam2_video_query_iou_predictor  # noqa: E402
 from eval.eval_vipseg_entity_seg import inference_video_vps_save_results  # noqa: E402
+
+PALETTE = np.array([(230, 25, 75), (60, 180, 75), (255, 225, 25), (0, 130, 200), (245, 130, 48), (145, 30, 180),
+                    (70, 240, 240), (240, 50, 230), (210, 245, 60), (250, 190, 212), (0, 128, 128), (170, 110, 40)])
+
+
+def write_gif(clip, pan, uv, vis, seg, out: Path, scale: int = 2) -> None:
+    """Each frame twice side by side: EntitySAM's masks washed over it, one
+    colour an id (none left bare), and the true objects as dots at the
+    visible points (the background grey)."""
+    from PIL import ImageDraw
+    out.mkdir(parents=True, exist_ok=True)
+    frames = []
+    for t in range(pan.shape[0]):
+        rgb = np.asarray(Image.open(clip / "frames" / f"{t:03d}.png").convert("RGB")).astype(float)
+        ids = pan[t]
+        wash = np.where(ids[..., None] > 0, PALETTE[(ids - 1) % len(PALETTE)], rgb)
+        left = Image.fromarray((0.45 * rgb + 0.55 * wash).astype(np.uint8))
+        right = Image.fromarray(rgb.astype(np.uint8))
+        draw = ImageDraw.Draw(right)
+        for n in np.nonzero(vis[:, t])[0]:
+            x, y = uv[n, t]
+            c = (150, 150, 150) if seg[n] == 0 else tuple(int(v) for v in PALETTE[(seg[n] - 1) % len(PALETTE)])
+            draw.point((x, y), fill=c)
+        both = Image.new("RGB", (2 * left.width, left.height))
+        both.paste(left, (0, 0))
+        both.paste(right, (left.width, 0))
+        both = both.resize((both.width * scale, both.height * scale), Image.NEAREST)
+        ImageDraw.Draw(both).text((4, 4), f"{clip.name} frame {t}: EntitySAM masks | true objects", fill=(255, 255, 255))
+        frames.append(both)
+    frames[0].save(out / f"{clip.name}.gif", save_all=True, append_images=frames[1:], duration=1000 // 12, loop=0)
+
 
 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
 predictor = build_sam2_video_query_iou_predictor(args.cfg, str(root / args.ckpt), mask_decoder_depth=args.decoder_depth)
@@ -81,6 +113,8 @@ for clip in clips:
         rows[lo][0].extend(((said & true).sum(1) / said.sum(1).clip(1))[m])
         rows[lo][1].extend(((said & true).sum(1) / true.sum(1).clip(1))[m])
     print(f"  {clip.name}: {T} frames {H}x{W}, {len(np.unique(pan)) - 1} masks, {seconds[-1]:.1f} s", flush=True)
+    if args.gif:
+        write_gif(clip, pan, uv, vis, seg, Path(args.gif))
 
 print(f"\n{len(clips)} clips | EntitySAM {args.ckpt} | {np.mean(seconds):.1f} s a clip "
       f"({np.sum(seconds) / sum(1 for _ in clips) / 48 * 1000:.0f} ms a frame) | points on no mask {np.mean(unlabelled):.3f}")

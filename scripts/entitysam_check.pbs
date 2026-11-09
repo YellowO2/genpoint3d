@@ -21,5 +21,5 @@ module load cuda/12.8.1
 source $ROOT/venvs/entitysam/bin/activate
 cd $ROOT/entitysam
 python $ROOT/genpoint3d/scripts/entitysam_check.py --raw $ROOT/${RAW:-kubric_obj48_raw} \
-  --entitysam $ROOT/entitysam --clips ${CLIPS:-10}
+  --entitysam $ROOT/entitysam --clips ${CLIPS:-10} ${GIF:+--gif $ROOT/$GIF}
 echo "=== ENTITYSAM CHECK DONE ==="
