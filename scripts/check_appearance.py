@@ -5,7 +5,7 @@ separates pairs on one object from pairs on two (AUC), and for each point,
 of its most similar points (as many as its object has), the share on its
 object. Points on moving objects and on the background apart.
 
-Run:  python scripts/check_appearance.py CACHE_DIR [--clips 60]
+Run:  python scripts/check_appearance.py CACHE_DIR [--clips 20]
 """
 
 import argparse
@@ -13,11 +13,9 @@ from pathlib import Path
 
 import torch
 
-from genpoint3d.CachedClip import CachedClip
-
 p = argparse.ArgumentParser()
 p.add_argument("cache")
-p.add_argument("--clips", type=int, default=60)
+p.add_argument("--clips", type=int, default=20)
 args = p.parse_args()
 
 
@@ -30,16 +28,18 @@ def auc(pos: torch.Tensor, neg: torch.Tensor) -> float:
 
 aucs, prec = [], {"moving": [], "background": [], "still object": []}
 for path in sorted(Path(args.cache).glob("*.pt"))[: args.clips]:
-    c = CachedClip.from_dict(torch.load(path, weights_only=False))
-    if c.segment is None:
+    # Mapped, so only the few tensors read here leave the disk, not the frames' features.
+    c = torch.load(path, weights_only=False, mmap=True)
+    if c.get("segment") is None:
         continue
-    f = torch.nn.functional.normalize(c.id_card.float(), dim=-1)
-    seg = c.segment.long()
+    f = torch.nn.functional.normalize(c["id_card"].float(), dim=-1)
+    seg = c["segment"].long()
     sim = f @ f.T
     off = ~torch.eye(len(seg), dtype=torch.bool)
     same = (seg[:, None] == seg[None]) & off
     aucs.append(auc(sim[same], sim[~same & off]))
-    moved = (c.traj - c.traj[:1]).norm(dim=-1).amax(0) > 0.01                  # (N,)
+    traj = c["traj_metric"]
+    moved = (traj - traj[:1]).norm(dim=-1).amax(0) > 0.01                      # (N,)
     sizes = same.sum(-1)
     top = sim.masked_fill(~off, -2).argsort(-1, descending=True)
     for i in range(len(seg)):
