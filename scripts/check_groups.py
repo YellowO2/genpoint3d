@@ -44,7 +44,7 @@ clips = ds.clips
 edges = (0, 1, 4, 8, 16, 32, 64, float("inf"))
 rows = {e: [[], [], [], [], [], [], [], []] for e in edges[:-1]}
 with torch.no_grad():
-    for batch in DataLoader(ds, batch_size=2, num_workers=2):
+    for batch in DataLoader(ds, batch_size=1, num_workers=2):
         b = to_device(batch, dev)
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b))
