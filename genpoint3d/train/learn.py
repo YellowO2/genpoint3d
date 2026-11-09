@@ -28,7 +28,10 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     if settings.rigid_loss:
         extra.update(pairs=rigid_pairs(b), rigid_weight=settings.rigid_loss)
     if settings.group_loss:
-        extra.update(groups=rigid_groups(b, settings.group_labels == "object"), group_weight=settings.group_loss)
+        # Each window's pairs, judged on the frames it sees.
+        by_object = settings.group_labels == "object"
+        extra.update(groups=lambda start, end: rigid_groups(b, by_object, frames=(start, end)),
+                     group_weight=settings.group_loss)
     # The CNN's map, shared by every backward pass of the step.
     fine = fine_inputs(model, b, amp, grad=True)
     if settings.vis_loss:

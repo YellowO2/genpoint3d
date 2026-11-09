@@ -19,7 +19,7 @@ trusting the image there, and look again.
 
 from dataclasses import dataclass
 from itertools import groupby
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from torch import nn
@@ -303,7 +303,7 @@ def regress_loss(
     vel_weight: float = 0.0,
     pairs: Optional[torch.Tensor] = None,
     rigid_weight: float = 0.0,
-    groups: Optional[torch.Tensor] = None,
+    groups: Optional[Callable[[int, int], torch.Tensor]] = None,
     group_weight: float = 0.0,
     window: int = 0,
     overlap: int = 0,
@@ -314,7 +314,9 @@ def regress_loss(
     weighted gamma^(R - 1 - i) (TAPIP3D's 0.8), normalised, and the windows
     averaged. Per round: the position error (`mask`, `weight` (B, T, N)), and
     with their weights the step error, the rigid pairs' gap error, the group
-    vectors' error against `groups`, and the visibility head's against
+    vectors' error against `groups(start, end)`, the pairs to put together in
+    the window's frames (what the window can see and its rigid fit needs), and
+    the visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
     at once (one round in memory) and the loss comes back detached. The dict
     also holds the tracks and visibility logits, as `refine` gives them, and
@@ -335,7 +337,7 @@ def regress_loss(
             pairs_w = pairs & r.alive[:, :, None] & r.alive[:, None, :]
             loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, pairs_w)
         if group_weight:
-            loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups, r.alive)
+            loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups(r.start, r.end), r.alive)
         loss = share * loss
         vis_loss = x1.new_zeros(())
         if visible is not None:

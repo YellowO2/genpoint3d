@@ -108,13 +108,17 @@ def rigid_pairs(b: dict) -> torch.Tensor:
     return rigid_buddies(to_metres(b["traj"], b))
 
 
-def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02) -> torch.Tensor:
+def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
+                 frames: tuple[int, int] | None = None) -> torch.Tensor:
     """(B, N, N) what the group vectors should put together: with `by_object`,
     in a clip that says which object each point is on (`segment`), the pairs on
     one object (Kubric's objects are rigid, the background one piece);
     otherwise the pairs whose distance never strays more than `tol` metres from
-    frame 0's, moving or not."""
+    the first frame's, moving or not, over `frames` (start, end), the frames a
+    window sees and its rigid fit works over (the whole clip by default)."""
     p = to_metres(b["traj"], b)
+    if frames is not None:
+        p = p[:, frames[0]:frames[1]]
     d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)
     groups = (d - d[:, :1]).abs().amax(dim=1) < tol
     if by_object and "segment" in b:
