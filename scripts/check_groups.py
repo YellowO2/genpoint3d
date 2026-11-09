@@ -11,7 +11,9 @@ point's depth. Split by how far the point moves. A slow object grouped with the
 still floor shows as a high share at 2 cm, a lower one at 5 mm, and a gap
 close to the point's own motion. And the other way round: of the points that
 truly move with it to 2 cm, the share the run puts with it ("found"), which a
-run grouping each point with almost nothing would fail.
+run grouping each point with almost nothing would fail. In clips that say
+which object each point is on, the same against the objects, and of the wrong
+mates the share on the background.
 
   python scripts/check_groups.py --ckpt outputs/<a --group-feedback run>/best.pt --cache <val dir> \\
       --frames-cache <frames> [--points 500]
@@ -40,7 +42,7 @@ model, rs = run.model, run.settings
 ds = run.dataset(args.cache, args.frames_cache, points=args.points)
 clips = ds.clips
 edges = (0, 1, 4, 8, 16, 32, 64, float("inf"))
-rows = {e: [[], [], [], [], []] for e in edges[:-1]}
+rows = {e: [[], [], [], [], [], [], [], []] for e in edges[:-1]}
 with torch.no_grad():
     for batch in DataLoader(ds, batch_size=2, num_workers=2):
         b = to_device(batch, dev)
@@ -66,6 +68,12 @@ with torch.no_grad():
         off = ~torch.eye(same.shape[1], dtype=torch.bool, device=dev)
         sel = same & off
         n = sel.sum(-1).clamp_min(1)
+        # Against the objects, in clips that say which (`segment`): right, found,
+        # and of the wrong mates, the share on the background (floor, backdrop).
+        seg = b["segment"]
+        labelled = (seg >= 0).all(-1)[:, None]
+        obj = (seg[:, :, None] == seg[:, None]) & off
+        wrong = sel & ~obj
         for lo, hi in zip(edges[:-1], edges[1:]):
             mates = rigid2 & off
             m = (moved >= lo) & (moved < hi) & (sel.sum(-1) > 0) & (mates.sum(-1) > 0)
@@ -75,13 +83,21 @@ with torch.no_grad():
                 rows[lo][2].append(((gap * sel).sum(-1) / n)[m].cpu())
                 rows[lo][3].append(sel.sum(-1)[m].float().cpu())
                 rows[lo][4].append(((mates & sel).sum(-1) / mates.sum(-1).clamp_min(1))[m].cpu())
+                k = m & labelled
+                if k.any():
+                    rows[lo][5].append(((obj & sel).sum(-1) / n)[k].cpu())
+                    rows[lo][6].append(((obj & sel).sum(-1) / obj.sum(-1).clamp_min(1))[k].cpu())
+                    rows[lo][7].append(((wrong & (seg[:, None, :] == 0)).sum(-1)
+                                        / wrong.sum(-1).clamp_min(1))[k & (wrong.sum(-1) > 0)].cpu())
 
 print(f"{len(clips)} clips | {args.ckpt} | a pair counts as one piece above affinity 0.5")
 print(f"  {'moved (px)':>11} {'points':>7} {'piece size':>10} {'rigid 2 cm':>11} {'rigid 5 mm':>11}"
-      f" {'motion gap px':>14} {'found':>6}")
+      f" {'motion gap px':>14} {'found':>6} {'object right':>13} {'object found':>13} {'wrong on bg':>12}")
 for lo, hi in zip(edges[:-1], edges[1:]):
     r = rows[lo]
     if r[0]:
-        c = [torch.cat(x) for x in r]
+        c = [torch.cat(x) if x else torch.zeros(0) for x in r]
+        o = [f"{x.mean():>13.3f}" if len(x) else f"{'-':>13}" for x in c[5:7]] + \
+            [f"{c[7].mean():>12.3f}" if len(c[7]) else f"{'-':>12}"]
         print(f"  {f'{lo:g}-{hi:g}':>11} {len(c[0]):>7} {c[3].median():>10.0f} {c[0].mean():>11.3f}"
-              f" {c[1].mean():>11.3f} {c[2].median():>14.2f} {c[4].mean():>6.3f}")
+              f" {c[1].mean():>11.3f} {c[2].median():>14.2f} {c[4].mean():>6.3f} " + " ".join(o))
