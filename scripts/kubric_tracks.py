@@ -40,9 +40,12 @@ def num_to_sample(counts, total, max_frac=0.1):
   return out
 
 
-def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, n_tracks, rng):
+def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, n_tracks, rng,
+                 centre=0.5):
   """dict of coords (N, T, 2) pixels, occluded (N, T), traj_3d (N, T, 3)
-  world, queries (N, 3) t, y, x, segment (N,) each point's object."""
+  world, queries (N, 3) t, y, x, segment (N,) each point's object. `centre`
+  is where in its pixel a pixel's values were rendered: 0.5 for a render at
+  its own size, 0.25 for MOVi-F's 256 px, every other pixel of its 512 px."""
   T, H, W = depth.shape
   cam_pos = matrix_world[:, :3, 3]
 
@@ -108,7 +111,7 @@ def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matr
     if i == 0:
       # Background does not move: unproject from the query frame's depth and
       # keep that position for the whole clip.
-      raster = np.stack([(qx + 0.5) / W, (qy + 0.5) / H, np.ones(len(q))], -1)
+      raster = np.stack([(qx + centre) / W, (qy + centre) / H, np.ones(len(q))], -1)
       rays = raster @ np.linalg.inv(intrinsics).T
       rays = rays / np.linalg.norm(rays, axis=-1, keepdims=True) * depth[qt, qy, qx][:, None]
       world = np.einsum("nij,nj->ni", matrix_world[qt],

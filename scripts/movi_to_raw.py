@@ -62,11 +62,14 @@ for ex in tfds.as_numpy(ds):
     inst = ex["instances"]
     boxes, quats = list(inst["bboxes_3d"]), list(inst["quaternions"])
     rng = np.random.RandomState(int(ex["metadata"]["video_name"]))
-    tr = point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, args.tracks, rng)
+    # The 256 px clips are every other pixel of the 512 px render: each pixel's
+    # values were rendered a quarter pixel in from its corner, not at its centre.
+    tr = point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, args.tracks, rng,
+                      centre=0.25)
 
     # Each point projects back onto its own query pixel at its query frame.
     n = np.arange(len(tr["queries"]))
-    err = np.linalg.norm(tr["coords"][n, tr["queries"][:, 0]] - (tr["queries"][:, [2, 1]] + 0.5), axis=-1)
+    err = np.linalg.norm(tr["coords"][n, tr["queries"][:, 0]] - (tr["queries"][:, [2, 1]] + 0.25), axis=-1)
     frames = clip / "frames"
     frames.mkdir(parents=True, exist_ok=True)
     for t in range(T):
