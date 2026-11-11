@@ -35,7 +35,9 @@ a_ids = (Path(args.a_ids).read_text().split() if args.a_ids
          else sorted(d.name for d in a_root.iterdir() if (d / "frames").exists()))
 b_ids = sorted(d.name for d in b_root.iterdir() if (d / "frames").exists())
 A, B = thumbs(a_root, a_ids), thumbs(b_root, b_ids)
-d = ((B[:, None] - A[None]) ** 2).mean(-1)                                  # (b, a)
+# Each thumbnail has zero mean and unit spread, so the mean squared
+# difference is 2 - 2 x their correlation: one matrix product.
+d = 2 - 2 * (B @ A.T) / A.shape[1]                                          # (b, a)
 nearest = d.min(1)
 same = nearest < args.threshold
 print(f"{len(a_ids)} clips in {a_root}, {len(b_ids)} in {b_root}: {same.sum()} of the second repeat one of the first")
