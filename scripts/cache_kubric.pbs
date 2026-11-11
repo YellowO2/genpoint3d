@@ -7,9 +7,12 @@
 # the frames and their depth (scripts/cache_frames.py).
 #
 #   qsub -v SRC=kubric_obj,NAME=kubric_obj48 scripts/cache_kubric.pbs
+#   qsub -v SRC=movi_f_raw,NAME=movi_f24,FRAMES=24,DROP=movi_f_drop.txt scripts/cache_kubric.pbs
 #
 # Paths are relative to ~/scratch: RAW clips in SRC, the kept ones in
-# NAME_raw, the cache in cache/NAME, its frames in cache/NAME_frames384.
+# NAME_raw, the cache in cache/NAME, its frames in cache/NAME_frames384. FRAMES the
+# clip length kept (48), DROP a file of clip ids to leave out besides (repeats of
+# clips we test on, scripts/find_duplicates.py).
 # About 4 s a clip for the features and well under 1 s for the frames.
 #
 #PBS -N cache_kubric
@@ -29,12 +32,16 @@ source $ROOT/venvs/fyp/bin/activate
 SRC=${SRC:?the rendered clips, e.g. kubric_obj}
 NAME=${NAME:?the cache name, e.g. kubric_obj48}
 EXCLUDE=${EXCLUDE:-fall_test/val}
+FRAMES=${FRAMES:-48}
 
-python scripts/crop_raw.py --src $ROOT/$SRC --dst $ROOT/${NAME}_raw --frames 48
+python scripts/crop_raw.py --src $ROOT/$SRC --dst $ROOT/${NAME}_raw --frames $FRAMES
 for f in $ROOT/$EXCLUDE/*.pt; do
   id=$(basename $f .pt)
   if [ -d $ROOT/${NAME}_raw/$id ]; then rm -r $ROOT/${NAME}_raw/$id; echo "left out $id (a fall-test scene)"; fi
 done
+if [ -n "${DROP:-}" ]; then
+  for id in $(cat $ROOT/$DROP); do rm -rf $ROOT/${NAME}_raw/$id; echo "left out $id (repeats a clip we test on)"; done
+fi
 echo "$(ls $ROOT/${NAME}_raw | wc -l) clips kept"
 
 python -m genpoint3d.prepare.main --root $ROOT/${NAME}_raw --out $ROOT/cache/$NAME \
