@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
-from genpoint3d.train.model.FineFinder import FineFinder, _posenc
+from genpoint3d.train.model.FineFinder import MATCH_SPREAD, FineFinder, _posenc, frame_spread
 from genpoint3d.train.model.tools.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
 )
@@ -77,6 +77,9 @@ class PointDiT(nn.Module):
 
         self.fine = FineFinder(neigh=fine_neigh)
         self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, dim), almost=False)
+        # The clip's frame-0 spread, the matcher's ruler, against a typical
+        # one: the matcher's offsets are in it, the model's outputs are not.
+        self.spread_in = zero_init(nn.Linear(1, dim, bias=False), almost=False)
         self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
         # One logit per (point, frame): can the point be seen there? What it
@@ -218,6 +221,9 @@ class PointDiT(nn.Module):
         cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
         cond = cond + self.id_feature_proj(id_card)[:, None]
         cond = cond + self.fine_cond(fine).to(cond.dtype)
+        with torch.autocast(device_type=dev.type, enabled=False):
+            spread = torch.log(frame_spread(clip_xyz[:, 0])[1] / MATCH_SPREAD)[:, None, None, None]
+        cond = cond + self.spread_in(spread.to(cond.dtype))
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         context = self.frame_proj(context)

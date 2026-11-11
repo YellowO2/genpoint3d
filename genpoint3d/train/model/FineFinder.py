@@ -20,8 +20,19 @@ from torch.utils.checkpoint import checkpoint
 from genpoint3d.train.model.BasicEncoder import STRIDE, BasicEncoder
 
 # A typical Kubric frame's spread of cell positions in model units (the
-# median over clips is 0.37 on our clips, 0.33 on the old Kubric).
+# median over clips is 0.37 on our clips, 0.33 on the old Kubric): where a
+# clip's own spread is told to the model from (`frame_spread`).
 MATCH_SPREAD = 0.35
+
+
+def frame_spread(first: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(b, 3, h, w) the clip's frame-0 cell positions -> their mean (b, 3) and
+    spread (b,), the scale TAPIP3D brings each clip to (`norm_mode:
+    isotropic`). Frame 0 alone, which every clip sees: TAPIP3D uses the whole
+    window, which a forecast would leak through."""
+    first = first.float()
+    mean = first.mean(dim=(2, 3))
+    return mean, (first - mean[:, :, None, None]).std(dim=(1, 2, 3)).clamp_min(1e-6)
 
 
 class FineFinder(nn.Module):
@@ -106,10 +117,13 @@ class FineFinder(nn.Module):
         N = pos.shape[2]
         size = uv0.new_tensor([w, h])
         q = (uv0 * size - 0.5 / STRIDE)                                    # (b, N, 2) level-0 cells
-        # Offsets in the units TAPIP3D's encoding is built for (unit spread):
-        # the model's one ruler, over a typical Kubric frame's spread, not
-        # each clip's own, so they mean the same in every scene.
-        xyz, xyz0, pos, pos0 = (t.float() / MATCH_SPREAD for t in (xyz, xyz0, pos, pos0))
+        # Each clip at unit spread, the scale TAPIP3D's encoding and weights
+        # are built for; the model is told the spread (`frame_spread`).
+        mean, std = frame_spread(xyz0[:, 0])
+        xyz = (xyz.float() - mean[:, None, :, None, None]) / std[:, None, None, None, None]
+        xyz0 = (xyz0.float() - mean[:, None, :, None, None]) / std[:, None, None, None, None]
+        pos = (pos.float() - mean[:, None, None]) / std[:, None, None, None]
+        pos0 = (pos0.float() - mean[:, None]) / std[:, None, None]
         uv_b, pos_b, uv, pos = uv[:, :-1], pos[:, :-1], uv[:, 1:], pos[:, 1:]
         fmap, fmap0 = fmap * ok[:, :, None].to(fmap.dtype), fmap0 * ok0[:, :, None].to(fmap0.dtype)
         # A pooled cell is seen if all it pools is; far away, so never a neighbour, if not.
