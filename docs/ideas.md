@@ -79,3 +79,18 @@ Undecided. Each needs an experiment, not a discussion.
   standard benchmark still applies. Costs: steps spent on a regime benchmarks
   do not reward, no standard eval for the new capability, and spatial masks
   instead of a per-frame boolean.
+
+## Scale and motion state (12 Nov)
+
+- Everything inside the network in the clip's own unit (its frame-0 size, as
+  the matcher already works): positions, motion, matcher, outputs, so tracking
+  is the same at any scene size and every number is near 1. The one thing
+  real scale matters for is physics, so the network is told one number per
+  clip: gravity in the clip's unit (9.81 m/s^2 over the clip's size). Metres
+  only at the end, positions times the size, outside the network. On real
+  video that number is what a falling object could correct (a depth map's
+  scale is a guess; gravity is known).
+- A motion-state output: each point's velocity and acceleration in every
+  frame, beside the position correction, trained on the true tracks' first
+  and second differences and fed back each round, so the network carries an
+  explicit "how is it moving, is it speeding up" that forecasting needs.
