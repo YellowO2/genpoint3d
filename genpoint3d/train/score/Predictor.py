@@ -13,6 +13,8 @@ class Predictor:
 
     def __init__(self, model, judging: ScoreSettings) -> None:
         self.model, self.judging = model, judging
+        # Clips served so far: every other one is not told which way is down.
+        self.served = 0
         model.eval()
 
     def __call__(self, batch: dict) -> Prediction:
@@ -26,14 +28,20 @@ class Predictor:
                 raise ValueError(f"cutoff {j.cutoff} leaves none of {traj.shape[1]} frames to forecast")
             cutoff = torch.full((traj.shape[0],), j.cutoff, device=j.device)
         vm = visual_mask(b, cutoff)
-        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
-                    **fine_inputs(model, b, j.amp))
+        fine = fine_inputs(model, b, j.amp)
+        # Every other clip not told which way is down; what the model says of it is scored.
+        hide = (self.served + torch.arange(traj.shape[0], device=j.device)) % 2 == 1
+        self.served += traj.shape[0]
+        truly = fine["down_known"]
+        fine["down_known"] = truly & ~hide
+        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             loss, out = regress_loss(model, traj, anchor, mask=vis, iters=j.refine_iters, window=j.window,
                                      overlap=j.overlap, schedule=j.schedule, **cond)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
-                          visibility=out["logits"], groups=out["groups"])
+                          visibility=out["logits"], groups=out["groups"], down=out["down"],
+                          down_scored=truly & hide)
 
     def done(self) -> None:
         self.model.train()

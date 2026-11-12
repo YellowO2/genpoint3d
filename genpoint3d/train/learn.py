@@ -35,8 +35,12 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     # The CNN's map, shared by every backward pass of the step.
     fine = fine_inputs(model, b, amp, grad=True)
     # Some clips are not told which way is down, as real video often is not.
+    truly = fine["down_known"]
     told = torch.rand(traj.shape[0]) >= settings.down_hidden
-    fine["down_known"] = fine["down_known"] & told.to(hardware.device)
+    fine["down_known"] = truly & told.to(hardware.device)
+    # What the model says of them is scored; its motion state everywhere.
+    extra.update(state_weight=settings.state_loss, down_true=fine["down"], down_scored=truly & ~fine["down_known"],
+                 down_weight=settings.down_loss)
     if settings.vis_loss:
         # Where each point truly is in the image, against the quarters seen.
         uv, _ = project(model.lookup_pos(traj.float(), anchor.float()), fine["fine_proj"].float())

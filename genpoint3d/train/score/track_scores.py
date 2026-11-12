@@ -29,6 +29,8 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
                                                 model puts with each point, the share
                                                 truly on its piece, and of those truly
                                                 on it, the share the model puts with it
+    down_deg                                    the angle, degrees, between the down the
+                                                model says and the truth, on clips not told it
     """
     b, j = prediction.batch, judging
     out = {}
@@ -59,6 +61,10 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
         out.update(_jaccard_scores(pred_m, gt_m, prediction, j))
     if prediction.groups is not None:
         out.update(_group_scores(prediction.groups, b))
+    if prediction.down_scored is not None:
+        cos = torch.nn.functional.cosine_similarity(prediction.down.float(), b["down"].float(), dim=-1)
+        deg = torch.rad2deg(torch.acos(cos.clamp(-1, 1)))
+        out["down_deg"] = torch.where(prediction.down_scored, deg, torch.full_like(deg, float("nan")))
     if j.space == "3d" and not j.min_motion_px:
         moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], q) > 4
         mv = vis & moving[:, None]

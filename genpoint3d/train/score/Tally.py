@@ -67,6 +67,8 @@ def _line(m: dict) -> str:
                  f" cv {m['apd_moving_cv_fut']:.3f})")
     if "group_right" in m:
         line += f"  groups right {m['group_right']:.2f} found {m['group_found']:.2f}"
+    if "down_deg" in m:
+        line += f"  down off {m['down_deg']:.1f} deg"
     return line + _visible(m)
 
 
