@@ -81,7 +81,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--vel-loss", type=float, default=1.0, help="frame-to-frame step error")
         p.add_argument("--rigid-loss", type=float, default=1.0, help="rigid pairs' gap error")
         p.add_argument("--group-loss", type=float, default=1.0, help="group vectors against rigid pairs")
-        p.add_argument("--fit-loss", type=float, default=0.0,
+        p.add_argument("--fit-loss", type=float, default=1.0,
                        help="the rigid fit's own positions from each round's group vectors against the truth, "
                             "training the groups through the fit (0: off)")
         p.add_argument("--down-loss", type=float, default=1.0,
