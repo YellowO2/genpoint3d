@@ -116,9 +116,10 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
                    member: torch.Tensor, seen: torch.Tensor, start: int, end: int, mates: int = 64,
                    robust: int = 0) -> torch.Tensor:
-    """(B, L, N, 4) for frames `start` to `end`: where moving with its piece
-    would put each point, as an offset from its guess there, and how much
-    backs it (0 for nothing, towards 1).
+    """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
+    would put each point, as an offset from its guess there, how much backs it
+    (0 for nothing, towards 1), and how far its piece has turned since the
+    point's query frame (radians: how stale its look there is).
 
     pos (B, T, N, 3) every guess, anchor's space; q (B, N) query frames;
     groups (B, N, E) the group vectors, member (B, N) the points that count;
@@ -155,7 +156,8 @@ def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates, robust=0):
         R, ms, md, s = _fit(w, src, dst)
     prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
     off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
-    return torch.cat([off, (s / (s + 1))[..., None]], -1)
+    turn = torch.acos(((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1))
+    return torch.cat([off, (s / (s + 1))[..., None], turn[..., None]], -1)
 
 
 def _fit(w, src, dst):
@@ -237,6 +239,9 @@ class Sweeps:
         self.known = torch.zeros(B, N, dtype=torch.bool, device=anchor.device)
         # Each point's earliest frame a window has settled; T for none yet.
         self.first = torch.full((B, N), T, dtype=torch.long, device=anchor.device)
+        # How far each point trusts its own match in each frame, as last said;
+        # its weight as a mate in the rigid fit (`--fit-blend`).
+        self.trust = torch.ones(B, T, N, device=anchor.device)
         # Which way is down: as told, else as the model last said once it has.
         self.told = cond["down_known"]
         self.down = cond["down"].float()
@@ -260,9 +265,9 @@ class Sweeps:
                     rigid = None
                     if model.rigid_proposal and self.groups is not None:
                         rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], anchor,
-                                               self.groups, self.seen & self.known, torch.sigmoid(self.vis),
+                                               self.groups, self.seen & self.known, torch.sigmoid(self.vis) * self.trust,
                                                start, end, robust=model.fit_robust).detach()
-                    step, logits, emb, down = model(
+                    step, logits, emb, down, trust = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
                         rigid=rigid, **{**self.cond, "down": self.down, "down_known": self.down_known})
@@ -275,8 +280,18 @@ class Sweeps:
                         self.known = self.known | alive
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
-                    g = torch.where(alive[:, None, :, None], g.detach() + _corrected(step, at, self.rays),
-                                    g.detach())
+                    own = g.detach() + _corrected(step, at, self.rays)
+                    if trust is not None and rigid is not None:
+                        # Towards where its piece puts it, as far as it distrusts its own
+                        # match: only with a fit behind it, never at its query frame.
+                        fit = self.whole[:, start:end] + rigid[..., :3] / model.traj_scale
+                        t_w = torch.arange(end - start, device=dev)[None, :, None]
+                        pull = (1 - trust) * ((rigid[..., 3] >= 0.75) & (t_w != at[:, None])).to(trust.dtype)
+                        own = own + pull[..., None] * (fit - own.detach())
+                        self.trust = self.trust.clone()
+                        self.trust[:, start:end] = torch.where(alive[:, None], trust.detach().float(),
+                                                               self.trust[:, start:end])
+                    g = torch.where(alive[:, None, :, None], own, g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive, down)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 self.first = torch.where(alive, self.first.clamp(max=start), self.first)
@@ -391,7 +406,7 @@ def regress_loss(
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
             fit = rigid_proposal(clip, cond["query_t"], anchor, r.groups, run.seen & run.known,
-                                 torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust)
+                                 torch.sigmoid(run.vis) * run.trust, r.start, r.end, robust=model.fit_robust)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if down_weight and down_scored.any():

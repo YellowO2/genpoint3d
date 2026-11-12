@@ -55,6 +55,9 @@ class Settings(argparse.Namespace):
                        help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
+        p.add_argument("--fit-blend", type=int, default=0, choices=[0, 1],
+                       help="each point says how far it trusts its own match; the rest of the way it moves to "
+                            "where its piece's rigid fit puts it, and it counts that much as a mate in the fit")
         p.add_argument("--fit-robust", type=int, default=0,
                        help="refits of the rigid proposal, each mate counting less the further it sat from the last "
                             "fit, so a few wrong mates cannot drag it (0: one plain fit)")
