@@ -55,8 +55,9 @@ class Settings(argparse.Namespace):
                        help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
-        p.add_argument("--fit-left", type=int, default=0, choices=[0, 1],
-                       help="the rigid proposal also tells how far the mates sit from the fit, so a wrong fit says so")
+        p.add_argument("--fit-robust", type=int, default=0,
+                       help="refits of the rigid proposal, each mate counting less the further it sat from the last "
+                            "fit, so a few wrong mates cannot drag it (0: one plain fit)")
         p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],
                        help="each point told where moving with its piece would put it (needs --group-feedback)")
         p.add_argument("--feedback-scale", type=float, default=10.0,

@@ -68,7 +68,7 @@ def model(**kw):
 
 
 full = dict(visibility=True, group_feedback=4, rigid_proposal=True, feedback_scale=10.0, rope_current=True,
-            fit_left=True)
+            fit_robust=3)
 for kw, sched in ((dict(), ""), (full, "fbfb"), (full, "ffbb")):
     m = model(**kw)
     with torch.no_grad():             # off the zero inits, so every reader is live

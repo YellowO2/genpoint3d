@@ -22,6 +22,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 
 ## Ruled out
 
+- Telling the model how far its mates sit from its rigid fit (`--fit-left`): no better hidden points (runs.md, 13 Nov).
 - A pairwise motion check as an attention bias between points (how much each pair's distance changed): no better groups or fit at step 500 (runs.md, 13 Nov).
 - A point's own template refreshed to its latest clear look at its guessed position (`--template latest`): standard moving 0.729 against 0.768 at step 500; the guess's error becomes the target (0.543 late, against 0.775 with the true position).
 - More forward rounds before the backward sweeps (ffffbb): rounds 3 and 4 moved the error only 1.07 to 0.92 px (fyO, by round), and ffbb already gives each window 4 rounds; turning, 3-4 times the error, is the bigger target.

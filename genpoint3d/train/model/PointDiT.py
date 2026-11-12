@@ -41,7 +41,7 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         rope_current: bool = False,
         rigid_proposal: bool = False,
-        fit_left: bool = False,
+        fit_robust: int = 0,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -113,10 +113,10 @@ class PointDiT(nn.Module):
         if rigid_proposal and not group_feedback:
             raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
         self.rigid_proposal = rigid_proposal
+        # Refits of the rigid proposal with far mates counting less (`regress.rigid_proposal`).
+        self.fit_robust = fit_robust
         if rigid_proposal:
-            # With `fit_left`, also how far the mates sit from the fit.
-            self.fit_left = fit_left
-            self.rigid_in = zero_init(nn.Linear(99 + 1 + fit_left, dim, bias=False), almost=False)
+            self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -173,9 +173,8 @@ class PointDiT(nn.Module):
         group_known  (B, N) bool     the points that have said one (None: all)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
-        rigid        (B, T, N, 5)    where moving with its piece would put each point,
-                                     as an offset from its guess, its support and its
-                                     mates' leftover error (`regress.rigid_proposal`)
+        rigid        (B, T, N, 4)    where moving with its piece would put each point,
+                                     as an offset from its guess, and its support
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
         the group vectors (B, N, E) (those two None without their heads) and which way is
@@ -260,8 +259,7 @@ class PointDiT(nn.Module):
             raise ValueError("rigid is given exactly to a model built with rigid_proposal, once it has groups")
         if rigid is not None:
             with torch.autocast(device_type=dev.type, enabled=False):
-                r = torch.cat([_posenc(rigid[..., :3].float().clamp(-2, 2)),
-                               rigid[..., 3:5 if self.fit_left else 4].float()], -1)
+                r = torch.cat([_posenc(rigid[..., :3].float().clamp(-2, 2)), rigid[..., 3:].float()], -1)
             h = h + self.rigid_in(r.to(h.dtype))
         if self.visibility != (vis_prev is not None):
             raise ValueError("vis_prev is given exactly to a model with the visibility head")

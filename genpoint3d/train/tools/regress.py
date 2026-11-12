@@ -116,11 +116,9 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
                    member: torch.Tensor, seen: torch.Tensor, start: int, end: int, mates: int = 64,
                    robust: int = 0) -> torch.Tensor:
-    """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
-    would put each point, as an offset from its guess there, how much backs it
-    (0 for nothing, towards 1), and how far its mates sit from where the fit
-    puts them, over their spread about their centre (0 for a fit they all
-    agree with).
+    """(B, L, N, 4) for frames `start` to `end`: where moving with its piece
+    would put each point, as an offset from its guess there, and how much
+    backs it (0 for nothing, towards 1).
 
     pos (B, T, N, 3) every guess, anchor's space; q (B, N) query frames;
     groups (B, N, E) the group vectors, member (B, N) the points that count;
@@ -157,10 +155,7 @@ def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates, robust=0):
         R, ms, md, s = _fit(w, src, dst)
     prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
     off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
-    # The mates' leftover error under the fit, against their spread.
-    spread = (src - ms[..., None, :]).norm(dim=-1)
-    left = (w * _left(R, ms, md, src, dst)).sum(-1) / ((w * spread).sum(-1) + 1e-3 * s.clamp_min(1e-6))
-    return torch.cat([off, (s / (s + 1))[..., None], left.detach()[..., None]], -1)
+    return torch.cat([off, (s / (s + 1))[..., None]], -1)
 
 
 def _fit(w, src, dst):
@@ -266,7 +261,7 @@ class Sweeps:
                     if model.rigid_proposal and self.groups is not None:
                         rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], anchor,
                                                self.groups, self.seen & self.known, torch.sigmoid(self.vis),
-                                               start, end).detach()
+                                               start, end, robust=model.fit_robust).detach()
                     step, logits, emb, down = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
@@ -396,7 +391,7 @@ def regress_loss(
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
             fit = rigid_proposal(clip, cond["query_t"], anchor, r.groups, run.seen & run.known,
-                                 torch.sigmoid(run.vis), r.start, r.end)
+                                 torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if down_weight and down_scored.any():
