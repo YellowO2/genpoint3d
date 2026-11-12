@@ -8,7 +8,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - Camera roll in our renders, so finding down is real work: only if the down output's angle error is poor on rolled real video (ADT).
 - Real video's frame rate in the gravity strength (fixed at Kubric's 12 fps now), and frame-rate variety in training.
 - Two corrections: tracking in the clip's unit, physics in real units.
-- Forecast as Learning to Simulate (GNS) does: in frames without an image, each point's acceleration is the output and its position comes from integrating it (velocity from past positions as input, the loss on acceleration at the data's scale, noise on the inputs in training); our side head beside the position correction was the wrong form.
+- Physics per group, not per point, as a rigid-body engine has it: each group's centre velocity and acceleration and its spin about the centre, carried forward in frames without an image, every point following through the rigid fit (FIGNet keeps objects rigid by fitting one turn and centre per object, "shape matching"; GNS's per-particle acceleration suits sand and fluids). A per-point velocity and acceleration head was the wrong form (runs.md). Needs the groups right.
 - Noisy-depth training with a random global depth-scale error, so gravity can correct the scale.
 - Rigid proposal through the fit: not detached, a loss on the proposal's own positions, so the groups learn what the fit needs (grouping plan item 2).
 - Pairwise motion check as a group input: how much each pair's distance changed over the frames both are seen.
