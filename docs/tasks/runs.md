@@ -90,6 +90,30 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
+## Turned points: fresh looks and new points (12 Nov, scoring only)
+
+On clip_units_gravity_no_state_head's step-500 weights. A template refreshed
+to the latest clear look the window before settled, standard moving in frames
+12-23: 0.666 with the query look, 0.543 read where the model guessed the point,
+0.775 read where it truly is; the last partly hands over the answer (frames
+12-15 compare against a look at frame 15 or before, at the true position), so
+the gain of a fresh look is smaller than it shows.
+
+New points (scripts/new_points_check.py, 5551d74): the dense versions of the
+100 standard clips, their tracks past the 256 scored given again in frame 12
+where seen (median 243 a clip, true position, look read there). The scored
+points' moving APD in frames 12-23: alone 0.653, beside the new points 0.624,
+placed by a rigid fit of the new points on their true piece from frame 12
+0.626 (the fit reaches 35% of those point-frames with 3+ seen mates). New
+points hurt a model that rarely trained with late points, and carrying the old
+ones by exact new mates gains nothing: the old point's own position at frame
+12 already holds its drift.
+
+So turned points are not to be fixed by a fresher look. TAPIP3D, with the same
+frame-0 template, drifts 0.6% of the distance moved when trained long and 7-8%
+at our budget (tap_short; ours 2.6%): the drift on turned points is what long
+training removes.
+
 ## When the rigid fit helps (scripts/rigid_check.py, 12 Nov)
 
 full_design_clip_spread_3k (its own code, 8cc0337), old Kubric val, hidden

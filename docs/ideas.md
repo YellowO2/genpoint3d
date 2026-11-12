@@ -15,12 +15,11 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - The fit's backing from its leftover error over the mates, not their weight, so a wrong fit says so.
 - Two group outputs: an object vector on object labels, a rigid vector on motion.
 - SAM 3 masks as an appearance input for real video, trained on its masks of our clips (EntitySAM lost to our groups on Kubric).
-- New points where the surface is seen now, their look exact by construction, and old turned points following them through the rigid fit: a fresh look at the true position lifts late moving points 0.666 to 0.775 (template_check), so exact fresh looks are worth it; needs the groups fixed.
-- Spawn rule: new points where new surface appears.
+- New points where new surface appears (the spawn rule), trained with many late points: given at test time to a model that rarely saw them, exact new points made the old ones worse (0.653 to 0.624) and a rigid fit from them gained nothing (runs.md, 12 Nov).
+- A long run once the design settles is also the fix for turned points: TAPIP3D's matcher, the same frame-0 template, drifts 0.6% of the distance moved trained long, 7-8% at our budget (TAPIP3D trains on about 28x our samples, with augmentation).
 - Whole-frame comparison, removed in a cleanup: needed eventually?
 - More data: PointOdyssey or SynthVerse.
 - The full scene-points design (docs/tasks/scene-points-2026-10-31.md).
-- A long run once the design settles: TAPIP3D trains on about 28x our samples, with augmentation.
 - Spatial attention in every block or once at the end; virtual points; model size (dim 256, depth 6, 4 heads is what trained, never chosen).
 
 ## Ruled out
