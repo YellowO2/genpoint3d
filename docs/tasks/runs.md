@@ -95,6 +95,20 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
+## The groups now (13 Nov, scripts/check_groups.py)
+
+clip_units_gravity_fit_loss_3k's best weights, 500 points a clip. Of the mates
+the model puts with a point, the share truly on its piece (2 cm), by how far
+the point moves. Fall test (24 held-out clips): 0.979 still, 0.742 at 1-4 px,
+0.707 at 4-8, 0.88-0.95 at 8-64, 0.966 past 64 px (2,821 of the 3,755 moving
+points); found 0.71-0.99. Our renders (60 clips trained on), against the 2 cm
+rule and against the true objects: 1-4 px 0.626 and 0.490 (wrong mates 73% on
+the background), 4-8 px 0.808 and 0.798, past 64 px 0.958 and 0.958. Most
+moving points have the right mates now (0.61-0.81 on full_design_fixed_sweeps);
+slow movers are taken for the background, and they match the objects no better
+than the 2 cm rule, so the label rule is not what confuses them: they look
+still. The few wrong mates left are what the robust refit removes.
+
 ## The fit made robust (13 Nov, scoring only)
 
 On clip_units_gravity_fit_loss_3k's step-500 weights (scripts/rigid_check.py,
