@@ -41,6 +41,7 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         rope_current: bool = False,
         rigid_proposal: bool = False,
+        template: str = "query",
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -112,6 +113,9 @@ class PointDiT(nn.Module):
         if rigid_proposal and not group_feedback:
             raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
         self.rigid_proposal = rigid_proposal
+        # What the matcher compares against, set per window by `regress.Sweeps`:
+        # the look in the query frame, or the latest clear look before.
+        self.template = template
         if rigid_proposal:
             self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
 
@@ -146,6 +150,8 @@ class PointDiT(nn.Module):
         frames: tuple[int, int] | None = None,
         x_before: torch.Tensor | None = None,
         rigid: torch.Tensor | None = None,
+        template_t: torch.Tensor | None = None,
+        template_pos: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         x            (B, T, N, 3)    the guess, displacement / traj_scale
@@ -172,6 +178,8 @@ class PointDiT(nn.Module):
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
         rigid        (B, T, N, 4)    where moving with its piece would put each point,
                                      as an offset from its guess, and its support
+        template_t   (B, N) long     the clip frame each point's template is read in (None: its query frame)
+        template_pos (B, N, 3)       where the point is there, anchor's space (None: its anchor)
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
         the group vectors (B, N, E) (those two None without their heads) and which way is
@@ -224,7 +232,9 @@ class PointDiT(nn.Module):
             uv_b, _ = project(pos_b, b_proj.float())
         fine = self._fine_at_queries(torch.cat([b_map, fine_map], 1), torch.cat([b_xyz, fine_xyz], 1),
                                      clip_map, clip_proj, clip_xyz, torch.cat([uv_b, uv], 1),
-                                     torch.cat([pos_b, pos], 1), anchor, query_t,
+                                     torch.cat([pos_b, pos], 1),
+                                     anchor if template_pos is None else template_pos,
+                                     query_t if template_t is None else template_t,
                                      torch.cat([b_view, visual_mask], 1), clip_mask)
         half = self.fine.out_dim // 2
         prev_ok = torch.cat([b_view.flatten(2).any(-1), some[:, :-1]], 1) & some
@@ -324,8 +334,9 @@ class PointDiT(nn.Module):
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):
         """The matcher's comparison (B, T, N, out_dim): each point's
-        neighbourhood at its guess against its template in its query frame,
-        on seen cells only."""
+        neighbourhood at its guess against its template, read where `anchor`
+        is in frame `query_t` (its query frame, or a later clear look), on
+        seen cells only."""
         h, w = fine_map.shape[-2:]
         with torch.autocast(device_type=uv.device.type, enabled=False):
             proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))

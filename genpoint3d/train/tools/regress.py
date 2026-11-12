@@ -217,6 +217,32 @@ class Sweeps:
         self.down = cond["down"].float()
         self.down_known = self.told
 
+    def _template(self, start: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """(B, N) the frame each point's template is read in for the window
+        starting at `start`, and (B, N, 3) where the point is there, anchor's
+        space. With the model's template "latest": its latest clear look that
+        the window before (in time) has settled, a frame seen whole where the
+        point is believed visible, so never one of this window's own new
+        frames; its query frame and anchor in the first window and where it
+        has none."""
+        q = self.cond["query_t"]
+        if self.model.template != "latest" or start == 0:
+            return q, self.anchor
+        prev_end = max(e for s, e in self.spans if s < start)
+        T = self.whole.shape[1]
+        t = torch.arange(T, device=q.device)[None, :, None]
+        view = self.cond.get("visual_mask")
+        clear = (t >= q[:, None]) & (t < prev_end)                                     # (B, T, N)
+        if view is not None:
+            clear = clear & view.flatten(2).all(-1)[:, :, None]
+        if self.model.visibility:
+            clear = clear & (self.vis > 0)
+        f = torch.where(clear, t, torch.full_like(t, -1)).amax(1)                          # (B, N)
+        has = f >= 0
+        pos = self.model.lookup_pos(self.whole, self.anchor)
+        at = pos.gather(1, f.clamp_min(0)[:, None, :, None].expand(-1, 1, -1, 3))[:, 0]
+        return torch.where(has, f, q), torch.where(has[..., None], at, self.anchor.float())
+
     def __iter__(self):
         model, anchor = self.model, self.anchor
         B, N = anchor.shape[:2]
@@ -227,6 +253,7 @@ class Sweeps:
             for start, end in (reversed(self.spans) if back else self.spans):
                 self.whole = _reach_back(self.whole, self.first, start) if back else _reach(self.whole, done, end)
                 g = self.whole[:, start:end]
+                tmpl_t, tmpl_pos = self._template(start)
                 alive, at = _window_points(self.cond["query_t"], self.seen, start, end, every=back or r0 > 0)
                 frames = None if len(self.spans) == 1 else (start, end)
                 before = self.whole[:, start - 1:start] if start else None
@@ -240,7 +267,8 @@ class Sweeps:
                     step, logits, emb, down = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
-                        rigid=rigid, **{**self.cond, "down": self.down, "down_known": self.down_known})
+                        rigid=rigid, template_t=tmpl_t, template_pos=tmpl_pos,
+                        **{**self.cond, "down": self.down, "down_known": self.down_known})
                     self.down = torch.where(self.told[:, None], self.down, down.detach())
                     self.down_known = torch.ones_like(self.told)
                     if emb is not None:
