@@ -88,6 +88,23 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
+## When the rigid fit helps (scripts/rigid_check.py, 12 Nov)
+
+full_design_clip_spread_3k (its own code, 8cc0337), old Kubric val, hidden
+moving point-frames by how many points of their true piece are seen there. APD,
+no rescale:
+
+| seen mates | share | guess | fit, model's groups | fit, true groups |
+|---|---|---|---|---|
+| none | 0.186 | 0.238 | 0.104 | 0.184 |
+| 1-9 | 0.381 | 0.417 | 0.228 | 0.409 |
+| 10+ | 0.433 | 0.573 | 0.428 | 0.706 |
+
+The fit is worth having only with many seen mates and the right groups (0.706
+against the guess's 0.573); with few or none it is no better than the guess,
+and the model's groups make it worse everywhere. A fifth of hidden moving
+point-frames have no seen mate at all.
+
 ## Does the full design use its rigid proposal (scripts/without_rigid.pbs, 8 Nov)
 
 full_design_fixed_sweeps with and without its rigid proposal: the same
