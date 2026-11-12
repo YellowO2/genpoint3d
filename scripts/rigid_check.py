@@ -7,7 +7,10 @@ guess on hidden points, which the model does not follow, is a proposal the
 model has not learned to use; one no better is one it is right to ignore.
 Beside it, the proposal built from the true groups (the training labels'
 pieces) instead of the model's: good with them and poor with the model's
-says the groups are what is wrong; poor with both, the fit.
+says the groups are what is wrong; poor with both, the fit. The hidden moving
+point-frames are then split by how many points of the point's true piece are
+seen in that frame: with none, the fit has only guesses to go on; with many,
+it should be about as good as the seen points.
 
 Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
 """
@@ -43,6 +46,8 @@ def main() -> int:
     print(f"{len(ds)} clips | step {run.step} of {args.ckpt}", flush=True)
 
     rows, backing = {}, {"hidden": [], "seen": []}
+    bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
+    counts = {label: 0 for label, _, _ in bins}
     for batch in loader:
         b = to_device(batch, device)
         traj, vis, q = b["traj"], b["visibility"].bool(), b["query_t"]
@@ -66,6 +71,11 @@ def main() -> int:
         true_groups = guess + true_prop[..., :3] / model.traj_scale
         gt = to_metres(traj, b)
         moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > 4)[:, None]
+        # Each point-frame's seen points on its true piece, itself left out.
+        mates = rigid_groups(b) & ~torch.eye(traj.shape[2], dtype=torch.bool, device=traj.device)
+        seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)
+        for label, lo, hi in bins:
+            counts[label] += int((~vis & moving & (seen_mates >= lo) & (seen_mates < hi)).sum())
         for name, pts in (("guess", guess), ("proposal", proposal), ("true groups", true_groups)):
             m = to_metres(pts, b)
             for kind, mask in (("hidden", ~vis), ("seen", vis)):
@@ -73,6 +83,11 @@ def main() -> int:
                     apd = tapvid3d_metrics(m, gt, sel, b["intrinsics_256"], b["extrinsics"], scaling="none",
                                            per_clip=True)["average_pts_within_thresh"].cpu()
                     rows.setdefault((kind, which, name), []).append(apd)
+            for label, lo, hi in bins:
+                sel = ~vis & moving & (seen_mates >= lo) & (seen_mates < hi)
+                apd = tapvid3d_metrics(m, gt, sel, b["intrinsics_256"], b["extrinsics"], scaling="none",
+                                       per_clip=True)["average_pts_within_thresh"].cpu()
+                rows.setdefault(("mates", label, name), []).append(apd)
         for kind, mask in (("hidden", ~vis), ("seen", vis)):
             backing[kind].append(prop[..., 3][mask].float().cpu())
 
@@ -83,6 +98,13 @@ def main() -> int:
             print(f"  {kind + ' ' + which:<16} {clip_mean(rows[kind, which, 'guess']):>8.4f} "
                   f"{clip_mean(rows[kind, which, 'proposal']):>9.4f} "
                   f"{clip_mean(rows[kind, which, 'true groups']):>12.4f}")
+    total = max(sum(counts.values()), 1)
+    print("\nHidden moving point-frames by how many points of their true piece are seen there:")
+    print(f"  {'seen mates':<16} {'share':>6} {'guess':>8} {'proposal':>9} {'true groups':>12}")
+    for label, _, _ in bins:
+        print(f"  {label:<16} {counts[label] / total:>6.3f} {clip_mean(rows['mates', label, 'guess']):>8.4f} "
+              f"{clip_mean(rows['mates', label, 'proposal']):>9.4f} "
+              f"{clip_mean(rows['mates', label, 'true groups']):>12.4f}")
     for kind in ("hidden", "seen"):
         v = torch.cat(backing[kind])
         print(f"  how much backs the proposal, {kind}: median {v.median():.3f}, "
