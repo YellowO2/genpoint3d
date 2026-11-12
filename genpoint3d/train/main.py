@@ -7,6 +7,10 @@ rest; validation does the same from `--eval-cutoff`, and reports APD in metres
 Run:  python -m genpoint3d.train.main --cache CACHE --frames-cache FRAMES --init CKPT
 """
 
+import logging
+
+import torch
+
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Optimiser import Optimiser
 from genpoint3d.train.RunningLoss import RunningLoss
@@ -32,9 +36,17 @@ def train(settings: Settings):
     model = build_model(settings, clips.feat_dim)
     model = set_up_model(model, settings, hardware)
     optimiser = Optimiser(model, settings, hardware)
+    first = 1
+    if settings.resume:
+        # Where an earlier job stopped: its weights, optimiser, schedule and log.
+        state = torch.load(settings.resume, map_location=hardware.device, weights_only=False)
+        optimiser.restore(model, state["optimiser"])
+        saver.resume(state)
+        first = state["step"] + 1
+        logging.getLogger(__name__).info(f"resumed from {settings.resume} at step {state['step']}")
     judging = validation_settings(settings, hardware)
     running_loss = RunningLoss(settings)
-    for step in range(1, settings.steps + 1):
+    for step in range(first, settings.steps + 1):
         for batch in loaders.micro_batches(settings.accum):
             losses = learn(model, batch, settings, hardware)
             running_loss.add(losses)
@@ -52,18 +64,17 @@ def train(settings: Settings):
             report = merge_scores(interval, scores, fit_scores)
             saver.save(report, model, clips)
             optimiser.swap_out_average(model)
+            saver.keep_resume(step, optimiser.state(model))
         elif step % settings.save_every == 0:
             optimiser.swap_in_average(model)
             saver.keep(model, step)
             optimiser.swap_out_average(model)
+            saver.keep_resume(step, optimiser.state(model))
 
 
 if __name__ == "__main__":
-    import logging
     import sys
     import time
-
-    import torch
 
     # The package's progress lines, message only, on stdout.
     logging.basicConfig(format="%(message)s", stream=sys.stdout)

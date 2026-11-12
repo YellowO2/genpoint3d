@@ -36,6 +36,20 @@ class Optimiser:
         self.sched.step()
         return norm
 
+    def state(self, model) -> dict:
+        """Everything to go on from here (`restore`): the live weights, AdamW's
+        moments, the schedule's place and the average. Called with the live
+        weights in."""
+        ema = None if self.ema is None else {"shadow": self.ema.shadow, "n": self.ema.n}
+        return {"live": model.state_dict(), "opt": self.opt.state_dict(), "sched": self.sched.state_dict(), "ema": ema}
+
+    def restore(self, model, state: dict) -> None:
+        model.load_state_dict(state["live"])
+        self.opt.load_state_dict(state["opt"])
+        self.sched.load_state_dict(state["sched"])
+        if self.ema is not None:
+            self.ema.shadow, self.ema.n = state["ema"]["shadow"], state["ema"]["n"]
+
     def lr(self) -> float:
         return self.sched.get_last_lr()[0]
 

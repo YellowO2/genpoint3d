@@ -35,6 +35,8 @@ module load cuda/12.2.2
 source $ROOT/venvs/fyp/bin/activate
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
+# RESUME=1 goes on from this run's resume.pt, for a run longer than one job.
+if [ -n "${RESUME:-}" ]; then ARGS="$ARGS --resume outputs/$OUT/resume.pt"; fi
 python -m genpoint3d.train.main --cache $(printf "$ROOT/%s " $CACHE) --frames-cache $(printf "$ROOT/%s " $FRAMES) \
   --out outputs/$OUT \
   --init $INIT --fine-init $ROOT/weights/tapip3d_finder.pt $ARGS

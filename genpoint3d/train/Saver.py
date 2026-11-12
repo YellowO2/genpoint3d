@@ -21,6 +21,8 @@ class Saver:
         ckpt.pt    the latest weights, with their settings and scores (none
                    between validations), so a run cut short keeps them
         best.pt    the weights with the best val APD so far
+        resume.pt  what `--resume` goes on from: the step, the optimiser's
+                   state (`Optimiser.state`), the log and the best so far
     """
 
     def __init__(self, settings) -> None:
@@ -48,6 +50,17 @@ class Saver:
             torch.save(ckpt, out / "best.pt")
             log.info(f"       new best APD {self.best:.3f}")
 
+
+    def keep_resume(self, step: int, optimiser_state: dict) -> None:
+        """resume.pt, written beside and moved over so a job stopped mid-write
+        leaves the last one whole."""
+        tmp = self.out / "resume.pt.tmp"
+        torch.save({"step": step, "optimiser": optimiser_state, "log": self.log, "best": self.best,
+                    "args": vars(self.settings)}, tmp)
+        tmp.replace(self.out / "resume.pt")
+
+    def resume(self, state: dict) -> None:
+        self.log, self.best = state["log"], state["best"]
 
     def keep(self, model, step: int) -> None:
         """The latest weights to ckpt.pt between validations, without scores."""
