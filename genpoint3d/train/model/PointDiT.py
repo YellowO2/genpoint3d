@@ -222,8 +222,9 @@ class PointDiT(nn.Module):
         cond = cond + self.id_feature_proj(id_card)[:, None]
         cond = cond + self.fine_cond(fine).to(cond.dtype)
         with torch.autocast(device_type=dev.type, enabled=False):
-            spread = torch.log(frame_spread(clip_xyz[:, 0])[1] / MATCH_SPREAD)[:, None, None, None]
-        cond = cond + self.spread_in(spread.to(cond.dtype))
+            # The clip's size against a typical one: the matcher's unit in ours.
+            size = (frame_spread(clip_xyz[:, 0])[1] / MATCH_SPREAD)[:, None, None, None]
+        cond = cond + self.spread_in(torch.log(size).to(cond.dtype))
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         context = self.frame_proj(context)
@@ -303,7 +304,9 @@ class PointDiT(nn.Module):
                   if self.visibility else None)
         # One group vector per point for the window.
         groups = self.group_out(h).float().mean(1) if self.group_feedback else None
-        return self.place(h), logits, groups
+        # The correction is made in the matcher's unit, the clip's own size,
+        # and turned into ours by that size: the same at any scale.
+        return self.place(h) * size.to(h.dtype), logits, groups
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):
