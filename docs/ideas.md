@@ -17,6 +17,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - SAM 3 masks as an appearance input for real video, trained on its masks of our clips (EntitySAM lost to our groups on Kubric).
 - New points where new surface appears (the spawn rule), trained with many late points: given at test time to a model that rarely saw them, exact new points made the old ones worse (0.653 to 0.624) and a rigid fit from them gained nothing (runs.md, 12 Nov).
 - A long run once the design settles is also the fix for turned points: TAPIP3D's matcher, the same frame-0 template, drifts 0.6% of the distance moved trained long, 7-8% at our budget (TAPIP3D trains on about 28x our samples, with augmentation).
+- Resume a run with its optimiser and learning-rate schedule from ckpt.pt, so the long run can go past g1's 24 h (about 12,000 steps a job); today `--init` only restarts from the weights.
 - Whole-frame comparison, removed in a cleanup: needed eventually?
 - More data: PointOdyssey or SynthVerse.
 - The full scene-points design (docs/tasks/scene-points-2026-10-31.md).
