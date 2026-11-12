@@ -32,8 +32,8 @@ def batch():
     anchor = torch.randn(B, N, 3) * 0.2 + torch.tensor([0, 0, 3.0])
     return {
         "traj": traj, "anchor": anchor, "visibility": torch.rand(B, T, N) > 0.3,
-        "query_t": torch.tensor([[0, 0, 0, 2, 5, 9]]), "gravity": torch.tensor([[0.0, 1.0, 0.0]]),
-        "gravity_known": torch.tensor([True]),
+        "query_t": torch.tensor([[0, 0, 0, 2, 5, 9]]), "gravity": torch.tensor([1.0]),
+        "down": torch.tensor([[0.0, 1.0, 0.0]]), "down_known": torch.tensor([True]),
         "context": torch.randn(B, T, P, F).half(), "id_card": torch.randn(B, N, F).half(),
         "patch_xyz": torch.randn(B, T, P, 3) * 0.3 + torch.tensor([0, 0, 3.0]),
         "frames": torch.randint(0, 255, (B, T, R, R, 3), dtype=torch.uint8),
@@ -75,7 +75,7 @@ for kw, sched in ((dict(), ""), (full, "fbfb"), (full, "ffbb")):
             p.add_(torch.randn_like(p) * 0.05)
     s = types.SimpleNamespace(min_context=2, max_gap=4, partial_masks=1, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
                               group_loss=1.0 if kw else 0.0, group_labels="object", vis_loss=1.0 if kw else 0.0, refine_iters=2,
-                              accum=1, window=8, overlap=4, schedule=sched, gravity_hidden=0.0)
+                              accum=1, window=8, overlap=4, schedule=sched, down_hidden=0.0)
     m.train()
     losses = learn(m, batch(), s, Hardware(torch.device("cpu"), False))
     dead = [n for n, p in m.named_parameters() if p.grad is None or p.grad.abs().sum() == 0]

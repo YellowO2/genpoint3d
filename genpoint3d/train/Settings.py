@@ -71,7 +71,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--max-gap", type=int, default=12,
                        help="half the training clips lose a span of 2 to this many frames "
                             "instead of their end (0: cutoffs only)")
-        p.add_argument("--gravity-hidden", type=float, default=0.2,
+        p.add_argument("--down-hidden", type=float, default=0.2,
                        help="share of training clips not told which way is down, as real video without its "
                             "camera's up")
         p.add_argument("--eval-cutoff", type=int, default=12, metavar="C",

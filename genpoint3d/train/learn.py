@@ -35,8 +35,8 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     # The CNN's map, shared by every backward pass of the step.
     fine = fine_inputs(model, b, amp, grad=True)
     # Some clips are not told which way is down, as real video often is not.
-    told = torch.rand(traj.shape[0]) >= settings.gravity_hidden
-    fine["gravity_known"] = fine["gravity_known"] & told.to(hardware.device)
+    told = torch.rand(traj.shape[0]) >= settings.down_hidden
+    fine["down_known"] = fine["down_known"] & told.to(hardware.device)
     if settings.vis_loss:
         # Where each point truly is in the image, against the quarters seen.
         uv, _ = project(model.lookup_pos(traj.float(), anchor.float()), fine["fine_proj"].float())

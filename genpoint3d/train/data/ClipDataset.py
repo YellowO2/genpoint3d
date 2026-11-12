@@ -65,11 +65,11 @@ class ClipDataset(Dataset):
         # Without the depth (scoring others' tracks), a typical clip's unit.
         unit = _clip_unit(depth, clip) if depth.numel() else torch.tensor(SCENE_SCALE)
         n = NormStats(torch.zeros(3), unit, torch.tensor(1.0))
-        # Down, as strong as gravity is in this clip's unit; a typical clip's 1.
-        # A clip that does not say which way is up has it unknown, not zero.
+        # Gravity's strength in this clip's unit, a typical clip's 1: always
+        # known. Which way is down only when the clip says which way is up.
+        gravity = GRAVITY / KUBRIC_FPS ** 2 / unit / GRAVITY_REF
         known = clip.up is not None
-        gravity = (-clip.up.float() / clip.up.float().norm() * (GRAVITY / KUBRIC_FPS ** 2 / unit / GRAVITY_REF)
-                   if known else torch.zeros(3))
+        down = -clip.up.float() / clip.up.float().norm() if known else torch.zeros(3)
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
         pxyz = None
         if clip.patch_xyz is not None:
@@ -119,8 +119,9 @@ class ClipDataset(Dataset):
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t, "segment": segment,
-            # (3,) down, in the clip's unit per frame squared over a typical clip's.
-            "gravity": gravity, "gravity_known": torch.tensor(known),
+            # () gravity in the clip's unit per frame squared over a typical clip's;
+            # (3,) which way is down in the frame-0 camera, where `down_known`.
+            "gravity": gravity, "down": down, "down_known": torch.tensor(known),
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),

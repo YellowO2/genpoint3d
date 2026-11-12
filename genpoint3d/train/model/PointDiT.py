@@ -77,10 +77,11 @@ class PointDiT(nn.Module):
 
         self.fine = FineFinder(neigh=fine_neigh)
         self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, dim), almost=False)
-        # Gravity in the clip's own unit: which way is down and how strong;
-        # its own vector when the clip does not say.
-        self.gravity_in = zero_init(nn.Linear(3, dim, bias=False), almost=False)
-        self.gravity_unknown = nn.Parameter(torch.zeros(dim))
+        # Gravity's strength in the clip's own unit, always told, and which
+        # way is down, its own vector when the clip does not say.
+        self.gravity_in = zero_init(nn.Linear(1, dim, bias=False), almost=False)
+        self.down_in = zero_init(nn.Linear(3, dim, bias=False), almost=False)
+        self.down_unknown = nn.Parameter(torch.zeros(dim))
         self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
         # One logit per (point, frame): can the point be seen there? What it
@@ -132,7 +133,8 @@ class PointDiT(nn.Module):
         fine_xyz: torch.Tensor,
         query_t: torch.Tensor,
         gravity: torch.Tensor,
-        gravity_known: torch.Tensor,
+        down: torch.Tensor,
+        down_known: torch.Tensor,
         visual_mask: torch.Tensor | None = None,
         alive: torch.Tensor | None = None,
         vis_prev: torch.Tensor | None = None,
@@ -153,8 +155,9 @@ class PointDiT(nn.Module):
         fine_proj    (B, Tc, 3, 4)   anchor's space -> the image, per frame
         fine_xyz     (B, Tc, 3, h, w) each CNN cell's 3D position
         query_t      (B, N) long     each point's query frame in the clip
-        gravity      (B, 3)          down, in the clip's unit per frame squared, a typical clip's 1
-        gravity_known (B,) bool      the clips whose `gravity` is told; the rest are unknown
+        gravity      (B,)            its strength in the clip's unit per frame squared, a typical clip's 1
+        down         (B, 3)          which way is down, a unit vector in anchor's space
+        down_known   (B,) bool       the clips whose `down` is told; the rest are unknown
         visual_mask  (B, Tc, 2, 2) bool, which quarters of each frame are seen:
                      a frame with any quarter hidden has no DINOv3, and the
                      matcher reads only its seen cells (`frames` blacked out)
@@ -226,8 +229,8 @@ class PointDiT(nn.Module):
         cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
         cond = cond + self.id_feature_proj(id_card)[:, None]
         cond = cond + self.fine_cond(fine).to(cond.dtype)
-        told = torch.where(gravity_known[:, None], self.gravity_in(gravity.to(cond.dtype)),
-                           self.gravity_unknown.to(cond.dtype))
+        told = self.gravity_in(gravity[:, None].to(cond.dtype)) + torch.where(
+            down_known[:, None], self.down_in(down.to(cond.dtype)), self.down_unknown.to(cond.dtype))
         cond = cond + told[:, None, None]
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
