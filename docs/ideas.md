@@ -12,7 +12,6 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - Noisy-depth training with a random global depth-scale error, so gravity can correct the scale.
 - Rigid proposal through the fit: not detached, a loss on the proposal's own positions, so the groups learn what the fit needs (grouping plan item 2).
 - Pairwise motion check as a group input: how much each pair's distance changed over the frames both are seen.
-- The fit's backing from its leftover error over the mates, not their weight, so a wrong fit says so.
 - Two group outputs: an object vector on object labels, a rigid vector on motion.
 - SAM 3 masks as an appearance input for real video, trained on its masks of our clips (EntitySAM lost to our groups on Kubric).
 - New points where new surface appears (the spawn rule), trained with many late points: given at test time to a model that rarely saw them, exact new points made the old ones worse (0.653 to 0.624) and a rigid fit from them gained nothing (runs.md, 12 Nov).

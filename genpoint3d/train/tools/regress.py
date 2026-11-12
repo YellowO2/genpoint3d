@@ -115,9 +115,11 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
                    member: torch.Tensor, seen: torch.Tensor, start: int, end: int, mates: int = 64) -> torch.Tensor:
-    """(B, L, N, 4) for frames `start` to `end`: where moving with its piece
-    would put each point, as an offset from its guess there, and how much
-    backs it (0 for nothing, towards 1).
+    """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
+    would put each point, as an offset from its guess there, how much backs it
+    (0 for nothing, towards 1), and how far its mates sit from where the fit
+    puts them, over their spread about their centre (0 for a fit they all
+    agree with).
 
     pos (B, T, N, 3) every guess, anchor's space; q (B, N) query frames;
     groups (B, N, E) the group vectors, member (B, N) the points that count;
@@ -156,7 +158,12 @@ def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates):
     R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=pos.device)).detach()
     prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
     off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
-    return torch.cat([off, (s / (s + 1))[..., None]], -1)
+    # The mates' leftover error under the fit, against their spread.
+    a = src - ms[..., None, :]
+    left = ((R[..., None, :, :] @ a[..., None])[..., 0] + md[..., None, :] - dst).norm(dim=-1)
+    spread = a.norm(dim=-1)
+    left = (w * left).sum(-1) / ((w * spread).sum(-1) + 1e-3 * s.clamp_min(1e-6))
+    return torch.cat([off, (s / (s + 1))[..., None], left.detach()[..., None]], -1)
 
 
 def _sq_dist(v: torch.Tensor) -> torch.Tensor:

@@ -58,6 +58,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--motion-check", type=int, default=0, choices=[0, 1],
                        help="attention between points biased by how much each pair's distance changed over the "
                             "window's frames both are believed seen")
+        p.add_argument("--fit-left", type=int, default=0, choices=[0, 1],
+                       help="the rigid proposal also tells how far the mates sit from the fit, so a wrong fit says so")
         p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],
                        help="each point told where moving with its piece would put it (needs --group-feedback)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
