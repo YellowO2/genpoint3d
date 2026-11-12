@@ -40,7 +40,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     fine["down_known"] = truly & told.to(hardware.device)
     # What the model says of them is scored; its motion state everywhere.
     extra.update(down_true=fine["down"], down_scored=truly & ~fine["down_known"], down_weight=settings.down_loss,
-                 fit_weight=settings.fit_loss)
+                 fit_weight=settings.fit_loss, trust_weight=settings.trust_loss, phys_weight=settings.physics_loss)
     if settings.vis_loss:
         # Where each point truly is in the image, against the quarters seen.
         uv, _ = project(model.lookup_pos(traj.float(), anchor.float()), fine["fine_proj"].float())

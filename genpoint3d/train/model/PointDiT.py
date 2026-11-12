@@ -22,6 +22,11 @@ from genpoint3d.train.model.tools.layers import (
 from genpoint3d.train.tools.camera import project
 
 
+# The acceleration head's unit: an output of 1 is 0.01 of the clip's unit (or a
+# radian) per frame squared, about gravity on a typical Kubric clip.
+ACC_SCALE = 0.01
+
+
 class PointDiT(nn.Module):
     """Tokens on a (T frames) x (N points) grid, attention factorised into
     one point across time and all points within one frame."""
@@ -42,6 +47,7 @@ class PointDiT(nn.Module):
         rigid_proposal: bool = False,
         fit_robust: int = 0,
         fit_blend: bool = False,
+        physics: bool = False,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -124,6 +130,15 @@ class PointDiT(nn.Module):
                 raise ValueError("the blend moves points towards the rigid fit: needs rigid_proposal")
             self.trust_out = zero_init(nn.Linear(dim, 1), almost=False)
             nn.init.constant_(self.trust_out.bias, 3.0)
+        # What each point says of its piece's acceleration and change of spin in
+        # each frame (the clip's unit, radians, per frame squared), from zero:
+        # the piece's motion carried on where its fit has too little behind it
+        # (`regress.object_paths`).
+        self.physics = physics
+        if physics:
+            if not fit_blend:
+                raise ValueError("the carried motion reaches the points through the blend: needs fit_blend")
+            self.acc_out = zero_init(nn.Linear(dim, 6, bias=False), almost=False)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -186,8 +201,9 @@ class PointDiT(nn.Module):
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
         the group vectors (B, N, E) (those two None without their heads), which way is
-        down (B, 3), a unit vector, and with `fit_blend` how far each point trusts its own
-        match (B, T, N) in [0, 1] (None without).
+        down (B, 3), a unit vector, with `fit_blend` the logit of how far each point trusts its
+        own match (B, T, N), and with `physics` what it says of its piece's acceleration and
+        change of spin (B, T, N, 6) (each None without).
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
@@ -330,8 +346,9 @@ class PointDiT(nn.Module):
         here = (alive if alive is not None else torch.ones(B, N, dtype=torch.bool, device=dev)).float()
         pooled = (h.float().mean(1) * here[..., None]).sum(1) / here.sum(1, keepdim=True).clamp_min(1)
         down_said = F.normalize(self.down_out(pooled).float(), dim=-1)
-        trust = torch.sigmoid(self.trust_out(h)[..., 0].float()) if self.fit_blend else None
-        return self.place(h), logits, groups, down_said, trust
+        trust = self.trust_out(h)[..., 0].float() if self.fit_blend else None
+        acc = self.acc_out(h).float() * ACC_SCALE if self.physics else None
+        return self.place(h), logits, groups, down_said, trust, acc
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):

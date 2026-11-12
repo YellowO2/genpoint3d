@@ -54,6 +54,9 @@ class Settings(argparse.Namespace):
         p.add_argument("--fit-blend", type=int, default=0, choices=[0, 1],
                        help="each point says how far it trusts its own match; the rest of the way it moves to "
                             "where its piece's rigid fit puts it, and it counts that much as a mate in the fit")
+        p.add_argument("--physics", type=int, default=0, choices=[0, 1],
+                       help="each point's piece carried on, by its centre's velocity and spin and the acceleration "
+                            "the points say, where its fit has too little behind it (needs --fit-blend)")
         p.add_argument("--fit-robust", type=int, default=0,
                        help="refits of the rigid proposal, each mate counting less the further it sat from the last "
                             "fit, so a few wrong mates cannot drag it (0: one plain fit)")
@@ -85,6 +88,11 @@ class Settings(argparse.Namespace):
         p.add_argument("--fit-loss", type=float, default=1.0,
                        help="the rigid fit's own positions from each round's group vectors against the truth, "
                             "training the groups through the fit (0: off)")
+        p.add_argument("--trust-loss", type=float, default=1.0,
+                       help="each point's trust in its own match against whether it is nearer the truth than its "
+                            "piece's place (with --fit-blend)")
+        p.add_argument("--physics-loss", type=float, default=1.0,
+                       help="the carried-on places against the truth (with --physics)")
         p.add_argument("--down-loss", type=float, default=1.0,
                        help="which way is down, said for clips not told it: its angle off the truth")
         p.add_argument("--group-labels", default="motion", choices=["object", "motion"],
