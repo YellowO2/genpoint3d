@@ -56,7 +56,7 @@ def main() -> int:
         T = traj.shape[1]
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b, amp))
-        sweeps = Sweeps(model, b["anchor"], T, s.refine_iters, s.schedule, s.window, s.overlap, cond)
+        sweeps = Sweeps(model, b["anchor"], T, s.schedule, s.window, s.overlap, cond)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             for _ in sweeps:
                 pass

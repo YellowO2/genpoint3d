@@ -60,30 +60,30 @@ def masked_tracks(m, b: dict, sched: str, view: torch.Tensor) -> torch.Tensor:
     b["frames"] = black_out(b["frames"], view)
     cond = dict(context=b["context"], visual_mask=view, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
                 **fine_inputs(m, b))
-    return refine(m, b["anchor"], T, iters=2, window=8, overlap=4, schedule=sched, **cond)[0]
+    return refine(m, b["anchor"], T, window=8, overlap=4, schedule=sched, **cond)[0]
 
 
 def model(**kw):
     return PointDiT(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, **kw)
 
 
-full = dict(visibility=True, group_feedback=4, rigid_proposal=True, feedback_scale=10.0, rope_current=True,
+full = dict(visibility=True, group_feedback=4, rigid_proposal=True, feedback_scale=10.0,
             fit_robust=3, fit_blend=True)
-for kw, sched in ((dict(), ""), (full, "fbfb"), (full, "ffbb")):
+for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
     m = model(**kw)
     with torch.no_grad():             # off the zero inits, so every reader is live
         for p in m.parameters():
             p.add_(torch.randn_like(p) * 0.05)
-    s = types.SimpleNamespace(min_context=2, max_gap=4, partial_masks=1, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
-                              group_loss=1.0 if kw else 0.0, group_labels="object", vis_loss=1.0 if kw else 0.0, refine_iters=2,
+    s = types.SimpleNamespace(min_context=2, max_gap=4, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
+                              group_loss=1.0 if kw else 0.0, group_labels="object", vis_loss=1.0 if kw else 0.0,
                               accum=1, window=8, overlap=4, schedule=sched, down_hidden=1.0, down_loss=1.0,
                               fit_loss=1.0 if kw else 0.0)
     m.train()
     losses = learn(m, batch(), s, Hardware(torch.device("cpu"), False))
     dead = [n for n, p in m.named_parameters() if p.grad is None or p.grad.abs().sum() == 0]
-    print(f"{sched or 'f x2'}: loss {losses.method:.4f} vis {losses.visibility:.4f}, "
+    print(f"{sched}: loss {losses.method:.4f} vis {losses.visibility:.4f}, "
           f"params without gradient: {dead}")
-    j = ScoreSettings(device=torch.device("cpu"), refine_iters=2, window=8, overlap=4, schedule=sched, cutoff=6)
+    j = ScoreSettings(device=torch.device("cpu"), window=8, overlap=4, schedule=sched, cutoff=6)
     b = batch()
     pred = Predictor(m, j)(b)
     b2 = changed(b, slice(6, None))

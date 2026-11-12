@@ -16,10 +16,10 @@ def to_device(batch: dict, device) -> dict:
     return b
 
 
-def random_visual_mask(b: dict, min_context: int, max_gap: int, partial: bool = True) -> torch.Tensor:
+def random_visual_mask(b: dict, min_context: int, max_gap: int) -> torch.Tensor:
     """(B, T, 2, 2) which quarters of each training frame are seen. Each clip
     loses, over a span of frames, a random quarter, half, three quarters or
-    the whole frame, sizes mixed alike (`partial` off: the whole frame). The span is, for half the clips, every
+    the whole frame, sizes mixed alike. The span is, for half the clips, every
     frame from a cutoff uniform in [min_context, T] (T: none), for the other
     half 2 to `max_gap` frames from min_context on, seen again after (0:
     cutoffs only). Drawn on the CPU, so a seed gives the same masks anywhere."""
@@ -37,7 +37,7 @@ def random_visual_mask(b: dict, min_context: int, max_gap: int, partial: bool = 
     # The quarters lost: one, a half, all but one, or all, turned a random
     # multiple of 90 degrees so that any quarter or half can be the one.
     shapes = torch.tensor([[[1, 0], [0, 0]], [[1, 1], [0, 0]], [[1, 1], [1, 0]], [[1, 1], [1, 1]]], dtype=torch.bool)
-    sizes = torch.randint(4, (B,)) if partial else torch.full((B,), 3)
+    sizes = torch.randint(4, (B,))
     grid = torch.stack([torch.rot90(shapes[k], int(r)) for k, r in zip(sizes, torch.randint(4, (B,)))])
     view = ~(lost[:, :, None, None] & grid[:, None])
     return view.to(b["traj"].device)

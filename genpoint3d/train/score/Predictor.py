@@ -37,7 +37,7 @@ class Predictor:
         cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
-            loss, out = regress_loss(model, traj, anchor, mask=vis, iters=j.refine_iters, window=j.window,
+            loss, out = regress_loss(model, traj, anchor, mask=vis, window=j.window,
                                      overlap=j.overlap, schedule=j.schedule, **cond)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],

@@ -39,7 +39,6 @@ class PointDiT(nn.Module):
         visibility: bool = False,
         group_feedback: int = 0,
         feedback_scale: float = 1.0,
-        rope_current: bool = False,
         rigid_proposal: bool = False,
         fit_robust: int = 0,
         fit_blend: bool = False,
@@ -66,9 +65,6 @@ class PointDiT(nn.Module):
         self.spatial_blocks = nn.ModuleList(Block(dim, num_heads, mlp_mult, dim) for _ in range(depth))
         self.time_rope = RoPE(head_dim, num_heads, n_axes=1)
         self.space_rope = RoPE(head_dim, num_heads, n_axes=3)
-        # The attention between points encodes each point's current guess
-        # rather than where it started.
-        self.rope_current = rope_current
         self.cross_blocks = nn.ModuleList(CrossBlock(dim, num_heads, mlp_mult, dim) for _ in range(depth))
         # What a frame with no image shows: "nothing here".
         self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
@@ -309,10 +305,8 @@ class PointDiT(nn.Module):
         # Frame times in [-1, 1], the range RoPE's ladder is built for.
         t_pos = torch.linspace(-1, 1, T, device=dev, dtype=dt)[None, :, None].expand(B * N, T, 1)
         theta_time = self.time_rope(t_pos)                             # (B*N, H, T, d)
-        if self.rope_current:
-            theta_space = self.space_rope(pos.reshape(B * T, N, 3).to(dt))
-        else:
-            theta_space = self.space_rope(anchor.repeat_interleave(T, 0))  # (B*T, H, N, d)
+        # The attention between points encodes each point's current guess.
+        theta_space = self.space_rope(pos.reshape(B * T, N, 3).to(dt))     # (B*T, H, N, d)
 
         for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
                                                   self.cross_blocks, biases):

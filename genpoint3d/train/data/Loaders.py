@@ -13,7 +13,7 @@ class Loaders:
 
     def __init__(self, clips: Clips, settings) -> None:
         # What every loader shares: how a clip is turned into a sample.
-        how_data = dict(frames=clips.frames, level=bool(settings.level))
+        how_data = dict(frames=clips.frames)
         drawn = (dict(sampler=WeightedRandomSampler(clips.weights, len(clips.train)))
                  if clips.weights else dict(shuffle=True))
         self.train = DataLoader(

@@ -3,8 +3,8 @@
 The clip is covered by windows of `window` frames, each sharing `overlap` with
 the one before. Sweeps run over the windows forward or backward (`schedule`,
 a run of one letter is one sweep, as many rounds a window as it is long:
-"fbfb" one round a window each way twice, "ffbb" two forward then two back;
-empty is `iters` rounds forward); a backward sweep visits the windows from
+"fbfb" one round a window each way twice, "ffbb" two forward then two back);
+a backward sweep visits the windows from
 the clip's end, each still in the video's own time: a round is the same task
 whichever way the windows are visited, only which neighbour was settled last
 differs. Each round the model gives a correction to each frame's position
@@ -189,14 +189,12 @@ def _sq_dist(v: torch.Tensor) -> torch.Tensor:
     return (v[:, :, None] - v[:, None]).pow(2).sum(-1)
 
 
-def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
+def _schedule(schedule: str) -> list[tuple[str, int]]:
     """The sweeps in order, each ("f" or "b", rounds a window): a window has
     all of a sweep's rounds before the next one starts from it."""
-    if schedule:
-        if set(schedule) - {"f", "b"} or schedule[0] != "f":
-            raise ValueError(f"a schedule is f and b, starting with f: {schedule!r}")
-        return [(c, len(list(run))) for c, run in groupby(schedule)]
-    return [("f", iters)]
+    if not schedule or set(schedule) - {"f", "b"} or schedule[0] != "f":
+        raise ValueError(f"a schedule is f and b, starting with f: {schedule!r}")
+    return [(c, len(list(run))) for c, run in groupby(schedule)]
 
 
 def _clock(i: int, rounds: int, B: int, device) -> torch.Tensor:
@@ -222,10 +220,10 @@ class Sweeps:
     frame's last visibility logits, each point's last group vector and which
     way is down."""
 
-    def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, iters: int, schedule: str,
+    def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, schedule: str,
                  window: int, overlap: int, cond: dict) -> None:
         self.model, self.anchor, self.cond = model, anchor, cond
-        self.plan = _schedule(iters, schedule)
+        self.plan = _schedule(schedule)
         self.R = sum(n for _, n in self.plan)
         self.spans = _windows(T, window, overlap)
         B, N = anchor.shape[:2]
@@ -352,7 +350,6 @@ def regress_loss(
     anchor: torch.Tensor,
     mask: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
-    iters: int = 4,
     gamma: float = 0.8,
     backward: Optional[float] = None,
     visible: Optional[torch.Tensor] = None,
@@ -386,7 +383,7 @@ def regress_loss(
     at once (one round in memory) and the loss comes back detached. The dict
     also holds the tracks and visibility logits, as `refine` gives them, each
     point's last group vector and which way is down."""
-    run = Sweeps(model, anchor, x1.shape[1], iters, schedule, window, overlap, cond)
+    run = Sweeps(model, anchor, x1.shape[1], schedule, window, overlap, cond)
     w = [gamma ** (run.R - 1 - i) for i in range(run.R)]
     w = [v / sum(w) for v in w]
     share = 1 / len(run.spans)
@@ -429,11 +426,11 @@ def regress_loss(
 
 
 @torch.no_grad()
-def refine(model: nn.Module, anchor: torch.Tensor, num_frames: int, iters: int = 4, window: int = 0, overlap: int = 0, schedule: str = "",
+def refine(model: nn.Module, anchor: torch.Tensor, num_frames: int, window: int = 0, overlap: int = 0, schedule: str = "ffbb",
            **cond) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """The tracks (B, T, N, 3) and, with a visibility head, the logits (B, T,
     N) of each frame's last window."""
-    run = Sweeps(model, anchor, num_frames, iters, schedule, window, overlap, cond)
+    run = Sweeps(model, anchor, num_frames, schedule, window, overlap, cond)
     for _ in run:
         pass
     return run.whole, run.vis if model.visibility else None

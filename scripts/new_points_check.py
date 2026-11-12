@@ -111,7 +111,7 @@ def main() -> int:
         def track(bb):
             cond = dict(context=bb["context"], visual_mask=visual_mask(bb, None), id_card=bb["id_card"],
                         patch_xyz=bb["patch_xyz"], **{**fine, "query_t": bb["query_t"]})
-            sweeps = Sweeps(model, bb["anchor"], T, s.refine_iters, s.schedule, s.window, s.overlap, cond)
+            sweeps = Sweeps(model, bb["anchor"], T, s.schedule, s.window, s.overlap, cond)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 for _ in sweeps:
                     pass

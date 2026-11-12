@@ -30,8 +30,6 @@ class Settings(argparse.Namespace):
         p.add_argument("--batch", type=int, default=1)
         p.add_argument("--accum", type=int, default=1, help="micro-batches per optimiser step")
         p.add_argument("--points", type=int, default=500, help="points drawn per clip")
-        p.add_argument("--level", type=int, default=0, choices=[0, 1],
-                       help="turn every clip so up is -y (needs the cache's up)")
         p.add_argument("--val-frac", type=float, default=0.1)
         p.add_argument("--val-every", type=int, default=500)
         p.add_argument("--resume", default=None, metavar="RESUME_PT",
@@ -51,8 +49,6 @@ class Settings(argparse.Namespace):
         p.add_argument("--heads", type=int, default=4)
         p.add_argument("--cross-window", type=int, default=49, help="DINOv3 patches each point reads")
         p.add_argument("--fine-neigh", type=int, default=32, help="CNN cells per 3D neighbourhood")
-        p.add_argument("--rope-current", type=int, default=1, choices=[0, 1],
-                       help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
         p.add_argument("--fit-blend", type=int, default=0, choices=[0, 1],
@@ -71,11 +67,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--schedule", default="ffbb", metavar="SWEEPS",
                        help="sweeps over the windows, f forward, b backward; a run of one letter is one sweep, "
                             "its length the rounds a window gets before the next: ffbb")
-        p.add_argument("--refine-iters", type=int, default=None, help="rounds forward, with no --schedule (4)")
         p.add_argument("--min-context", type=int, default=2,
                        help="training cutoffs and gaps start at or after this frame")
-        p.add_argument("--partial-masks", type=int, default=1, choices=[0, 1],
-                       help="training masks hide a quarter, half or three quarters of a frame too (0: whole frames)")
         p.add_argument("--max-gap", type=int, default=12,
                        help="half the training clips lose a span of 2 to this many frames "
                             "instead of their end (0: cutoffs only)")
@@ -94,7 +87,7 @@ class Settings(argparse.Namespace):
                             "training the groups through the fit (0: off)")
         p.add_argument("--down-loss", type=float, default=1.0,
                        help="which way is down, said for clips not told it: its angle off the truth")
-        p.add_argument("--group-labels", default="object", choices=["object", "motion"],
+        p.add_argument("--group-labels", default="motion", choices=["object", "motion"],
                        help="the pairs to put together: on one object where the clip says (else as motion), "
                             "or those whose distance stays within 2 cm")
         p.add_argument("--vis-loss", type=float, default=1.0, help="the visibility head (0: no head)")
@@ -109,11 +102,8 @@ class Settings(argparse.Namespace):
             p.error("--eval-cutoff is 0 (off) or at least 2")
         if settings.window and not 0 < settings.overlap < settings.window:
             p.error("--window needs 0 < --overlap < --window")
-        if settings.schedule and not settings.window:
+        if not settings.window:
             p.error("--schedule sweeps over the windows: needs --window W")
-        if settings.schedule and settings.refine_iters is not None:
-            p.error("--refine-iters is the rounds without a schedule; a schedule sets its own")
-        settings.refine_iters = settings.refine_iters or 4
         if settings.mix is not None and (len(settings.mix) != len(settings.cache) or min(settings.mix) <= 0):
             p.error("--mix gives each --cache a share above 0")
         if settings.rigid_proposal and not settings.group_feedback:

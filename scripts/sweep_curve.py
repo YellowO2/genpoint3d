@@ -43,7 +43,7 @@ def main() -> int:
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=4)
     amp = device.type == "cuda"
     print(f"{len(ds)} clips | step {run.step} of {args.ckpt} | schedule {s.schedule!r} "
-          f"rounds {s.refine_iters} window {s.window} overlap {s.overlap}", flush=True)
+          f"window {s.window} overlap {s.overlap}", flush=True)
 
     rows = {}       # (stage, name, frame or None) -> per-clip values
     for batch in loader:
@@ -52,7 +52,7 @@ def main() -> int:
         T = traj.shape[1]
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b, amp))
-        sweeps = Sweeps(model, b["anchor"], T, s.refine_iters, s.schedule, s.window, s.overlap, cond)
+        sweeps = Sweeps(model, b["anchor"], T, s.schedule, s.window, s.overlap, cond)
         stages = {}
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             for r in sweeps:

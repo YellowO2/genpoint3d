@@ -28,16 +28,15 @@ class ClipDataset(Dataset):
 
     The target is each point's displacement from its anchor, over
     TRAJ_SCALE_DISP. `frames` is a directory from `scripts/cache_frames.py`
-    (RGB and depth per clip), or one per cache directory; None serves neither. `level` turns each clip so
-    up is -y (`_levelled`). `query_before` C keeps only points first seen
+    (RGB and depth per clip), or one per cache directory; None serves neither. `query_before` C keeps only points first seen
     before frame C: a forecast from C is scored on points it was handed. Only
     points within REACH of the camera in their query frame are served (`_near`).
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
-                 frames: Path | dict[Path, Path] | None = None, level: bool = False, query_before: int = 0):
+                 frames: Path | dict[Path, Path] | None = None, query_before: int = 0):
         self.clips, self.num_points, self.resample = clips, num_points, resample
-        self.frames, self.level, self.query_before = frames, level, query_before
+        self.frames, self.query_before = frames, query_before
         self.traj_scale = TRAJ_SCALE_DISP
 
     def __len__(self) -> int:
@@ -50,8 +49,6 @@ class ClipDataset(Dataset):
             c = torch.load(c, weights_only=False)
         clip = _near(c if isinstance(c, CachedClip) else CachedClip.from_dict(c))
 
-        if self.level:
-            clip = _levelled(clip)
         # Empty tensors rather than None, for the default collate.
         frames = depth = torch.zeros(0)
         if frames_dir is not None:
@@ -187,24 +184,3 @@ def _near(clip: CachedClip) -> CachedClip:
         if getattr(clip, k) is not None:
             per_point[k] = getattr(clip, k)[keep]
     return dataclasses.replace(clip, **per_point)
-
-
-def _levelled(clip: CachedClip) -> CachedClip:
-    """The clip turned about the frame-0 camera's centre, by the smallest
-    rotation that takes its `up` to -y: tilt and roll gone, heading kept."""
-    if clip.up is None:
-        raise ValueError(f"clip {clip.seq_id} has no up direction to level by: re-cache it, "
-                         "or add it with scripts/add_up.py")
-    u = clip.up.float() / clip.up.float().norm()
-    t = torch.tensor([0.0, -1.0, 0.0])
-    v, c = torch.linalg.cross(u, t), float(u @ t)
-    K = torch.tensor([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
-    R = torch.eye(3) + K + K @ K / (1.0 + c)                        # takes u to t
-    turn = lambda p: None if p is None else p.float() @ R.T
-    E = None
-    if clip.extrinsics is not None:
-        Rh = torch.eye(4)
-        Rh[:3, :3] = R
-        E = clip.extrinsics.float() @ Rh.T                          # levelled -> cam_t
-    return dataclasses.replace(clip, traj=turn(clip.traj), anchor=turn(clip.anchor),
-                               patch_xyz=turn(clip.patch_xyz), extrinsics=E, up=t)

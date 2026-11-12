@@ -21,7 +21,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
     # Each clip loses part or all of its frames from a random cutoff, or over
     # a random gap and is seen again after; the CNN sees only what is left.
-    vm = random_visual_mask(b, settings.min_context, settings.max_gap, bool(settings.partial_masks))
+    vm = random_visual_mask(b, settings.min_context, settings.max_gap)
     b["frames"] = black_out(b["frames"], vm)
     mask, w = hidden_weight(vis, apd_weight(b, traj), settings.hidden_loss)
     extra = dict(vel_weight=settings.vel_loss)
@@ -49,7 +49,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
         # Back-propagated a round at a time, divided by accum so the
         # accumulated gradient is the effective batch's mean.
         loss, parts = regress_loss(model, traj, anchor, mask=mask, weight=w,
-                                   iters=settings.refine_iters, backward=1 / settings.accum,
+                                   backward=1 / settings.accum,
                                    window=settings.window, overlap=settings.overlap,
                                    schedule=settings.schedule, **extra,
                                    context=b["context"], visual_mask=vm, id_card=b["id_card"],

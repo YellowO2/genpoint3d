@@ -48,7 +48,7 @@ with torch.no_grad():
         b = to_device(batch, dev)
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b))
-        sweeps = Sweeps(model, b["anchor"], b["traj"].shape[1], rs.refine_iters, rs.schedule, rs.window,
+        sweeps = Sweeps(model, b["anchor"], b["traj"].shape[1], rs.schedule, rs.window,
                         rs.overlap, cond)
         for _ in sweeps:
             pass

@@ -38,7 +38,7 @@ def main() -> int:
         cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
                     patch_xyz=b["patch_xyz"], **fine_inputs(model, b, amp))
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            pred, _ = refine(model, b["anchor"], vis.shape[1], iters=s.refine_iters, window=s.window,
+            pred, _ = refine(model, b["anchor"], vis.shape[1], window=s.window,
                              overlap=s.overlap, schedule=s.schedule, **cond)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(b["traj"], b)
         always = vis.all(1)                                                  # (B, N)
