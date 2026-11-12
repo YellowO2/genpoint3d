@@ -7,7 +7,9 @@ guess on hidden points, which the model does not follow, is a proposal the
 model has not learned to use; one no better is one it is right to ignore.
 Beside it, the proposal built from the true groups (the training labels'
 pieces) instead of the model's: good with them and poor with the model's
-says the groups are what is wrong; poor with both, the fit. The hidden moving
+says the groups are what is wrong; poor with both, the fit. Beside each, the
+fit refit 3 times with mates far from it counting less (`robust`): good says
+a few wrong mates were what dragged it. The hidden moving
 point-frames are then split by how many points of the point's true piece are
 seen in that frame: with none, the fit has only guesses to go on; with many,
 it should be about as good as the seen points.
@@ -63,12 +65,16 @@ def main() -> int:
         prop = rigid_proposal(pos, q, b["anchor"].float(), sweeps.groups, sweeps.seen & sweeps.known,
                               torch.sigmoid(sweeps.vis.float()), 0, T)
         proposal = guess + prop[..., :3] / model.traj_scale
+        robust = guess + rigid_proposal(pos, q, b["anchor"].float(), sweeps.groups, sweeps.seen & sweeps.known,
+                                        torch.sigmoid(sweeps.vis.float()), 0, T, robust=3)[..., :3] / model.traj_scale
         # The true pieces as group vectors: one axis each, far apart.
         piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
         truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
         true_prop = rigid_proposal(pos, q, b["anchor"].float(), truth, sweeps.seen,
                                    torch.sigmoid(sweeps.vis.float()), 0, T)
         true_groups = guess + true_prop[..., :3] / model.traj_scale
+        true_robust = guess + rigid_proposal(pos, q, b["anchor"].float(), truth, sweeps.seen,
+                                             torch.sigmoid(sweeps.vis.float()), 0, T, robust=3)[..., :3] / model.traj_scale
         gt = to_metres(traj, b)
         moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > 4)[:, None]
         # Each point-frame's seen points on its true piece, itself left out.
@@ -76,7 +82,8 @@ def main() -> int:
         seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)
         for label, lo, hi in bins:
             counts[label] += int((~vis & moving & (seen_mates >= lo) & (seen_mates < hi)).sum())
-        for name, pts in (("guess", guess), ("proposal", proposal), ("true groups", true_groups)):
+        for name, pts in (("guess", guess), ("proposal", proposal), ("robust", robust), ("true groups", true_groups),
+                          ("true robust", true_robust)):
             m = to_metres(pts, b)
             for kind, mask in (("hidden", ~vis), ("seen", vis)):
                 for which, sel in (("all", mask), ("moving", mask & moving)):
@@ -91,20 +98,17 @@ def main() -> int:
         for kind, mask in (("hidden", ~vis), ("seen", vis)):
             backing[kind].append(prop[..., 3][mask].float().cpu())
 
-    print("\nAPD (no rescale), the model's final guess against where its piece would put it:")
-    print(f"  {'point-frames':<16} {'guess':>8} {'proposal':>9} {'true groups':>12}")
+    names = ("guess", "proposal", "robust", "true groups", "true robust")
+    print("\nAPD (no rescale), the model's final guess against where its piece would put it (robust: refit 3 times):")
+    print(f"  {'point-frames':<16}" + "".join(f"{n:>13}" for n in names))
     for kind in ("hidden", "seen"):
         for which in ("all", "moving"):
-            print(f"  {kind + ' ' + which:<16} {clip_mean(rows[kind, which, 'guess']):>8.4f} "
-                  f"{clip_mean(rows[kind, which, 'proposal']):>9.4f} "
-                  f"{clip_mean(rows[kind, which, 'true groups']):>12.4f}")
+            print(f"  {kind + ' ' + which:<16}" + "".join(f"{clip_mean(rows[kind, which, n]):>13.4f}" for n in names))
     total = max(sum(counts.values()), 1)
     print("\nHidden moving point-frames by how many points of their true piece are seen there:")
-    print(f"  {'seen mates':<16} {'share':>6} {'guess':>8} {'proposal':>9} {'true groups':>12}")
+    print(f"  {'seen mates':<10} {'share':>6}" + "".join(f"{n:>13}" for n in names))
     for label, _, _ in bins:
-        print(f"  {label:<16} {counts[label] / total:>6.3f} {clip_mean(rows['mates', label, 'guess']):>8.4f} "
-              f"{clip_mean(rows['mates', label, 'proposal']):>9.4f} "
-              f"{clip_mean(rows['mates', label, 'true groups']):>12.4f}")
+        print(f"  {label:<10} {counts[label] / total:>6.3f}" + "".join(f"{clip_mean(rows['mates', label, n]):>13.4f}" for n in names))
     for kind in ("hidden", "seen"):
         v = torch.cat(backing[kind])
         print(f"  how much backs the proposal, {kind}: median {v.median():.3f}, "

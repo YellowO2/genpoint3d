@@ -114,7 +114,8 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 
 
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
-                   member: torch.Tensor, seen: torch.Tensor, start: int, end: int, mates: int = 64) -> torch.Tensor:
+                   member: torch.Tensor, seen: torch.Tensor, start: int, end: int, mates: int = 64,
+                   robust: int = 0) -> torch.Tensor:
     """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
     would put each point, as an offset from its guess there, how much backs it
     (0 for nothing, towards 1), and how far its mates sit from where the fit
@@ -127,13 +128,15 @@ def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, gro
     `mates` likeliest group-mates, weighted by that likelihood and by being
     seen in the frame: the turn and shift that best carry them from where they
     are in its query frame to where they are now (a weighted Kabsch fit), a
-    shift alone with little behind it, applied to its anchor. In float32:
-    the fit's SVD has no bfloat16 on the GPU."""
+    shift alone with little behind it, applied to its anchor. With `robust`,
+    that many refits, each mate's weight cut by how far it sat from the last
+    fit against the typical mate, so a few wrong mates cannot drag it. In
+    float32: the fit's SVD has no bfloat16 on the GPU."""
     with torch.autocast(device_type=pos.device.type, enabled=False):
-        return _kabsch(pos.float(), q, anchor.float(), groups.float(), member, seen.float(), start, end, mates)
+        return _kabsch(pos.float(), q, anchor.float(), groups.float(), member, seen.float(), start, end, mates, robust)
 
 
-def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates):
+def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates, robust=0):
     B, T, N, _ = pos.shape
     K = min(mates, N - 1)
     a = 2 * torch.sigmoid(-_sq_dist(groups)) * (member[:, :, None] & member[:, None, :])
@@ -142,28 +145,46 @@ def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates):
     aff = aff.clamp_min(0)
     take = lambda x: x.gather(2, idx.reshape(B, 1, N * K, *([1] * (x.dim() - 3))).expand(
         B, x.shape[1], N * K, *x.shape[3:])).reshape(B, x.shape[1], N, K, *x.shape[3:])
-    w = aff[:, None] * take(seen[:, start:end])                                     # (B, L, N, K)
+    w0 = aff[:, None] * take(seen[:, start:end])                                    # (B, L, N, K)
     dst = take(pos[:, start:end])                                                   # (B, L, N, K, 3)
     src = pos[torch.arange(B, device=pos.device)[:, None, None], q[:, :, None], idx][:, None]   # (B, 1, N, K, 3)
+    R, ms, md, s, w = *_fit(w0, src, dst), w0
+    for _ in range(robust):
+        # Mates far from where the fit puts them, against the typical one, count less.
+        left = _left(R, ms, md, src, dst)
+        typical = (w * left).sum(-1, keepdim=True) / s.clamp_min(1e-6)[..., None] + 1e-6
+        w = w0 / (1 + (left / typical).pow(2))
+        R, ms, md, s = _fit(w, src, dst)
+    prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
+    off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
+    # The mates' leftover error under the fit, against their spread.
+    spread = (src - ms[..., None, :]).norm(dim=-1)
+    left = (w * _left(R, ms, md, src, dst)).sum(-1) / ((w * spread).sum(-1) + 1e-3 * s.clamp_min(1e-6))
+    return torch.cat([off, (s / (s + 1))[..., None], left.detach()[..., None]], -1)
+
+
+def _fit(w, src, dst):
+    """The weighted Kabsch fit carrying `src` onto `dst` (B, L, N, K, 3, src
+    broadcast): its turn R (B, L, N, 3, 3), the centres ms and md, and the
+    weight s behind it; a shift alone with less than 3."""
     s = w.sum(-1)
     mean = lambda x: (w[..., None] * x).sum(-2) / s.clamp_min(1e-6)[..., None]
     ms, md = mean(src.expand_as(dst)), mean(dst)
     H = torch.einsum("blnk,blnkx,blnky->blnxy", w, src - ms[..., None, :], dst - md[..., None, :])
     U, _, Vh = torch.linalg.svd(H)
     V, Ut = Vh.transpose(-1, -2), U.transpose(-1, -2)
-    flip = torch.ones(*H.shape[:-1], device=pos.device)
+    flip = torch.ones(*H.shape[:-1], device=w.device)
     flip[..., 2] = torch.linalg.det(V @ Ut).sign()
     # The turn carries no gradient (an SVD's is unstable where mates lie nearly
     # in a line); the weights reach the fit through its centres.
-    R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=pos.device)).detach()
-    prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
-    off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
-    # The mates' leftover error under the fit, against their spread.
+    R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=w.device)).detach()
+    return R, ms, md, s
+
+
+def _left(R, ms, md, src, dst):
+    """(B, L, N, K) how far each mate sits from where the fit puts it."""
     a = src - ms[..., None, :]
-    left = ((R[..., None, :, :] @ a[..., None])[..., 0] + md[..., None, :] - dst).norm(dim=-1)
-    spread = a.norm(dim=-1)
-    left = (w * left).sum(-1) / ((w * spread).sum(-1) + 1e-3 * s.clamp_min(1e-6))
-    return torch.cat([off, (s / (s + 1))[..., None], left.detach()[..., None]], -1)
+    return ((R[..., None, :, :] @ a[..., None])[..., 0] + md[..., None, :] - dst).norm(dim=-1)
 
 
 def _sq_dist(v: torch.Tensor) -> torch.Tensor:
