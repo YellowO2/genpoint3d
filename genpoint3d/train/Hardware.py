@@ -17,7 +17,7 @@ class Hardware:
     def pick(cls, settings) -> "Hardware":
         """The best device here; bf16 only where it is asked for and supported."""
         device = torch.device(
-            "cuda" if torch.cuda.is_available()
+            f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available()
             else "mps" if torch.backends.mps.is_available()
             else "cpu"
         )

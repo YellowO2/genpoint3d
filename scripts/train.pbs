@@ -37,7 +37,11 @@ nvidia-smi --query-gpu=name,memory.total --format=csv
 
 # RESUME=1 goes on from this run's resume.pt, for a run longer than one job.
 if [ -n "${RESUME:-}" ]; then ARGS="$ARGS --resume outputs/$OUT/resume.pt"; fi
-python -m genpoint3d.train.main --cache $(printf "$ROOT/%s " $CACHE) --frames-cache $(printf "$ROOT/%s " $FRAMES) \
+# GPUS=N trains on N GPUs of the node (ask for them with -l select=...:ngpus=N),
+# each on its own clips, so a step is N clips.
+GPUS=${GPUS:-1}
+if [ "$GPUS" -gt 1 ]; then LAUNCH="torchrun --standalone --nproc_per_node=$GPUS -m"; else LAUNCH="python -m"; fi
+$LAUNCH genpoint3d.train.main --cache $(printf "$ROOT/%s " $CACHE) --frames-cache $(printf "$ROOT/%s " $FRAMES) \
   --out outputs/$OUT \
   --init $INIT --fine-init $ROOT/weights/tapip3d_finder.pt $ARGS
 

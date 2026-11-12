@@ -11,6 +11,7 @@ import logging
 
 import torch
 
+from genpoint3d.train.Gpus import Gpus
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Optimiser import Optimiser
 from genpoint3d.train.RunningLoss import RunningLoss
@@ -27,7 +28,7 @@ from genpoint3d.train.score.main import score
 from genpoint3d.train.validation_settings import validation_settings
 
 
-def train(settings: Settings):
+def train(settings: Settings, gpus: Gpus):
     hardware = Hardware.pick(settings)
     saver = Saver(settings)
     clips = split_clips(settings.cache, settings.val_frac, settings.seed, settings.mix)
@@ -35,6 +36,7 @@ def train(settings: Settings):
     loaders = Loaders(clips, settings)
     model = build_model(settings, clips.feat_dim)
     model = set_up_model(model, settings, hardware)
+    gpus.same_start(model)
     optimiser = Optimiser(model, settings, hardware)
     first = 1
     if settings.resume:
@@ -50,9 +52,14 @@ def train(settings: Settings):
         for batch in loaders.micro_batches(settings.accum):
             losses = learn(model, batch, settings, hardware)
             running_loss.add(losses)
+        gpus.average_grads(model)
         norm = optimiser.step(model)
         running_loss.step(step, optimiser.lr(), norm)
-        if step % settings.val_every == 0 or step == settings.steps:
+        if step % settings.save_every == 0:
+            gpus.check_same(model)
+        if (step % settings.val_every == 0 or step == settings.steps) and not gpus.lead:
+            gpus.wait()
+        elif step % settings.val_every == 0 or step == settings.steps:
             optimiser.swap_in_average(model)
             interval = running_loss.interval(step)
             loader, split = loaders.val, "val"
@@ -65,7 +72,8 @@ def train(settings: Settings):
             saver.save(report, model, clips)
             optimiser.swap_out_average(model)
             saver.keep_resume(step, optimiser.state(model))
-        elif step % settings.save_every == 0:
+            gpus.wait()
+        elif step % settings.save_every == 0 and gpus.lead:
             optimiser.swap_in_average(model)
             saver.keep(model, step)
             optimiser.swap_out_average(model)
@@ -80,8 +88,13 @@ if __name__ == "__main__":
     logging.basicConfig(format="%(message)s", stream=sys.stdout)
     logging.getLogger("genpoint3d").setLevel(logging.INFO)
     settings = Settings.from_command_line()
-    torch.manual_seed(settings.seed)
+    gpus = Gpus()
+    if not gpus.lead:
+        logging.getLogger("genpoint3d").setLevel(logging.WARNING)
+    # Each process draws its own clips; the weights start alike (`Gpus.same_start`).
+    torch.manual_seed(settings.seed + gpus.rank)
     start = time.time()
-    train(settings)
+    train(settings, gpus)
+    gpus.close()
     logging.getLogger("genpoint3d").info(
         f"\ndone in {(time.time() - start) / 60:.1f} min -> {settings.out}")
