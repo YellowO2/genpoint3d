@@ -81,10 +81,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--vel-loss", type=float, default=1.0, help="frame-to-frame step error")
         p.add_argument("--rigid-loss", type=float, default=1.0, help="rigid pairs' gap error")
         p.add_argument("--group-loss", type=float, default=1.0, help="group vectors against rigid pairs")
-        p.add_argument("--state-loss", type=float, default=1.0,
-                       help="each point's said velocity and acceleration per frame against the truth's")
         p.add_argument("--down-loss", type=float, default=1.0,
-                       help="which way is down, said for clips not told it, against the truth (1 - cos)")
+                       help="which way is down, said for clips not told it: its angle off the truth")
         p.add_argument("--group-labels", default="object", choices=["object", "motion"],
                        help="the pairs to put together: on one object where the clip says (else as motion), "
                             "or those whose distance stays within 2 cm")

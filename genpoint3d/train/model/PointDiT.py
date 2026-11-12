@@ -85,12 +85,6 @@ class PointDiT(nn.Module):
         # Which way is down, said for the clip from all its points and frames:
         # in place of `down` next call where the clip does not say.
         self.down_out = nn.Linear(dim, 3)
-        # Each point's motion state in each frame, beside the correction: its
-        # velocity and acceleration, in window lengths (`regress._state_scale`).
-        # What it last said is fed back; its own vector where it has said none.
-        self.state_out = zero_init(nn.Linear(dim, 6, bias=False))
-        self.state_in = zero_init(nn.Linear(6, dim, bias=False), almost=False)
-        self.state_unknown = nn.Parameter(torch.zeros(dim))
         self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
         # One logit per (point, frame): can the point be seen there? What it
@@ -149,8 +143,6 @@ class PointDiT(nn.Module):
         vis_prev: torch.Tensor | None = None,
         group_prev: torch.Tensor | None = None,
         group_known: torch.Tensor | None = None,
-        state_prev: torch.Tensor | None = None,
-        state_known: torch.Tensor | None = None,
         frames: tuple[int, int] | None = None,
         x_before: torch.Tensor | None = None,
         rigid: torch.Tensor | None = None,
@@ -176,16 +168,14 @@ class PointDiT(nn.Module):
         vis_prev     (B, T, N)       the visibility logits last said (with the head)
         group_prev   (B, N, E)       the group vectors the last call said
         group_known  (B, N) bool     the points that have said one (None: all)
-        state_prev   (B, T, N, 6)    the motion state last said, in window lengths
-        state_known  (B, T, N) bool  where it has been said (None: nowhere)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
         rigid        (B, T, N, 4)    where moving with its piece would put each point,
                                      as an offset from its guess, and its support
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
-        the group vectors (B, N, E) (those two None without their heads), the motion state
-        (B, T, N, 6) and which way is down (B, 3), a unit vector.
+        the group vectors (B, N, E) (those two None without their heads) and which way is
+        down (B, 3), a unit vector.
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
@@ -274,11 +264,6 @@ class PointDiT(nn.Module):
             # As a probability less a half: 0 before the head has said anything.
             belief = torch.sigmoid(vis_prev.float()) - 0.5
             h = h + (self.feedback_scale * belief[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
-        if state_prev is None:
-            h = h + self.state_unknown.to(h.dtype)
-        else:
-            h = h + torch.where(state_known[..., None], self.state_in(state_prev.to(h.dtype)),
-                                self.state_unknown.to(h.dtype))
         # Before the point was first seen, and its query frame.
         t = torch.arange(start, start + T, device=dev)[None, :, None]
         q = query_t[:, None]
@@ -334,7 +319,7 @@ class PointDiT(nn.Module):
         here = (alive if alive is not None else torch.ones(B, N, dtype=torch.bool, device=dev)).float()
         pooled = (h.float().mean(1) * here[..., None]).sum(1) / here.sum(1, keepdim=True).clamp_min(1)
         down_said = F.normalize(self.down_out(pooled).float(), dim=-1)
-        return self.place(h), logits, groups, self.state_out(h), down_said
+        return self.place(h), logits, groups, down_said
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):

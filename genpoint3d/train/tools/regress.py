@@ -14,9 +14,8 @@ start moving at the last settled speed (`_reach`), and a late point's past,
 before a backward sweep reaches it, at its earliest (`_reach_back`). A frame
 without its image is an input like any other: what the visibility head last
 said about every frame is fed back, so a point that looks hidden can stop
-trusting the image there, and look again. So is each point's motion state, its
-velocity and acceleration in each frame, and which way is down where the clip
-does not say: what the model last said.
+trusting the image there, and look again. So is which way is down where the clip does
+not say: what the model last said.
 """
 
 from dataclasses import dataclass
@@ -24,7 +23,6 @@ from itertools import groupby
 from typing import Callable, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.train.tools.visibility import visibility_error
@@ -174,25 +172,6 @@ def _schedule(iters: int, schedule: str) -> list[tuple[str, int]]:
     return [("f", iters)]
 
 
-def _state_scale(L: int, device) -> torch.Tensor:
-    """(6,) a frame's velocity and acceleration into lengths of an `L`-frame
-    window: times L - 1 and its square, numbers near 1 as the head says them."""
-    s = float(L - 1)
-    return torch.tensor([s] * 3 + [s * s] * 3, device=device)
-
-
-def _state_target(x1: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(B, T, N, 6) each frame's true velocity and acceleration, from the
-    frames either side, and (B, T, N) where they count: the frame and both
-    neighbours do."""
-    st = torch.zeros(*x1.shape[:3], 6, device=x1.device, dtype=x1.dtype)
-    st[:, 1:-1, :, :3] = (x1[:, 2:] - x1[:, :-2]) / 2
-    st[:, 1:-1, :, 3:] = x1[:, 2:] - 2 * x1[:, 1:-1] + x1[:, :-2]
-    ok = torch.zeros_like(mask)
-    ok[:, 1:-1] = mask[:, 2:] & mask[:, 1:-1] & mask[:, :-2]
-    return st, ok
-
-
 def _clock(i: int, rounds: int, B: int, device) -> torch.Tensor:
     """(B,) `k` for round `i` of `rounds`; a single round is the last."""
     return torch.full((B,), i / (rounds - 1) if rounds > 1 else 1.0, device=device)
@@ -207,15 +186,14 @@ class _Round:
     logits: Optional[torch.Tensor]  # (B, L, N) visibility, with the head
     groups: Optional[torch.Tensor]  # (B, N, E) group vectors, with their graph
     alive: torch.Tensor             # (B, N)
-    state: torch.Tensor             # (B, L, N, 6) motion state in window lengths, with its graph
     down: torch.Tensor              # (B, 3) which way is down, with its graph
 
 
 class Sweeps:
     """Every round of every window of every sweep, in order, as `_Round`s.
-    `whole`, `vis`, `groups`, `state` and `down` then hold the clip's guess,
-    each frame's last visibility logits, each point's last group vector, its
-    last motion state per frame and which way is down."""
+    `whole`, `vis`, `groups` and `down` then hold the clip's guess, each
+    frame's last visibility logits, each point's last group vector and which
+    way is down."""
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, iters: int, schedule: str,
                  window: int, overlap: int, cond: dict) -> None:
@@ -234,9 +212,6 @@ class Sweeps:
         self.known = torch.zeros(B, N, dtype=torch.bool, device=anchor.device)
         # Each point's earliest frame a window has settled; T for none yet.
         self.first = torch.full((B, N), T, dtype=torch.long, device=anchor.device)
-        # Each frame's motion state as last said, per frame; where said.
-        self.state = torch.zeros(B, T, N, 6, device=anchor.device)
-        self.said = torch.zeros(B, T, N, dtype=torch.bool, device=anchor.device)
         # Which way is down: as told, else as the model last said once it has.
         self.told = cond["down_known"]
         self.down = cond["down"].float()
@@ -262,17 +237,10 @@ class Sweeps:
                         rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], anchor,
                                                self.groups, self.seen & self.known, torch.sigmoid(self.vis),
                                                start, end).detach()
-                    scale = _state_scale(end - start, dev)
-                    step, logits, emb, state, down = model(
+                    step, logits, emb, down = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
-                        group_prev=self.groups, group_known=self.known, state_prev=self.state[:, start:end] * scale,
-                        state_known=self.said[:, start:end], frames=frames, x_before=before, rigid=rigid,
-                        **{**self.cond, "down": self.down, "down_known": self.down_known})
-                    self.state[:, start:end] = torch.where(alive[:, None, :, None], state.detach().float() / scale,
-                                                           self.state[:, start:end])
-                    # A new tensor: the call's backward still needs the one it read.
-                    self.said = self.said.clone()
-                    self.said[:, start:end] |= alive[:, None]
+                        group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
+                        rigid=rigid, **{**self.cond, "down": self.down, "down_known": self.down_known})
                     self.down = torch.where(self.told[:, None], self.down, down.detach())
                     self.down_known = torch.ones_like(self.told)
                     if emb is not None:
@@ -284,7 +252,7 @@ class Sweeps:
                         self.vis[:, start:end] = logits.detach()
                     g = torch.where(alive[:, None, :, None], g.detach() + _corrected(step, at, self.rays),
                                     g.detach())
-                    yield _Round(i, start, end, g, logits, emb, alive, state, down)
+                    yield _Round(i, start, end, g, logits, emb, alive, down)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 self.first = torch.where(alive, self.first.clamp(max=start), self.first)
                 if not back:
@@ -319,6 +287,13 @@ def _rigid_error(g, x1, pairs):
     return (err * w).sum() / w.sum().clamp(min=1e-8)
 
 
+def _angle(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """(B,) the angle in radians between (B, 3) directions, from the sine and
+    cosine together: steady near 0, where acos's slope is infinite."""
+    sin = torch.linalg.cross(a, b).pow(2).sum(-1).add(1e-12).sqrt()
+    return torch.atan2(sin, (a * b).sum(-1))
+
+
 def _group_error(emb: torch.Tensor, groups: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
     """Cross-entropy of the affinity 2 sigmoid(-|v_i - v_j|^2) against the
     pairs that truly move as one (B, N, N), the two kinds averaged apart."""
@@ -347,7 +322,6 @@ def regress_loss(
     rigid_weight: float = 0.0,
     groups: Optional[Callable[[int, int], torch.Tensor]] = None,
     group_weight: float = 0.0,
-    state_weight: float = 0.0,
     down_true: Optional[torch.Tensor] = None,
     down_scored: Optional[torch.Tensor] = None,
     down_weight: float = 0.0,
@@ -361,10 +335,9 @@ def regress_loss(
     averaged. Per round: the position error (`mask`, `weight` (B, T, N)), and
     with their weights the step error, the rigid pairs' gap error, the group
     vectors' error against `groups(start, end)`, the pairs to put together in
-    the window's frames (what the window can see and its rigid fit needs), the
-    motion state's against the truth's velocity and acceleration, which way is
-    down (1 - cos) against `down_true` (B, 3) on the clips `down_scored` (B,),
-    those not told it, and the visibility head's against
+    the window's frames (what the window can see and its rigid fit needs),
+    which way is down (the angle, radians) against `down_true` (B, 3) on the
+    clips `down_scored` (B,), those not told it, and the visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
     at once (one round in memory) and the loss comes back detached. The dict
     also holds the tracks and visibility logits, as `refine` gives them, each
@@ -374,8 +347,6 @@ def regress_loss(
     w = [v / sum(w) for v in w]
     share = 1 / len(run.spans)
     total = vis_total = x1.new_zeros(())
-    if state_weight:
-        state_true, state_ok = _state_target(x1, mask)
     for r in run:
         g, x1_w = r.g, x1[:, r.start:r.end]
         keep = r.alive[:, None].expand(-1, g.shape[1], -1)
@@ -388,13 +359,8 @@ def regress_loss(
             loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, pairs_w)
         if group_weight:
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups(r.start, r.end), r.alive)
-        if state_weight:
-            st = state_true[:, r.start:r.end] * _state_scale(r.end - r.start, x1.device)
-            ok = state_ok[:, r.start:r.end] & keep
-            loss = loss + w[r.i] * state_weight * (_error(r.state[..., :3], st[..., :3], ok, weight_w)
-                                                   + _error(r.state[..., 3:], st[..., 3:], ok, weight_w))
         if down_weight and down_scored.any():
-            off = 1 - F.cosine_similarity(r.down, down_true.float(), dim=-1)
+            off = _angle(r.down, down_true.float())
             loss = loss + w[r.i] * down_weight * (off * down_scored).sum() / down_scored.sum()
         loss = share * loss
         vis_loss = x1.new_zeros(())
