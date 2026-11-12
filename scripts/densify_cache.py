@@ -46,6 +46,8 @@ def densify(job) -> str:
     clip.anchor = traj[0].clone()
     clip.visibility = torch.from_numpy(sample.visibility).bool()[:, keep]
     clip.query_uv = torch.from_numpy(sample.coords_2d[0]).float()[keep]
+    # Every track kept is seen in frame 0 and asked there.
+    clip.query_t = torch.zeros(int(keep.sum()), dtype=torch.long)
     T, P, D = clip.context.shape
     g = int(round(P ** 0.5))
     feat0 = clip.context[:1].float().transpose(1, 2).reshape(1, D, g, g)
