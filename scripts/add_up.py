@@ -6,6 +6,7 @@ cameras, as `genpoint3d/prepare/transform.py` now computes it on caching.
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,10 +22,14 @@ args = p.parse_args()
 done = 0
 for f in sorted(Path(args.cache).glob("*.pt")):
     d = torch.load(f, weights_only=False)
+    if d.get("up") is not None:
+        continue
     seq = d["seq_id"]
     raw = np.load(Path(args.raw) / seq / f"{seq}.npy", allow_pickle=True).item()
     E = np.einsum("ij,tjk->tik", _AXIS_FLIP, np.linalg.inv(raw["matrix_world"]).astype(np.float32))
     d["up"] = up_in_frame0(torch.from_numpy(E))
-    torch.save(d, f)
+    # Written beside and moved over, so a reader never meets half a file.
+    torch.save(d, f.with_suffix(".tmp"))
+    os.replace(f.with_suffix(".tmp"), f)
     done += 1
 print(f"{done} clips in {args.cache} given their up")
