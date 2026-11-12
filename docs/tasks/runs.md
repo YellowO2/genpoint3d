@@ -97,6 +97,27 @@ From 5 Nov runs are named by what they are. The earlier ones, as they are referr
 Standard scoring (100 clips, all 256 points, like run33's 0.878 / 0.928): fyJ at step 1,500
 val 0.871 / train 0.876; moving hidden val 0.316 (run33 0.283; last seen 0.188, last speed 0.267).
 
+## More visible points for the fit (13 Nov, scripts/new_points_check.py, 6334377)
+
+clip_units_gravity_fit_loss_3k's step-500 weights, the standard test's clips
+from the dense cache: the 256 scored points tracked alone; in a pass of their
+own, the clip's next points (median 247) given as new points in frame 8 where
+seen. The scored points' hidden moving point-frames from frame 8, placed by a
+robust fit of the seen points of their true piece (truth for seen), APD:
+
+| mates | all | 10+ old seen | none old seen |
+|---|---|---|---|
+| none (own guess) | 0.540 | 0.564 | 0.138 |
+| old points | 0.664 | 0.698 | - |
+| new points | 0.594 | 0.603 | 0.312 |
+| both | 0.613 | 0.625 | 0.312 |
+
+Where every old point of the piece is hidden (it turned or moved away from
+them), new points more than double the placement; where old ones are seen,
+they are better (carried from their exact query, the new ones carry the old
+point from where it was guessed at frame 8). Spawning gives the fit points
+where it had none: in long_physics_spawn.
+
 ## Training faster (13 Nov)
 
 Two clips a step (`--batch 2`) fails before any memory limit: clips of
