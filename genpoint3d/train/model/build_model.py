@@ -13,5 +13,4 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     group_feedback=a("group_feedback", 0),
                     feedback_scale=a("feedback_scale", 1.0),
                     rope_current=bool(a("rope_current", 0)),
-                    rigid_proposal=bool(a("rigid_proposal", 0)),
-                    template=a("template", "query"))
+                    rigid_proposal=bool(a("rigid_proposal", 0)))

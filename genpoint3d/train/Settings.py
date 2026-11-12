@@ -53,9 +53,6 @@ class Settings(argparse.Namespace):
                        help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
-        p.add_argument("--template", default="query", choices=["query", "latest"],
-                       help="what the matcher compares each window against: the point's look in its query "
-                            "frame, or its latest clear look settled by the window before")
         p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],
                        help="each point told where moving with its piece would put it (needs --group-feedback)")
         p.add_argument("--feedback-scale", type=float, default=10.0,

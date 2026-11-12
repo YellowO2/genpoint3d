@@ -15,7 +15,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - The fit's backing from its leftover error over the mates, not their weight, so a wrong fit says so.
 - Two group outputs: an object vector on object labels, a rigid vector on motion.
 - SAM 3 masks as an appearance input for real video, trained on its masks of our clips (EntitySAM lost to our groups on Kubric).
-- Matcher template from the latest clear look (or a memory the model updates) instead of frame 0: visible drift follows turning.
+- New points where the surface is seen now, their look exact by construction, and old turned points following them through the rigid fit: a fresh look at the true position lifts late moving points 0.666 to 0.775 (template_check), so exact fresh looks are worth it; needs the groups fixed.
 - Spawn rule: new points where new surface appears.
 - Whole-frame comparison, removed in a cleanup: needed eventually?
 - More data: PointOdyssey or SynthVerse.
@@ -25,6 +25,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 
 ## Ruled out
 
+- A point's own template refreshed to its latest clear look at its guessed position (`--template latest`): standard moving 0.729 against 0.768 at step 500; the guess's error becomes the target (0.543 late, against 0.775 with the true position).
 - More forward rounds before the backward sweeps (ffffbb): rounds 3 and 4 moved the error only 1.07 to 0.92 px (fyO, by round), and ffbb already gives each window 4 rounds; turning, 3-4 times the error, is the bigger target.
 - DINOv3 (77%) and EntitySAM (74%) groups: worse than the model's own (89%) on Kubric.
 - The matcher on the fixed 9 m ruler (fzR): Kubric lost 0.017 against the clip's own spread.
