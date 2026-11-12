@@ -32,7 +32,7 @@ def batch():
     anchor = torch.randn(B, N, 3) * 0.2 + torch.tensor([0, 0, 3.0])
     return {
         "traj": traj, "anchor": anchor, "visibility": torch.rand(B, T, N) > 0.3,
-        "query_t": torch.tensor([[0, 0, 0, 2, 5, 9]]),
+        "query_t": torch.tensor([[0, 0, 0, 2, 5, 9]]), "gravity": torch.tensor([[0.0, 1.0, 0.0]]),
         "context": torch.randn(B, T, P, F).half(), "id_card": torch.randn(B, N, F).half(),
         "patch_xyz": torch.randn(B, T, P, 3) * 0.3 + torch.tensor([0, 0, 3.0]),
         "frames": torch.randint(0, 255, (B, T, R, R, 3), dtype=torch.uint8),

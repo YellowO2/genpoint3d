@@ -11,7 +11,11 @@ from torch.utils.data import Dataset
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import sample_at
 from genpoint3d.NormStats import NormStats
-from genpoint3d.tools.traj_scale import RADIUS, REACH, SCENE_SCALE, TRAJ_SCALE_DISP
+from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH_SPREAD, RADIUS, REACH, SCENE_SCALE,
+                                         TRAJ_SCALE_DISP)
+from genpoint3d.train.model.FineFinder import frame_spread
+from genpoint3d.train.tools.batch import _cell_xyz
+from genpoint3d.train.tools.camera import image_projection
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
 # Each clip's depth beside its frames, as `scripts/cache_frames.py` writes it.
@@ -48,9 +52,22 @@ class ClipDataset(Dataset):
 
         if self.level:
             clip = _levelled(clip)
-        # Positions, anchors and patches in the one ruler; only the target is
-        # then divided by traj_scale. Patches beyond RADIUS held at it.
-        n = NormStats(torch.zeros(3), torch.tensor(SCENE_SCALE), torch.tensor(1.0))
+        # Empty tensors rather than None, for the default collate.
+        frames = depth = torch.zeros(0)
+        if frames_dir is not None:
+            frames = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}.npy"))
+            if frames.shape[0] != clip.traj.shape[0]:
+                raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
+                                 f"for a {clip.traj.shape[0]}-frame track")
+            depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
+        # Positions, anchors and patches in the clip's own unit; only the target
+        # is then divided by traj_scale. Patches beyond RADIUS held at it.
+        # Without the depth (scoring others' tracks), a typical clip's unit.
+        unit = _clip_unit(depth, clip) if depth.numel() else torch.tensor(SCENE_SCALE)
+        n = NormStats(torch.zeros(3), unit, torch.tensor(1.0))
+        # Down, as strong as gravity is in this clip's unit; a typical clip's 1.
+        gravity = (torch.zeros(3) if clip.up is None
+                   else -clip.up.float() / clip.up.float().norm() * (GRAVITY / KUBRIC_FPS ** 2 / unit / GRAVITY_REF))
         traj, anchor = n.apply(clip.traj), n.apply(clip.anchor)
         pxyz = None
         if clip.patch_xyz is not None:
@@ -95,19 +112,13 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
-        # Empty tensors rather than None, for the default collate; features
-        # stay fp16 until `to_device`.
+        # Features stay fp16 until `to_device`.
         ctx = clip.context
-        frames = depth = torch.zeros(0)
-        if frames_dir is not None:
-            frames = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}.npy"))
-            if frames.shape[0] != traj.shape[0]:
-                raise ValueError(f"clip {clip.seq_id}: {frames.shape[0]} cached frames "
-                                 f"for a {traj.shape[0]}-frame track")
-            depth = torch.from_numpy(np.load(frames_dir / f"{clip.seq_id}{DEPTH}"))
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t, "segment": segment,
+            # (3,) down, in the clip's unit per frame squared over a typical clip's.
+            "gravity": gravity,
             "context": ctx if ctx is not None else torch.zeros(0),
             "id_card": id_card if id_card is not None else torch.zeros(0),
             "patch_xyz": pxyz if pxyz is not None else torch.zeros(0),
@@ -145,6 +156,17 @@ class ClipDataset(Dataset):
             if got != (size, size):
                 raise SystemExit(f"{kind} in {d} are {got[0]}x{got[1]}, --fine-res {res} needs {size}x{size}")
         return d
+
+
+def _clip_unit(depth: torch.Tensor, clip: CachedClip) -> torch.Tensor:
+    """() metres per model unit for `clip`: its frame-0 cells' spread, as the
+    matcher measures it (`FineFinder.frame_spread`), over MATCH_SPREAD, so
+    that spread is MATCH_SPREAD in every clip's unit and a typical clip's
+    unit is about SCENE_SCALE."""
+    proj = image_projection(clip.intrinsics[None, :1], clip.extrinsics[None, :1], torch.tensor(clip.hw)[None],
+                            torch.ones(1), torch.zeros(1, 3))                  # metres
+    first = _cell_xyz(depth[None, :1].float(), proj)[:, 0]                   # (1, 3, h, w)
+    return frame_spread(first)[1][0] / MATCH_SPREAD
 
 
 def _near(clip: CachedClip) -> CachedClip:

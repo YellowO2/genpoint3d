@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.tools.traj_scale import TRAJ_SCALE_DISP
-from genpoint3d.train.model.FineFinder import MATCH_SPREAD, FineFinder, _posenc, frame_spread
+from genpoint3d.train.model.FineFinder import FineFinder, _posenc
 from genpoint3d.train.model.tools.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
 )
@@ -77,9 +77,8 @@ class PointDiT(nn.Module):
 
         self.fine = FineFinder(neigh=fine_neigh)
         self.fine_cond = zero_init(nn.Linear(self.fine.out_dim, dim), almost=False)
-        # The clip's frame-0 spread, the matcher's ruler, against a typical
-        # one: the matcher's offsets are in it, the model's outputs are not.
-        self.spread_in = zero_init(nn.Linear(1, dim, bias=False), almost=False)
+        # Gravity in the clip's own unit: which way is down and how strong.
+        self.gravity_in = zero_init(nn.Linear(3, dim, bias=False), almost=False)
         self.fine_tok = zero_init(nn.Linear(self.fine.out_dim, dim, bias=False), almost=False)
 
         # One logit per (point, frame): can the point be seen there? What it
@@ -130,6 +129,7 @@ class PointDiT(nn.Module):
         fine_proj: torch.Tensor,
         fine_xyz: torch.Tensor,
         query_t: torch.Tensor,
+        gravity: torch.Tensor,
         visual_mask: torch.Tensor | None = None,
         alive: torch.Tensor | None = None,
         vis_prev: torch.Tensor | None = None,
@@ -150,6 +150,7 @@ class PointDiT(nn.Module):
         fine_proj    (B, Tc, 3, 4)   anchor's space -> the image, per frame
         fine_xyz     (B, Tc, 3, h, w) each CNN cell's 3D position
         query_t      (B, N) long     each point's query frame in the clip
+        gravity      (B, 3)          down, in the clip's unit per frame squared, a typical clip's 1
         visual_mask  (B, Tc, 2, 2) bool, which quarters of each frame are seen:
                      a frame with any quarter hidden has no DINOv3, and the
                      matcher reads only its seen cells (`frames` blacked out)
@@ -221,10 +222,7 @@ class PointDiT(nn.Module):
         cond = self.time_emb(k[:, None, None].expand(B, T, 1))[:, :, None] + self.anchor_emb(anchor)[:, None]
         cond = cond + self.id_feature_proj(id_card)[:, None]
         cond = cond + self.fine_cond(fine).to(cond.dtype)
-        with torch.autocast(device_type=dev.type, enabled=False):
-            # The clip's size against a typical one: the matcher's unit in ours.
-            size = (frame_spread(clip_xyz[:, 0])[1] / MATCH_SPREAD)[:, None, None, None]
-        cond = cond + self.spread_in(torch.log(size).to(cond.dtype))
+        cond = cond + self.gravity_in(gravity.to(cond.dtype))[:, None, None]
         cond = self.cond_mlp(cond)                                    # (B, T, N, C)
 
         context = self.frame_proj(context)
@@ -304,9 +302,7 @@ class PointDiT(nn.Module):
                   if self.visibility else None)
         # One group vector per point for the window.
         groups = self.group_out(h).float().mean(1) if self.group_feedback else None
-        # The correction is made in the matcher's unit, the clip's own size,
-        # and turned into ours by that size: the same at any scale.
-        return self.place(h) * size.to(h.dtype), logits, groups
+        return self.place(h), logits, groups
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):

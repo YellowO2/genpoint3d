@@ -149,7 +149,7 @@ def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
         fmap = model.fine.encode(b["frames"])
     proj = image_projection(b["intrinsics"], b["extrinsics"], b["hw"], b["norm_scale"], b["norm_mean"])
     return {"fine_map": fmap.requires_grad_(grad), "fine_proj": proj,
-            "fine_xyz": _cell_xyz(b["depth"].float(), proj), "query_t": b["query_t"]}
+            "fine_xyz": _cell_xyz(b["depth"].float(), proj), "query_t": b["query_t"], "gravity": b["gravity"]}
 
 
 def _cell_xyz(depth: torch.Tensor, proj: torch.Tensor) -> torch.Tensor:

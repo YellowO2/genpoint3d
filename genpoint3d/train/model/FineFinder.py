@@ -19,11 +19,6 @@ from torch.utils.checkpoint import checkpoint
 
 from genpoint3d.train.model.BasicEncoder import STRIDE, BasicEncoder
 
-# A typical Kubric frame's spread of cell positions in model units (the
-# median over clips is 0.37 on our clips, 0.33 on the old Kubric): where a
-# clip's own spread is told to the model from (`frame_spread`).
-MATCH_SPREAD = 0.35
-
 
 def frame_spread(first: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(b, 3, h, w) the clip's frame-0 cell positions -> their mean (b, 3) and

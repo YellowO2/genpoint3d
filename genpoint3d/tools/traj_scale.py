@@ -1,11 +1,22 @@
 """The constants that set the units the model sees."""
 
-# One ruler for every clip, in metres per unit: positions are divided by it,
-# never by anything a clip's own frames say, so nothing of a forecast frame
-# leaks into the units, and gravity is one number everywhere. Kubric's typical
-# scene distance (the median per clip is 8.9 m on our clips, 9.3 m on the old
-# Kubric, 2.5-12 m across), so a typical scene keeps the sizes the model knows.
+# A typical clip's unit, in metres: Kubric's typical scene distance (the
+# median per clip is 8.9 m on our clips, 9.3 m on the old Kubric), the sizes
+# the model knows. Each clip's own unit scales it by the clip's frame-0
+# spread against a typical one (MATCH_SPREAD; `ClipDataset._clip_unit`), from
+# frame 0 alone so nothing of a forecast frame leaks into it: a 3 m scene and
+# a street look the size the model knows, and tracking is the same at any scale.
 SCENE_SCALE = 9.0
+# A typical Kubric frame's spread of cell positions in model units (the median
+# over clips is 0.37 on our clips, 0.33 on the old Kubric): each clip's own
+# frame-0 spread is this in its unit, and the matcher brings it to 1.
+MATCH_SPREAD = 0.35
+# Gravity, which a clip's own unit does not keep one number: told to the
+# model per clip, down, in the clip's unit per frame squared, over a typical
+# clip's, so a typical clip's is 1.
+GRAVITY = 9.81            # m / s^2
+KUBRIC_FPS = 12           # every Kubric clip we train on (MOVi's 24 frames in 2 s)
+GRAVITY_REF = GRAVITY / KUBRIC_FPS ** 2 / SCENE_SCALE
 # Inputs further than this from the camera (metres) are held at it: beyond
 # Kubric's background (tracked points to 51 m), so it cuts only real video's sky.
 RADIUS = 60.0
