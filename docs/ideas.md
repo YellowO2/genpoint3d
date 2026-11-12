@@ -5,10 +5,8 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 
 ## Later
 
-- Which way is down as an output: an angle loss against Kubric's up, its estimate used where a clip's up is unknown; watch its angle error.
 - Camera roll in our renders, so finding down is real work: only if the down output's angle error is poor on rolled real video (ADT).
 - Real video's frame rate in the gravity strength (fixed at Kubric's 12 fps now), and frame-rate variety in training.
-- Motion state as an output: each point's velocity and acceleration per frame, trained on the true tracks' differences, fed back each round.
 - Two corrections: tracking in the clip's unit, physics in real units.
 - Noisy-depth training with a random global depth-scale error, so gravity can correct the scale.
 - Rigid proposal through the fit: not detached, a loss on the proposal's own positions, so the groups learn what the fit needs (grouping plan item 2).
