@@ -25,6 +25,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 
 ## Ruled out
 
+- More forward rounds before the backward sweeps (ffffbb): rounds 3 and 4 moved the error only 1.07 to 0.92 px (fyO, by round), and ffbb already gives each window 4 rounds; turning, 3-4 times the error, is the bigger target.
 - DINOv3 (77%) and EntitySAM (74%) groups: worse than the model's own (89%) on Kubric.
 - The matcher on the fixed 9 m ruler (fzR): Kubric lost 0.017 against the clip's own spread.
 - Caching cross-attention keys and values: 9.4% slower, memory-bound (flow-matching design, 2026-09).
