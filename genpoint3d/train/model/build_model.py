@@ -14,5 +14,4 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     feedback_scale=a("feedback_scale", 1.0),
                     rope_current=bool(a("rope_current", 0)),
                     rigid_proposal=bool(a("rigid_proposal", 0)),
-                    motion_check=bool(a("motion_check", 0)),
                     fit_left=bool(a("fit_left", 0)))

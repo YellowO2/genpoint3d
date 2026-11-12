@@ -55,9 +55,6 @@ class Settings(argparse.Namespace):
                        help="the attention between points encodes each point's current guess")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
-        p.add_argument("--motion-check", type=int, default=0, choices=[0, 1],
-                       help="attention between points biased by how much each pair's distance changed over the "
-                            "window's frames both are believed seen")
         p.add_argument("--fit-left", type=int, default=0, choices=[0, 1],
                        help="the rigid proposal also tells how far the mates sit from the fit, so a wrong fit says so")
         p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],

@@ -11,7 +11,6 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - Physics per group, not per point, as a rigid-body engine has it: each group's centre velocity and acceleration and its spin about the centre, carried forward in frames without an image, every point following through the rigid fit (FIGNet keeps objects rigid by fitting one turn and centre per object, "shape matching"; GNS's per-particle acceleration suits sand and fluids). A per-point velocity and acceleration head was the wrong form (runs.md). Needs the groups right.
 - Noisy-depth training with a random global depth-scale error, so gravity can correct the scale.
 - Rigid proposal through the fit: not detached, a loss on the proposal's own positions, so the groups learn what the fit needs (grouping plan item 2).
-- Pairwise motion check as a group input: how much each pair's distance changed over the frames both are seen.
 - Two group outputs: an object vector on object labels, a rigid vector on motion.
 - SAM 3 masks as an appearance input for real video, trained on its masks of our clips (EntitySAM lost to our groups on Kubric).
 - New points where new surface appears (the spawn rule), trained with many late points: given at test time to a model that rarely saw them, exact new points made the old ones worse (0.653 to 0.624) and a rigid fit from them gained nothing (runs.md, 12 Nov).
@@ -23,6 +22,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 
 ## Ruled out
 
+- A pairwise motion check as an attention bias between points (how much each pair's distance changed): no better groups or fit at step 500 (runs.md, 13 Nov).
 - A point's own template refreshed to its latest clear look at its guessed position (`--template latest`): standard moving 0.729 against 0.768 at step 500; the guess's error becomes the target (0.543 late, against 0.775 with the true position).
 - More forward rounds before the backward sweeps (ffffbb): rounds 3 and 4 moved the error only 1.07 to 0.92 px (fyO, by round), and ffbb already gives each window 4 rounds; turning, 3-4 times the error, is the bigger target.
 - DINOv3 (77%) and EntitySAM (74%) groups: worse than the model's own (89%) on Kubric.

@@ -41,7 +41,6 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         rope_current: bool = False,
         rigid_proposal: bool = False,
-        motion_check: bool = False,
         fit_left: bool = False,
     ) -> None:
         super().__init__()
@@ -114,13 +113,6 @@ class PointDiT(nn.Module):
         if rigid_proposal and not group_feedback:
             raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
         self.rigid_proposal = rigid_proposal
-        # How much each pair's distance changed over the window's frames both
-        # are believed seen, as a share of that distance: near 0 for two
-        # points on one rigid piece. An attention bias between points, per
-        # block and head, from zero.
-        self.motion_check = motion_check
-        if motion_check:
-            self.motion_bias = nn.Parameter(torch.zeros(depth, num_heads))
         if rigid_proposal:
             # With `fit_left`, also how far the mates sit from the fit.
             self.fit_left = fit_left
@@ -296,18 +288,6 @@ class PointDiT(nn.Module):
             a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
             biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
                       for d in range(self.depth)]
-        if self.motion_check:
-            with torch.autocast(device_type=dev.type, enabled=False):
-                both = (torch.sigmoid(vis_prev.float()) if vis_prev is not None
-                        else torch.ones(B, T, N, device=dev))
-                both = both[..., :, None] * both[..., None, :]                         # (B, T, N, N)
-                d = torch.cdist(pos, pos)                                               # (B, T, N, N)
-                n = both.sum(1).clamp_min(1e-6)
-                mean = (both * d).sum(1) / n
-                change = ((both * (d - mean[:, None]).pow(2)).sum(1) / n).sqrt() / mean.clamp_min(1e-2)
-            c = change[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
-            mb = [(c * self.feedback_scale * self.motion_bias[d][:, None, None]).to(h.dtype) for d in range(self.depth)]
-            biases = [m if b is None else b + m for b, m in zip(biases, mb)]
         if alive is not None:
             # Points not in this window are read by no point.
             gone = ((~alive).to(h.dtype) * -1e4)[:, None, None, None, :]           # (B, 1, 1, 1, N)
