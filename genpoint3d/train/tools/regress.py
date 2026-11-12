@@ -151,7 +151,9 @@ def _kabsch(pos, q, anchor, groups, member, seen, start, end, mates):
     V, Ut = Vh.transpose(-1, -2), U.transpose(-1, -2)
     flip = torch.ones(*H.shape[:-1], device=pos.device)
     flip[..., 2] = torch.linalg.det(V @ Ut).sign()
-    R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=pos.device))
+    # The turn carries no gradient (an SVD's is unstable where mates lie nearly
+    # in a line); the weights reach the fit through its centres.
+    R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=pos.device)).detach()
     prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
     off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
     return torch.cat([off, (s / (s + 1))[..., None]], -1)
@@ -325,6 +327,7 @@ def regress_loss(
     down_true: Optional[torch.Tensor] = None,
     down_scored: Optional[torch.Tensor] = None,
     down_weight: float = 0.0,
+    fit_weight: float = 0.0,
     window: int = 0,
     overlap: int = 0,
     schedule: str = "",
@@ -337,7 +340,10 @@ def regress_loss(
     vectors' error against `groups(start, end)`, the pairs to put together in
     the window's frames (what the window can see and its rigid fit needs),
     which way is down (the angle, radians) against `down_true` (B, 3) on the
-    clips `down_scored` (B,), those not told it, and the visibility head's against
+    clips `down_scored` (B,), those not told it, the rigid fit's own positions
+    from the group vectors the round said (`rigid_proposal`, the guess fixed)
+    against the truth, so the groups learn what the fit needs, and the
+    visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
     at once (one round in memory) and the loss comes back detached. The dict
     also holds the tracks and visibility logits, as `refine` gives them, each
@@ -359,6 +365,12 @@ def regress_loss(
             loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, pairs_w)
         if group_weight:
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups(r.start, r.end), r.alive)
+        if fit_weight and r.groups is not None:
+            clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
+            fit = rigid_proposal(clip, cond["query_t"], anchor, r.groups, run.seen & run.known,
+                                 torch.sigmoid(run.vis), r.start, r.end)
+            placed = g.detach() + fit[..., :3] / model.traj_scale
+            loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if down_weight and down_scored.any():
             off = _angle(r.down, down_true.float())
             loss = loss + w[r.i] * down_weight * (off * down_scored).sum() / down_scored.sum()
