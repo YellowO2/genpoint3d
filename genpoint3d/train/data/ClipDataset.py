@@ -31,12 +31,16 @@ class ClipDataset(Dataset):
     (RGB and depth per clip), or one per cache directory; None serves neither. `query_before` C keeps only points first seen
     before frame C: a forecast from C is scored on points it was handed. Only
     points within REACH of the camera in their query frame are served (`_near`).
+    With `spawn`, up to that many of the points start where new surface comes
+    into view (`_spawned`).
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
-                 frames: Path | dict[Path, Path] | None = None, query_before: int = 0):
+                 frames: Path | dict[Path, Path] | None = None, query_before: int = 0,
+                 spawn: int = 0, spawn_gap: float = 0.05):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         self.frames, self.query_before = frames, query_before
+        self.spawn, self.spawn_gap = spawn, spawn_gap
         self.traj_scale = TRAJ_SCALE_DISP
 
     def __len__(self) -> int:
@@ -48,6 +52,8 @@ class ClipDataset(Dataset):
         if isinstance(c, Path):
             c = torch.load(c, weights_only=False)
         clip = _near(c if isinstance(c, CachedClip) else CachedClip.from_dict(c))
+        if self.spawn:
+            clip = _spawned(clip, self.num_points, self.spawn, self.spawn_gap)
 
         # Empty tensors rather than None, for the default collate.
         frames = depth = torch.zeros(0)
@@ -169,6 +175,72 @@ def _clip_unit(depth: torch.Tensor, clip: CachedClip) -> torch.Tensor:
     return frame_spread(first)[1][0] / MATCH_SPREAD
 
 
+def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float) -> CachedClip:
+    """`num_points` of the clip's points, up to `cap` of them started where new
+    surface comes into view, as a tracker on real video would add them: frame
+    by frame, a point of the clip that comes into view there (hidden in the
+    frame before: surface turning towards the camera, out from behind
+    something, into the frame) farther than `gap` (a share of the frame's
+    width) from every point already tracked and seen there starts in that
+    frame, the farthest first, its track's place there its query. The
+    rest are drawn as given, at random. The clip's own tracks stand in for the
+    new points, so their truth is known."""
+    T, N = clip.visibility.shape
+    if N <= num_points - cap:
+        return clip
+    vis = clip.visibility.bool()
+    q = torch.zeros(N, dtype=torch.long) if clip.query_t is None else clip.query_t.long()
+    P = torch.cat([clip.traj.float(), torch.ones(T, N, 1)], -1)
+    pix = torch.einsum("tij,tnj->tni", clip.intrinsics.float(),
+                       torch.einsum("tij,tnj->tni", clip.extrinsics.float()[:, :3, :], P))
+    uv = pix[..., :2] / pix[..., 2:].clamp_min(1e-6)                                   # (T, N, 2) pixels
+    perm = torch.randperm(N)
+    tracked = torch.zeros(N, dtype=torch.bool)
+    tracked[perm[: num_points - cap]] = True
+    start = q.clone()
+    born = []
+    far = gap * clip.hw[1]
+    for t in range(1, T):
+        if len(born) >= cap:
+            break
+        live = tracked & vis[t] & (start <= t)
+        cand = torch.nonzero(~tracked & vis[t] & ~vis[t - 1])[:, 0]
+        if not len(cand):
+            continue
+        d = (torch.cdist(uv[t, cand], uv[t, live]).min(1).values if live.any()
+             else torch.full((len(cand),), float("inf")))
+        while len(born) < cap:
+            j = int(d.argmax())
+            if d[j] <= far:
+                break
+            k = int(cand[j])
+            tracked[k], start[k] = True, t
+            born.append(k)
+            d = torch.minimum(d, (uv[t, cand] - uv[t, k]).norm(dim=-1))
+    # The budget the new points left, filled with more points as given.
+    fill = perm[~tracked[perm]][: num_points - int(tracked.sum())]
+    tracked[fill] = True
+    keep = torch.nonzero(tracked)[:, 0]
+    if not born:
+        return _points(clip, keep)
+    b = torch.tensor(born)
+    n = torch.arange(N)
+    anchor, query_uv = clip.anchor.clone(), clip.query_uv.clone()
+    anchor[b] = clip.traj[start[b], n[b]].to(anchor.dtype)
+    query_uv[b] = uv[start[b], n[b]].to(query_uv.dtype)
+    return _points(dataclasses.replace(clip, anchor=anchor, query_uv=query_uv, query_t=start), keep)
+
+
+def _points(clip: CachedClip, keep: torch.Tensor) -> CachedClip:
+    """The clip with only the points `keep`."""
+    per_point = dict(traj=clip.traj[:, keep], anchor=clip.anchor[keep], visibility=clip.visibility[:, keep],
+                     query_uv=clip.query_uv[keep])
+    for k in ("query_t", "id_card", "segment"):
+        if getattr(clip, k) is not None:
+            per_point[k] = getattr(clip, k)[keep]
+    return dataclasses.replace(clip, **per_point)
+
+
 def _near(clip: CachedClip) -> CachedClip:
     """The clip with only the points within REACH of the camera in their query
     frame: not Kubric's sky, a dome 40 m out."""
@@ -178,9 +250,4 @@ def _near(clip: CachedClip) -> CachedClip:
     keep = (clip.extrinsics[q].float() @ p[..., None])[:, :3, 0].norm(dim=-1) <= REACH
     if keep.all():
         return clip
-    per_point = dict(traj=clip.traj[:, keep], anchor=clip.anchor[keep], visibility=clip.visibility[:, keep],
-                     query_uv=clip.query_uv[keep])
-    for k in ("query_t", "id_card", "segment"):
-        if getattr(clip, k) is not None:
-            per_point[k] = getattr(clip, k)[keep]
-    return dataclasses.replace(clip, **per_point)
+    return _points(clip, keep)

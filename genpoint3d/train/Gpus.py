@@ -54,6 +54,14 @@ class Gpus:
         if hi != lo:
             raise RuntimeError(f"the GPUs' weights differ: checksums {lo.item()} to {hi.item()}")
 
+    def gather(self, obj):
+        """Every process's `obj`, in rank order, on every process."""
+        if self.world == 1:
+            return [obj]
+        out = [None] * self.world
+        dist.all_gather_object(out, obj)
+        return out
+
     def wait(self) -> None:
         """Every process here before any goes on (around rank 0's validation)."""
         if self.world > 1:

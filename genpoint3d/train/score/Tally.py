@@ -35,6 +35,14 @@ class Tally:
         self.loss_sum += prediction.loss * n
         self.loss_n += n
 
+    def merge(self, others: list["Tally"]) -> None:
+        """Take in the clips other processes scored."""
+        for o in others:
+            self.loss_sum += o.loss_sum
+            self.loss_n += o.loss_n
+            for k, v in o.vals.items():
+                self.vals.setdefault(k, []).extend(v)
+
     def add(self, values: dict) -> None:
         for k, v in values.items():
             self.vals.setdefault(k, []).append(v.float().cpu())

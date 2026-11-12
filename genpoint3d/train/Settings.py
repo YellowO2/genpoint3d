@@ -30,6 +30,12 @@ class Settings(argparse.Namespace):
         p.add_argument("--batch", type=int, default=1)
         p.add_argument("--accum", type=int, default=1, help="micro-batches per optimiser step")
         p.add_argument("--points", type=int, default=500, help="points drawn per clip")
+        p.add_argument("--spawn", type=int, default=0, metavar="M",
+                       help="up to M of each training clip's points start where new surface comes into view, frame "
+                            "by frame, the clip's other tracks standing in for them (0: none)")
+        p.add_argument("--spawn-gap", type=float, default=0.05,
+                       help="a new point starts only this far (a share of the frame's width) from every point "
+                            "tracked and seen there")
         p.add_argument("--val-frac", type=float, default=0.1)
         p.add_argument("--val-every", type=int, default=500)
         p.add_argument("--resume", default=None, metavar="RESUME_PT",

@@ -33,7 +33,7 @@ def train(settings: Settings, gpus: Gpus):
     saver = Saver(settings)
     clips = split_clips(settings.cache, settings.val_frac, settings.seed, settings.mix)
     clips = apply_run_settings(clips, settings, hardware)
-    loaders = Loaders(clips, settings)
+    loaders = Loaders(clips, settings, gpus.rank, gpus.world)
     model = build_model(settings, clips.feat_dim)
     model = set_up_model(model, settings, hardware)
     gpus.same_start(model)
@@ -57,21 +57,17 @@ def train(settings: Settings, gpus: Gpus):
         running_loss.step(step, optimiser.lr(), norm)
         if step % settings.save_every == 0:
             gpus.check_same(model)
-        if (step % settings.val_every == 0 or step == settings.steps) and not gpus.lead:
-            gpus.wait()
-        elif step % settings.val_every == 0 or step == settings.steps:
+        if step % settings.val_every == 0 or step == settings.steps:
+            # Every process scores its share; rank 0 logs and saves.
             optimiser.swap_in_average(model)
             interval = running_loss.interval(step)
-            loader, split = loaders.val, "val"
-            scores = score(model, loader, judging, split)
-            fit_scores = None
-            if loaders.fit is not None:
-                loader, split = loaders.fit, "train"
-                fit_scores = score(model, loader, judging, split)
-            report = merge_scores(interval, scores, fit_scores)
-            saver.save(report, model, clips)
+            scores = score(model, loaders.val, judging, "val", gpus)
+            fit_scores = score(model, loaders.fit, judging, "train", gpus) if loaders.fit is not None else None
+            if gpus.lead:
+                saver.save(merge_scores(interval, scores, fit_scores), model, clips)
             optimiser.swap_out_average(model)
-            saver.keep_resume(step, optimiser.state(model))
+            if gpus.lead:
+                saver.keep_resume(step, optimiser.state(model))
             gpus.wait()
         elif step % settings.save_every == 0 and gpus.lead:
             optimiser.swap_in_average(model)
