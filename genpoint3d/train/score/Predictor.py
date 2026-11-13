@@ -4,7 +4,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.score.spawn_points import spawned
+from genpoint3d.train.score.spawn_points import spawn_all
 from genpoint3d.train.tools.batch import fine_inputs, to_device, visual_mask
 from genpoint3d.train.tools.regress import regress_loss
 
@@ -38,7 +38,8 @@ class Predictor:
         loss, out = self._track(b, fine, vm)
         if j.spawn:
             # Again with points added where none covers the frame; only the clip's own are scored.
-            more = spawned(model, b, fine, out["tracks"], vm, j.spawn, j.spawn_gap)
+            more = spawn_all(model, b, fine, vm, j.spawn, j.spawn_gap,
+                             lambda bb: self._track(bb, {**fine, "query_t": bb["query_t"]}, vm)[1]["tracks"])
             _, out = self._track(more, {**fine, "query_t": more["query_t"]}, vm)
             N = traj.shape[2]
             out = {k: None if v is None else v[:, :N] if k == "groups" else v[:, :, :N] if k in ("tracks", "logits") else v

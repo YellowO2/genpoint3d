@@ -3,7 +3,9 @@ on real video adds them: training's spawning (`ClipDataset._spawned`) at test
 time, without the truth. One rule for every frame: a place on a surface that
 no point sits on gets one. As in training, where the scene's points come as
 given and only new surface is capped, the first frame's points are limited by
-the gap alone and the budget is for the frames after it."""
+the gap alone and the budget is for the frames after it. The first frame's
+points are tracked before the later ones are added, so every point already
+there covers where it really goes (`spawn_all`)."""
 
 import torch
 
@@ -13,18 +15,28 @@ from genpoint3d.train.data.ClipDataset import farthest_first
 from genpoint3d.train.tools.camera import project
 
 
+def spawn_all(model, b: dict, fine: dict, view: torch.Tensor, cap: int, gap: float, tracks_of) -> dict:
+    """`b` with points added in two rounds, each tracked before the next
+    (`tracks_of(clip)` gives a clip's tracks): the first frame's gaps, then up
+    to `cap` on new surface after it."""
+    b = spawned(model, b, fine, tracks_of(b), view, gap, None)
+    return spawned(model, b, fine, tracks_of(b), view, gap, cap)
+
+
 @torch.no_grad()
-def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor, cap: int, gap: float) -> dict:
-    """`b` (one clip) with points added after its own, up to `cap` after the
-    first frame: frame by frame, in each frame seen whole, the CNN cells no
-    point covers, the farthest first, each starting at its cell in that frame,
-    its look read there. A point covers a cell if it sits on that surface:
+def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor, gap: float, cap: int | None) -> dict:
+    """`b` (one clip) with points added after its own: in the first frame seen
+    whole if `cap` is None, else up to `cap` in the frames seen whole after
+    it, frame by frame. They go where no point covers the CNN cells, the
+    farthest first, each starting at its cell in that frame, its look read
+    there. A point covers a cell if it sits on that surface:
     within `gap` (a share of the frame's width) of it in the image and at its
     depth, seen or not, so a point turned to the far side of an object leaves
     the near side to new points while one merely believed hidden still covers
     its place. `tracks` is a first pass over `b`'s own points; a point added
-    earlier is carried by the motion of the own point nearest it in 3D. The
-    added points' truth is unknown: never visible, so never scored."""
+    earlier in the same round is carried by the motion of the own point
+    nearest it in 3D. The added points' truth is unknown: never visible, so
+    never scored."""
     if b["traj"].shape[0] != 1:
         raise ValueError("spawning scores one clip at a time (--batch 1)")
     T, N = tracks.shape[1:3]
@@ -40,10 +52,8 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
     cell_px = torch.stack([(u.flatten() + 0.125) / w * W, (v.flatten() + 0.125) / h * H], -1).float()
     far = gap * W
     born = []                                                       # (frame, cell, position, nearest own point)
-    first, later = True, 0                                          # the first seen frame yet to come; points added after it
-    for t in range(T):
-        if not whole[t]:
-            continue
+    seen = torch.nonzero(whole)[:, 0].tolist()
+    for t in (seen[:1] if cap is None else seen[1:]):
         own = torch.nonzero(exists[t])[:, 0]
         here = torch.cat([pos[t, own]] + [(p + pos[t, i] - pos[t0, i])[None] for t0, _, p, i in born])
         depth = b["depth"][0, t].flatten().float()
@@ -53,9 +63,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
         uv, z = project(here[None, None], proj[None, t:t + 1])
         on = (z[0, 0][None] - depth[cand, None]).abs() < 0.03 * depth[cand, None]          # (C, P) on that surface
         d = torch.cdist(cell_px[cand], uv[0, 0] * uv.new_tensor([W, H])).masked_fill(~on, float("inf")).min(1).values
-        picked = farthest_first(cell_px[cand], d, far, len(cand) if first else cap - later)
-        later += 0 if first else len(picked)
-        first = False
+        picked = farthest_first(cell_px[cand], d, far, len(cand) if cap is None else cap - len(born))
         for j in picked:
             p = xyz[t, cand[j]]
             i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])
