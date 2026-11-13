@@ -468,13 +468,16 @@ def _angle(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.atan2(sin, (a * b).sum(-1))
 
 
-def _group_error(emb: torch.Tensor, groups: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy of the affinity 2 sigmoid(-|v_i - v_j|^2) against the
-    pairs that truly move as one (B, N, N), the two kinds averaged apart."""
+def _group_error(emb: torch.Tensor, idx: torch.Tensor, same: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy of the affinity 2 sigmoid(-|v_i - v_j|^2) against whether
+    each point and its listed partners `idx` (B, N, m) truly move as one
+    (`same`), the two kinds averaged apart."""
     v = emb.float()
-    a = (2 * torch.sigmoid(-(v[:, :, None] - v[:, None]).pow(2).sum(-1))).clamp(1e-4, 1 - 1e-4)
-    off = ~torch.eye(emb.shape[1], dtype=torch.bool, device=emb.device) & alive[:, :, None] & alive[:, None, :]
-    pos, neg = groups & off, ~groups & off
+    B, N, m = idx.shape
+    vj = v.gather(1, idx.reshape(B, N * m, 1).expand(B, N * m, v.shape[-1])).view(B, N, m, -1)
+    a = (2 * torch.sigmoid(-(v[:, :, None] - vj).pow(2).sum(-1))).clamp(1e-4, 1 - 1e-4)
+    off = alive[:, :, None] & alive.gather(1, idx.flatten(1)).view(B, N, m)
+    pos, neg = same & off, ~same & off
     p = -(a.log() * pos).sum() / pos.sum().clamp_min(1)
     n = -((1 - a).log() * neg).sum() / neg.sum().clamp_min(1)
     return (p + n) / 2
@@ -493,7 +496,7 @@ def regress_loss(
     vel_weight: float = 0.0,
     pairs: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     rigid_weight: float = 0.0,
-    groups: Optional[Callable[[int, int], torch.Tensor]] = None,
+    groups: Optional[Callable[[int, int], tuple[torch.Tensor, torch.Tensor]]] = None,
     group_weight: float = 0.0,
     down_true: Optional[torch.Tensor] = None,
     down_scored: Optional[torch.Tensor] = None,
@@ -538,7 +541,7 @@ def regress_loss(
             ok_w = ok & r.alive[:, :, None] & r.alive.gather(1, idx.flatten(1)).view_as(idx)
             loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, idx, ok_w)
         if group_weight:
-            loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups(r.start, r.end), r.alive)
+            loss = loss + w[r.i] * group_weight * _group_error(r.groups, *groups(r.start, r.end), r.alive)
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
             fit = rigid_proposal(clip, cond["query_t"], anchor, r.groups, run.seen & run.known,

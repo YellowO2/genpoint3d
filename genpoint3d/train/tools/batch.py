@@ -103,6 +103,35 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     return scene * scale + b["norm_mean"][:, None, None, :]
 
 
+def group_pairs(b: dict, by_object: bool = True, tol: float = 0.02, frames: tuple[int, int] | None = None,
+                k: int = 20, far: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
+    """The pairs the group vectors are trained on, as `rigid_groups` labels
+    them but only for each point's `k` nearest points in the first of
+    `frames` (the truth's: where pieces meet, the pairs that are hard) and
+    `far` points drawn at random (mostly other pieces): (B, N, k + far) their
+    indices and (B, N, k + far) bool which are on its piece."""
+    p = to_metres(b["traj"], b)
+    if frames is not None:
+        p = p[:, frames[0]:frames[1]]
+    B, T, N, _ = p.shape
+    self_ = torch.arange(N, device=p.device)[None, :, None]
+    k = min(k, N - 1)
+    near = torch.cdist(p[:, 0], p[:, 0]).masked_fill(torch.eye(N, dtype=torch.bool, device=p.device), float("inf"))
+    idx = near.topk(k, dim=-1, largest=False).indices
+    if far:
+        rand = torch.randint(0, N - 1, (B, N, far), device=p.device)
+        idx = torch.cat([idx, rand + (rand >= self_).long()], -1)        # never the point itself
+    m = idx.shape[-1]
+    mate = p.gather(2, idx.reshape(B, 1, N * m, 1).expand(B, T, N * m, 3)).reshape(B, T, N, m, 3)
+    d = (mate - p[:, :, :, None]).norm(dim=-1)
+    same = (d - d[:, :1]).abs().amax(dim=1) < tol
+    if by_object and "segment" in b:
+        seg = b["segment"]
+        labelled = (seg >= 0).all(-1)
+        same = torch.where(labelled[:, None, None], seg[:, :, None] == seg.gather(1, idx.flatten(1)).view(B, N, m), same)
+    return idx, same
+
+
 def rigid_pairs(b: dict, k: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
     """Each point's partners for the rigidity loss: up to `k` of its nearest
     points in frame 0 (the truth's) on the same moving rigid piece
@@ -124,7 +153,8 @@ def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
     p = to_metres(b["traj"], b)
     if frames is not None:
         p = p[:, frames[0]:frames[1]]
-    d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)
+    B, T, N, _ = p.shape
+    d = torch.cdist(p.flatten(0, 1), p.flatten(0, 1)).view(B, T, N, N)
     groups = (d - d[:, :1]).abs().amax(dim=1) < tol
     if by_object and "segment" in b:
         seg = b["segment"]

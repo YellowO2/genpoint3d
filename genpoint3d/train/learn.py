@@ -5,7 +5,7 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, black_out, fine_inputs, hidden_weight, random_visual_mask, rigid_groups, rigid_pairs,
+    apd_weight, black_out, fine_inputs, group_pairs, hidden_weight, random_visual_mask, rigid_pairs,
     seen_at, to_device,
 )
 from genpoint3d.train.tools.camera import project
@@ -30,7 +30,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     if settings.group_loss:
         # Each window's pairs, judged on the frames it sees.
         by_object = settings.group_labels == "object"
-        extra.update(groups=lambda start, end: rigid_groups(b, by_object, frames=(start, end)),
+        extra.update(groups=lambda start, end: group_pairs(b, by_object, frames=(start, end)),
                      group_weight=settings.group_loss)
     # The CNN's map, shared by every backward pass of the step.
     fine = fine_inputs(model, b, amp, grad=True)
