@@ -42,6 +42,7 @@ def main() -> int:
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to first where surface has none")
+    p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
     p.add_argument("--train-spawn", type=int, default=0,
                    help="up to this many of the clip's tracks started where they come into view, as training draws them")
     args = p.parse_args()
@@ -51,7 +52,8 @@ def main() -> int:
     model, s = run.model, run.settings
     if not model.rigid_proposal:
         raise SystemExit("the run has no rigid proposal")
-    ds = run.dataset(args.cache, args.frames_cache, points=args.points, spawn=args.train_spawn)
+    ds = run.dataset(args.cache, args.frames_cache, points=args.points, query_before=args.query_before,
+                     spawn=args.train_spawn)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=4)
     amp = device.type == "cuda"
     print(f"{len(ds)} clips | step {run.step} of {args.ckpt}", flush=True)
