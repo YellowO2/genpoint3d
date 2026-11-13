@@ -5,7 +5,8 @@ validation clips from frame `--cutoff` on, from the true positions before it.
 Scored as validation scores the forecast (moving points, no rescale), beside
 the baselines from the same true past (held still, constant speed); plainly,
 and with each true piece kept rigid every step (shape matching). Each point is
-told which of its neighbours share its piece, by the truth here (the model's
+told which of its neighbours share its piece, by the truth here (the cache's
+objects, or where it has none the points whose distances stay put; the model's
 groups, 96% right, would tell it in the model). Our tracker's forecast, from
 its own past: 0.353 (stop 0.334, constant speed 0.332).
 
@@ -26,6 +27,7 @@ from genpoint3d.train.model.Stepper import Stepper, shape_match
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.track_scores import track_scores
+from genpoint3d.train.tools.batch import rigid_groups
 from genpoint3d.train.tools.metrics import clip_mean
 
 KEEP = ("traj", "visibility", "query_t", "segment", "intrinsics_256", "extrinsics", "norm_mean", "norm_scale",
@@ -46,13 +48,29 @@ class _Lean(Dataset):
         return {k: b[k] for k in KEEP}
 
 
-def _clips(ds: ClipDataset, workers: int) -> list[dict]:
+def _pieces(b: dict, device) -> torch.Tensor:
+    """(1, N) each point's piece where the cache does not say: the points
+    whose distances to each other stay put over the clip (`rigid_groups`'
+    motion rule), joined through each other."""
+    same = rigid_groups({k: v.to(device) for k, v in b.items()}, by_object=False)[0]
+    label = torch.arange(same.shape[0], device=device)
+    while True:
+        new = torch.where(same, label[None], label.new_tensor(same.shape[0])).amin(1)
+        if torch.equal(new, label):
+            return label[None].cpu()
+        label = new
+
+
+def _clips(ds: ClipDataset, workers: int, device) -> list[dict]:
     """Each clip: the batch (B = 1) less images and features, its positions
-    `pos` (1, T, N, 3) in the clip's unit and its gravity `g` (1, 4)."""
+    `pos` (1, T, N, 3) in the clip's unit, its gravity `g` (1, 4) and its
+    pieces in `segment`, by the motion rule where the cache does not say."""
     out = []
     for b in DataLoader(_Lean(ds), batch_size=1, num_workers=workers):
         # Copied out of the workers' shared memory: kept, thousands would hold a file each.
         b = {k: v.clone() for k, v in b.items()}
+        if (b["segment"] < 0).all():
+            b["segment"] = _pieces(b, device)
         b["pos"] = b["traj"].float() * b["norm_traj_scale"][:, None, None, None] + b["norm_offset"].float()
         known = b["down_known"].float()[:, None]
         b["g"] = torch.cat([b["gravity"].float()[:, None] * GRAVITY_REF * b["down"].float() * known, known], -1)
@@ -109,8 +127,8 @@ def main() -> int:
     t0 = time.time()
     # As validation reads them: its first points, queried before the cutoff.
     val = _clips(ClipDataset(clips.val, args.val_points, resample=False, query_before=args.cutoff,
-                             frames=frames), args.workers)
-    train = _clips(ClipDataset(clips.train, 10 ** 6, resample=False, frames=frames), args.workers)
+                             frames=frames), args.workers, device)
+    train = _clips(ClipDataset(clips.train, 10 ** 6, resample=False, frames=frames), args.workers, device)
     weights = torch.tensor(clips.weights)
     print(f"{len(train)} training clips, {len(val)} validation clips, read in {time.time() - t0:.0f} s", flush=True)
 
