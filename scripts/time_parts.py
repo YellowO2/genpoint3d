@@ -1,8 +1,8 @@
 """Where a training step's time goes: the run's flags (`--points`, `--spawn`,
 ...), a few steps, each part timed with the GPU synchronised around it:
 drawing a clip (spawning included), the grouping (`objects`), the object
-pose (`object_places`), and the whole step. Prints each part's seconds a
-step and its share.
+pose (`object_places`), and the whole step. Prints any call over a second as
+it ends, then each part's seconds a step and its share.
 
 Run (--workers 0, so drawing a clip is counted):
   python scripts/time_parts.py --cache ... --frames-cache ... --init CKPT --points 1000 --spawn 500 --workers 0
@@ -39,7 +39,10 @@ def timed(name, fn, gpu=True):
         out = fn(*a, **k)
         if gpu:
             torch.cuda.synchronize()
-        spent[name] += time.time() - t0
+        took = time.time() - t0
+        spent[name] += took
+        if took > 1:
+            print(f"    {name}: {took:.1f} s", flush=True)
         return out
     return run
 
@@ -63,8 +66,12 @@ def main(steps: int = 3) -> int:
         t_load = time.time()
         batches = list(loaders.micro_batches(settings.accum))
         spent["drawing a clip (all)"] += time.time() - t_load
+        print(f"  step {step}: clips drawn in {time.time() - t_load:.1f} s", flush=True)
         for batch in batches:
+            t_learn = time.time()
             learn(model, batch, settings, hardware)
+            torch.cuda.synchronize()
+            print(f"  step {step}: learning took {time.time() - t_learn:.1f} s", flush=True)
         optimiser.step(model)
         torch.cuda.synchronize()
     total = (time.time() - t0) / steps
