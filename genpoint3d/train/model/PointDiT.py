@@ -48,6 +48,7 @@ class PointDiT(nn.Module):
         fit_robust: int = 0,
         fit_blend: bool = False,
         physics: bool = False,
+        blend_hidden: bool = False,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -125,6 +126,8 @@ class PointDiT(nn.Module):
         # way, `regress.Sweeps` moves it to where its piece's fit puts it. From
         # near full trust.
         self.fit_blend = fit_blend
+        # Only points believed hidden are moved towards their piece's place.
+        self.blend_hidden = blend_hidden
         if fit_blend:
             if not rigid_proposal:
                 raise ValueError("the blend moves points towards the rigid fit: needs rigid_proposal")

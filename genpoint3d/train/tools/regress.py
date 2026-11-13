@@ -410,7 +410,10 @@ class Sweeps:
                             self.acc[:, start:end] = torch.where(alive[:, None, :, None], acc.detach().float(),
                                                                  self.acc[:, start:end])
                         # Towards it, as far as the point distrusts its own match; never
-                        # at its query frame.
+                        # at its query frame; with `blend_hidden`, only where this round
+                        # believes it hidden (a frame without its image included).
+                        if model.blend_hidden and logits is not None:
+                            obj_ok = obj_ok & (logits.float() < 0)
                         t_w = torch.arange(end - start, device=dev)[None, :, None]
                         p = torch.sigmoid(trust.float())
                         pull = (1 - p) * (obj_ok & (t_w != at[:, None])).float()

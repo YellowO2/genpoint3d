@@ -63,6 +63,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--physics", type=int, default=0, choices=[0, 1],
                        help="each point's piece carried on, by its centre's velocity and spin and the acceleration "
                             "the points say, where its fit has too little behind it (needs --fit-blend)")
+        p.add_argument("--blend-hidden", type=int, default=0, choices=[0, 1],
+                       help="the blend moves only points the round believes hidden; seen ones keep their own match")
         p.add_argument("--fit-robust", type=int, default=0,
                        help="refits of the rigid proposal, each mate counting less the further it sat from the last "
                             "fit, so a few wrong mates cannot drag it (0: one plain fit)")
