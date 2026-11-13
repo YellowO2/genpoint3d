@@ -28,7 +28,7 @@ def main() -> int:
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--clip", type=int, default=0)
     p.add_argument("--points", type=int, default=1000)
-    p.add_argument("--spawn", type=int, default=300)
+    p.add_argument("--spawn", type=int, default=150)
     p.add_argument("--mates", type=int, default=40, help="mates written per hidden point and frame, the heaviest")
     p.add_argument("--out", required=True)
     args = p.parse_args()

@@ -2,7 +2,9 @@
 on real video adds them: training's spawning (`ClipDataset._spawned`) at test
 time, without the truth. One rule for every frame: a gap that was a gap the
 frame before (scene no point was put on) is not new; the first frame has no
-frame before, so all its gaps are."""
+frame before, so all its gaps are. As in training, where the scene's points
+come as given and only new surface is capped, the first frame's points are
+limited by the gap alone and the budget is for the frames after it."""
 
 import torch
 
@@ -15,8 +17,8 @@ from genpoint3d.train.tools.camera import project
 @torch.no_grad()
 def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None,
             view: torch.Tensor, cap: int, gap: float) -> dict:
-    """`b` (one clip) with up to `cap` points added after its own: frame by
-    frame, in each frame seen whole, the CNN cells farther than `gap` (a share
+    """`b` (one clip) with points added after its own, up to `cap` after the
+    first frame: frame by frame, in each frame seen whole, the CNN cells farther than `gap` (a share
     of the frame's width) from every point placed there and believed visible,
     and farther in 3D than about a cell from every such cell the frame before,
     the farthest first, each starting at its cell in that
@@ -50,6 +52,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
     far = gap * W
     born = []                                                       # (frame, cell, position, nearest own point)
     before = xyz[0, :0]                                             # the frame before's gaps, in 3D
+    first, later = True, 0                                          # the first seen frame yet to come; points added after it
     for t in range(T):
         if not whole[t]:
             continue
@@ -64,7 +67,9 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
         own = torch.nonzero(believed[t])[:, 0]
         new = d if not len(before) else torch.where(
             torch.cdist(xyz[t, cand], before).min(1).values > 1.5 * spacing[t, cand], d, torch.zeros_like(d))
-        picked = farthest_first(cell_px[cand], new, far, cap - len(born) if len(own) else 0)
+        picked = farthest_first(cell_px[cand], new, far, (len(cand) if first else cap - later) if len(own) else 0)
+        later += 0 if first else len(picked)
+        first = False
         for j in picked:
             p = xyz[t, cand[j]]
             i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])
