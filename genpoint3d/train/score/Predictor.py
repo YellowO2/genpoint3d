@@ -38,7 +38,7 @@ class Predictor:
         loss, out = self._track(b, fine, vm)
         if j.spawn:
             # Again with points added where none covers the frame; only the clip's own are scored.
-            more = spawned(model, b, fine, out["tracks"], out["logits"], vm, j.spawn, j.spawn_gap)
+            more = spawned(model, b, fine, out["tracks"], vm, j.spawn, j.spawn_gap)
             _, out = self._track(more, {**fine, "query_t": more["query_t"]}, vm)
             N = traj.shape[2]
             out = {k: None if v is None else v[:, :N] if k == "groups" else v[:, :, :N] if k in ("tracks", "logits") else v
