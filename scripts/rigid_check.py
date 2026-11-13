@@ -97,8 +97,9 @@ def main() -> int:
         (uv_p, z_p), (uv_t, z_t) = project(pos, proj), project(true_pos, proj)
         for name, mixed in (("true depth", unproject(uv_p, z_t, proj)), ("true image", unproject(uv_t, z_p, proj)),
                             ("true both", true_pos)):
-            fits[name] = guess + rigid_proposal(mixed, eq, sweeps.groups, member, belief, 0, T, robust=3,
-                                                ref=last_seen(belief, eq))[..., :3] / model.traj_scale
+            # The fit's offset is from the places it was given, here not the guess.
+            fits[name] = (mixed - anchor[:, None]) / model.traj_scale + rigid_proposal(
+                mixed, eq, sweeps.groups, member, belief, 0, T, robust=3, ref=last_seen(belief, eq))[..., :3] / model.traj_scale
         if not args.spawn:
             # The true pieces as group vectors: one axis each, far apart.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
