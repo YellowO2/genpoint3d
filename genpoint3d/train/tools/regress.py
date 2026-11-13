@@ -448,12 +448,16 @@ def _motion_error(g, x1, mask, weight):
     return _error(g.diff(dim=1) * s, x1.diff(dim=1) * s, mask[:, 1:] & mask[:, :-1], w)
 
 
-def _rigid_error(g, x1, pairs):
-    """The error of the gap between two points on one rigid object, `pairs`
-    (B, N, N), against the true gap: their errors should be the same."""
-    e = (g - x1)[:, :, :, None] - (g - x1)[:, :, None]           # (B, T, N, N, 3)
-    err = e.norm(dim=-1)
-    w = pairs[:, None].to(err.dtype).expand_as(err)
+def _rigid_error(g, x1, idx, ok):
+    """The error of the gap between a point and each of its partners on one
+    rigid object, `idx` (B, N, k) where `ok` (B, N, k), against the true gap:
+    their errors should be the same."""
+    B, T, N, _ = g.shape
+    k = idx.shape[-1]
+    e = g - x1                                                          # (B, T, N, 3)
+    mate = e.gather(2, idx.reshape(B, 1, N * k, 1).expand(B, T, N * k, 3)).reshape(B, T, N, k, 3)
+    err = (e[:, :, :, None] - mate).norm(dim=-1)                        # (B, T, N, k)
+    w = ok[:, None].to(err.dtype).expand_as(err)
     return (err * w).sum() / w.sum().clamp(min=1e-8)
 
 
@@ -487,7 +491,7 @@ def regress_loss(
     visible: Optional[torch.Tensor] = None,
     vis_weight: float = 0.0,
     vel_weight: float = 0.0,
-    pairs: Optional[torch.Tensor] = None,
+    pairs: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     rigid_weight: float = 0.0,
     groups: Optional[Callable[[int, int], torch.Tensor]] = None,
     group_weight: float = 0.0,
@@ -530,8 +534,9 @@ def regress_loss(
         if vel_weight:
             loss = loss + w[r.i] * vel_weight * _motion_error(g, x1_w, mask_w, weight_w)
         if rigid_weight:
-            pairs_w = pairs & r.alive[:, :, None] & r.alive[:, None, :]
-            loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, pairs_w)
+            idx, ok = pairs
+            ok_w = ok & r.alive[:, :, None] & r.alive.gather(1, idx.flatten(1)).view_as(idx)
+            loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, idx, ok_w)
         if group_weight:
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, groups(r.start, r.end), r.alive)
         if fit_weight and r.groups is not None:

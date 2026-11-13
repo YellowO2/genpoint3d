@@ -103,9 +103,14 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     return scene * scale + b["norm_mean"][:, None, None, :]
 
 
-def rigid_pairs(b: dict) -> torch.Tensor:
-    """(B, N, N) the pairs on one moving rigid object (`rigid_buddies`), for the rigidity loss."""
-    return rigid_buddies(to_metres(b["traj"], b))
+def rigid_pairs(b: dict, k: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
+    """Each point's partners for the rigidity loss: up to `k` of its nearest
+    points in frame 0 (the truth's) on the same moving rigid piece
+    (`rigid_buddies`): (B, N, k) their indices and (B, N, k) bool which are
+    partners. As Dynamic 3D Gaussians (Luiten et al. 2024) keep each point's
+    nearest neighbours rigid, found once in the first frame: on a rigid piece
+    a pair's distance is the same in every frame."""
+    return rigid_buddies(to_metres(b["traj"], b), k)
 
 
 def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
@@ -128,16 +133,26 @@ def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
     return groups
 
 
-def rigid_buddies(p: torch.Tensor, tol: float = 0.02, moved: float = 0.05) -> torch.Tensor:
-    """(B, N, N) from true positions (B, T, N, 3) in metres: two different
-    points whose distance never strays more than `tol` from frame 0's, both
-    moving more than `moved` at some frame. Kubric objects are rigid, so this
-    finds them without object ids; the moving part leaves the background out."""
-    d = (p[:, :, :, None] - p[:, :, None]).norm(dim=-1)          # (B, T, N, N)
+def rigid_buddies(p: torch.Tensor, k: int, tol: float = 0.02, moved: float = 0.05) -> tuple[torch.Tensor, torch.Tensor]:
+    """From true positions (B, T, N, 3) in metres, each point's up to `k`
+    nearest points in frame 0 whose distance to it never strays more than
+    `tol` from frame 0's, both moving more than `moved` at some frame: (B, N,
+    k) indices and (B, N, k) bool which count. Kubric objects are rigid, so
+    this finds them without object ids; the moving part leaves the
+    background out. Only the 2k nearest are checked, never every pair."""
+    B, T, N, _ = p.shape
+    c = min(2 * k, N - 1)
+    near = torch.cdist(p[:, 0], p[:, 0])
+    near = near.masked_fill(torch.eye(N, dtype=torch.bool, device=p.device), float("inf"))
+    idx = near.topk(c, dim=-1, largest=False).indices                    # (B, N, c) nearest first
+    mate = p.gather(2, idx.reshape(B, 1, N * c, 1).expand(B, T, N * c, 3)).reshape(B, T, N, c, 3)
+    d = (mate - p[:, :, :, None]).norm(dim=-1)                          # (B, T, N, c)
     rigid = (d - d[:, :1]).abs().amax(dim=1) < tol
-    move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved       # (B, N)
-    eye = torch.eye(p.shape[2], dtype=torch.bool, device=p.device)
-    return rigid & move[:, :, None] & move[:, None, :] & ~eye
+    move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved             # (B, N)
+    ok = rigid & move[:, :, None] & move.gather(1, idx.flatten(1)).view(B, N, c)
+    # The k nearest that count: a stable sort keeps the nearest first among them.
+    order = (~ok).float().argsort(dim=-1, stable=True)[..., :k]
+    return idx.gather(2, order), ok.gather(2, order)
 
 
 def fine_inputs(model, b: dict, amp: bool = False, grad: bool = False) -> dict:
