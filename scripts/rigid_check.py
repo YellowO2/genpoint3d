@@ -57,7 +57,7 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "proposal", "robust", "last seen", "true depth", "true image", "true both") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
+    names = ("guess", "proposal", "robust", "last seen", "true depth", "true image", "true both", "errors dealt") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -95,8 +95,14 @@ def main() -> int:
         true_pos = pos.clone()
         true_pos[:, :, :N] = model.lookup_pos(b["traj"].float(), anchor[:, :N])
         (uv_p, z_p), (uv_t, z_t) = project(pos, proj), project(true_pos, proj)
+        # The model's own errors, the same sizes and directions, dealt out to other points of
+        # the clip at random each frame: their size kept, any pattern across points broken.
+        err = (pos - true_pos)[:, :, :N]
+        deal = torch.argsort(torch.rand(err.shape[:3], device=err.device), dim=2)
+        shuffled = true_pos.clone()
+        shuffled[:, :, :N] += err.gather(2, deal[..., None].expand(-1, -1, -1, 3))
         for name, mixed in (("true depth", unproject(uv_p, z_t, proj)), ("true image", unproject(uv_t, z_p, proj)),
-                            ("true both", true_pos)):
+                            ("true both", true_pos), ("errors dealt", shuffled)):
             # The fit's offset is from the places it was given, here not the guess.
             fits[name] = (mixed - anchor[:, None]) / model.traj_scale + rigid_proposal(
                 mixed, eq, sweeps.groups, member, belief, 0, T, robust=3, ref=last_seen(belief, eq))[..., :3] / model.traj_scale
