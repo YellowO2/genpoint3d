@@ -30,7 +30,7 @@ from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawned
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
-from genpoint3d.train.tools.regress import Sweeps, rigid_proposal
+from genpoint3d.train.tools.regress import Sweeps, rigid_motion, rigid_proposal
 
 
 @torch.no_grad()
@@ -121,6 +121,22 @@ def main() -> int:
                 rows.setdefault(("mates", label, name), []).append(apd)
         for kind, mask in (("hidden", ~vis), ("seen", vis)):
             backing[kind].append(prop[:, :, :N, 3][mask].float().cpu())
+        if not args.spawn:
+            # For the hidden moving point-frames with 10+ seen mates: how good the seen mates
+            # the fit rests on are in those frames, and its turn from the predicted places
+            # against the turn from the true ones (both with the true pieces and visibility).
+            used = ~vis & moving & (seen_mates >= 10)                                       # (B, T, N)
+            on_used = vis & (torch.einsum("bti,bij->btj", used.float(), mates.float()) > 0)
+            apd = tapvid3d_metrics(to_metres(guess[:, :, :N], b), gt, on_used, b["intrinsics_256"], b["extrinsics"],
+                                   scaling="none", per_clip=True)["average_pts_within_thresh"].cpu()
+            rows.setdefault(("used mates", "apd"), []).append(apd)
+            turn = lambda places: rigid_motion(places, q, anchor, truth, sweeps.seen, seen_true, robust=3)[0][:, :, :N]
+            R_pred, R_true = turn(pos), turn(model.lookup_pos(b["traj"].float(), anchor))
+            angle = lambda R: torch.acos(((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1)).rad2deg()
+            if used.any():
+                rows.setdefault(("turn", "true"), []).append(angle(R_true)[used].cpu())
+                rows.setdefault(("turn", "pred"), []).append(angle(R_pred)[used].cpu())
+                rows.setdefault(("turn", "apart"), []).append(angle(R_pred.transpose(-1, -2) @ R_true)[used].cpu())
 
     print("\nAPD (no rescale), the model's final guess against where its piece would put it (robust: refit 3 times):")
     print(f"  {'point-frames':<16}" + "".join(f"{n:>14}" for n in names))
@@ -132,6 +148,12 @@ def main() -> int:
     print(f"  {'seen mates':<10} {'share':>6}" + "".join(f"{n:>14}" for n in names))
     for label, _, _ in bins:
         print(f"  {label:<10} {counts[label] / total:>6.3f}" + "".join(f"{clip_mean(rows['mates', label, n]):>14.4f}" for n in names))
+    if ("turn", "true") in rows:
+        med = lambda k: torch.cat(rows["turn", k]).median().item()
+        print(f"\nHidden moving point-frames with 10+ seen mates: their seen mates' APD there "
+              f"{clip_mean(rows['used mates', 'apd']):.4f} (all seen: {clip_mean(rows['seen', 'all', 'guess']):.4f}); "
+              f"the piece's turn since the query frame, median degrees: true {med('true'):.1f}, "
+              f"from the predicted places {med('pred'):.1f}, the two {med('apart'):.1f} apart")
     for kind in ("hidden", "seen"):
         v = torch.cat(backing[kind])
         print(f"  how much backs the proposal, {kind}: median {v.median():.3f}, "
