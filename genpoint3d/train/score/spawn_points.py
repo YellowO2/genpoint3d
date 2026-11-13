@@ -50,6 +50,8 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
         cover += [(p + pos[t, i] - pos[t0, i])[None] for t0, _, p, i in born if believed[t, i]]
         cover = torch.cat(cover)
         cand = torch.nonzero(b["depth"][0, t].flatten() < RADIUS)[:, 0]
+        if not len(cand):
+            continue
         d = (torch.cdist(cell_px[cand], px(cover, t)).min(1).values if len(cover)
              else torch.full((len(cand),), float("inf"), device=pos.device))
         own = torch.nonzero(believed[t])[:, 0]
