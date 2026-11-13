@@ -41,7 +41,6 @@ def main() -> int:
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--spawn", type=int, default=0, help="at most this many points added on new surface first")
-    p.add_argument("--mates", type=int, default=64, help="mates each fit takes, the likeliest by the groups")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -82,23 +81,23 @@ def main() -> int:
         guess = sweeps.whole.float()
         pos = model.lookup_pos(guess, anchor)
         belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
-        prop = rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T, mates=args.mates)
+        prop = rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T)
         fits = {"guess": guess, "proposal": guess + prop[..., :3] / model.traj_scale,
-                "robust": guess + rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T, mates=args.mates,
+                "robust": guess + rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T,
                                                  robust=3)[..., :3] / model.traj_scale}
         if not args.spawn:
             # The true pieces as group vectors: one axis each, far apart.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
             truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
-            fits["true groups"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T, mates=args.mates)[..., :3] / model.traj_scale
-            fits["true robust"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T, mates=args.mates,
+            fits["true groups"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T)[..., :3] / model.traj_scale
+            fits["true robust"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T,
                                                          robust=3)[..., :3] / model.traj_scale
             # Which mates count, then where they are too, from the truth: what the fit's inputs cost it.
             seen_true = b["visibility"].float()
-            fits["true seen"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, seen_true, 0, T, mates=args.mates,
+            fits["true seen"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, seen_true, 0, T,
                                                        robust=3)[..., :3] / model.traj_scale
             fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q, anchor,
-                                                                  truth, sweeps.seen, seen_true, 0, T, mates=args.mates, robust=3)[..., :3] / model.traj_scale
+                                                                  truth, sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
         gt = to_metres(traj, b)
