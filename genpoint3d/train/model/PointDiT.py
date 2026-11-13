@@ -49,6 +49,7 @@ class PointDiT(nn.Module):
         fit_blend: bool = False,
         physics: bool = False,
         blend_hidden: bool = False,
+        patch: int = 0,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -73,6 +74,12 @@ class PointDiT(nn.Module):
         self.time_rope = RoPE(head_dim, num_heads, n_axes=1)
         self.space_rope = RoPE(head_dim, num_heads, n_axes=3)
         self.cross_blocks = nn.ModuleList(CrossBlock(dim, num_heads, mlp_mult, dim) for _ in range(depth))
+        # Attention between points only within patches of `patch` points near
+        # each other (Point Transformer V3's serialized attention): each frame's
+        # points sorted along a Z-order curve of their guessed places, cut into
+        # patches, the curve's axis order changed and its patches shifted from
+        # block to block so neighbourhoods mix. 0: every point reads every other.
+        self.patch = patch
         # What a frame with no image shows: "nothing here".
         self.null_ctx = nn.Parameter(torch.randn(dim) * 0.02)
 
@@ -301,25 +308,26 @@ class PointDiT(nn.Module):
         q = query_t[:, None]
         h = h + ((t < q)[..., None] * self.query_in[0] + (t == q)[..., None] * self.query_in[1]).to(h.dtype)
 
-        biases = [None] * self.depth
         if group_prev is not None and not self.group_feedback:
             raise ValueError("group_prev is fed back to a model built with group_feedback")
+        # What the attention between points is biased by: each point's group
+        # vector (towards points with close vectors) and whether it is in the
+        # window (points that are not are read by no point).
+        v = known = None
         if self.group_feedback:
             v = (group_prev.float() if group_prev is not None
                  else torch.zeros(B, N, self.group_feedback, device=dev))
             h = h + self.feedback_scale * self.group_in(v.to(h.dtype))[:, None]
-            a = 2 * torch.sigmoid(-_sq_dist(v))                                  # (B, N, N)
-            if group_known is not None:
-                # A point with no vector yet is biased towards nobody.
-                a = a * (group_known[:, :, None] & group_known[:, None, :])
-            a = a[:, None, None].expand(B, T, 1, N, N).reshape(B * T, 1, N, N)
-            biases = [(a * self.feedback_scale * self.group_bias[d][:, None, None]).to(h.dtype)
+            # A point with no vector yet is biased towards nobody.
+            known = group_known if group_known is not None else torch.ones(B, N, dtype=torch.bool, device=dev)
+        live = alive if alive is not None else torch.ones(B, N, dtype=torch.bool, device=dev)
+        per_frame = lambda x: x[:, None].expand(B, T, *x.shape[1:]).reshape(B * T, *x.shape[1:])
+        v_r = None if v is None else per_frame(v)
+        known_r, live_r = (None if known is None else per_frame(known)), per_frame(live)
+        if not self.patch:
+            biases = [_point_bias(v_r, known_r, live_r, self.feedback_scale * self.group_bias[d], h.dtype)
+                      if v is not None else _point_bias(None, None, live_r, None, h.dtype)
                       for d in range(self.depth)]
-        if alive is not None:
-            # Points not in this window are read by no point.
-            gone = ((~alive).to(h.dtype) * -1e4)[:, None, None, None, :]           # (B, 1, 1, 1, N)
-            gone = gone.expand(B, T, 1, 1, N).reshape(B * T, 1, 1, N)
-            biases = [gone if b is None else b + gone for b in biases]
 
         # Frame times in [-1, 1], the range RoPE's ladder is built for.
         t_pos = torch.linspace(-1, 1, T, device=dev, dtype=dt)[None, :, None].expand(B * N, T, 1)
@@ -327,8 +335,8 @@ class PointDiT(nn.Module):
         # The attention between points encodes each point's current guess.
         theta_space = self.space_rope(pos.reshape(B * T, N, 3).to(dt))     # (B*T, H, N, d)
 
-        for temporal, spatial, cross, bias in zip(self.temporal_blocks, self.spatial_blocks,
-                                                  self.cross_blocks, biases):
+        for d, (temporal, spatial, cross) in enumerate(zip(self.temporal_blocks, self.spatial_blocks,
+                                                           self.cross_blocks)):
             ht = h.permute(0, 2, 1, 3).reshape(B * N, T, -1)
             ct = cond.permute(0, 2, 1, 3).reshape(B * N, T, -1)
             h = temporal(ht, ct, theta=theta_time)
@@ -336,7 +344,12 @@ class PointDiT(nn.Module):
 
             hs = h.reshape(B * T, N, -1)
             cs = cond.reshape(B * T, N, -1)
-            h = spatial(hs, cs, theta=theta_space, attn_mask=bias)
+            if self.patch:
+                scale = None if v is None else self.feedback_scale * self.group_bias[d]
+                h = _in_patches(spatial, hs, cs, theta_space, pos.reshape(B * T, N, 3), v_r, known_r, live_r,
+                                scale, self.patch, d)
+            else:
+                h = spatial(hs, cs, theta=theta_space, attn_mask=biases[d])
 
             h = cross(h, cs, context.reshape(B * T, -1, self.dim), window=window).view(B, T, N, -1)
 
@@ -365,6 +378,60 @@ class PointDiT(nn.Module):
             places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float())
         return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, ok=cells(view, h, w),
                          ok0=cells(clip_view, h, w), **places)
+
+
+def _point_bias(v, known, live, scale, dtype) -> torch.Tensor:
+    """(R, H or 1, N, N) the additive bias of attention between points:
+    towards points with close group vectors (v (R, N, E), known (R, N),
+    `scale` (H,) per head) and away from points not `live` (R, N)."""
+    gone = ((~live).to(dtype) * -1e4)[:, None, None, :]                        # (R, 1, 1, N)
+    if v is None:
+        return gone
+    a = 2 * torch.sigmoid(-_sq_dist(v)) * (known[:, :, None] & known[:, None, :])
+    return (a[:, None] * scale[None, :, None, None]).to(dtype) + gone
+
+
+# The axis orders of the Z-order curve, block by block.
+_AXES = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+
+
+def _patch_order(pos: torch.Tensor, axes: tuple, shift: int, total: int) -> torch.Tensor:
+    """(R, total) each row's points (pos (R, N, 3)) in the order of a Z-order
+    curve over a 1024-cell grid of their box, axes taken in `axes` order,
+    rolled by `shift`, padded with N (no point) to `total`."""
+    R, N, _ = pos.shape
+    lo, hi = pos.amin(1, keepdim=True), pos.amax(1, keepdim=True)
+    g = ((pos - lo) / (hi - lo).clamp_min(1e-6) * 1023).long().clamp(0, 1023)[..., list(axes)]
+    code = torch.zeros(R, N, dtype=torch.long, device=pos.device)
+    for bit in range(10):
+        for a in range(3):
+            code |= ((g[..., a] >> bit) & 1) << (3 * bit + 2 - a)
+    order = torch.roll(code.argsort(dim=1), shifts=shift, dims=1)
+    return torch.cat([order, torch.full((R, total - N), N, dtype=torch.long, device=pos.device)], 1)
+
+
+def _in_patches(block, x, cond, theta, pos, v, known, live, scale, size: int, depth: int) -> torch.Tensor:
+    """`block` (x (R, N, C), cond, theta (R, H, N, d)) run within patches of
+    `size` points along the Z-order curve of `pos` (R, N, 3) for block
+    `depth`, the group bias and the dead points' mask within each patch."""
+    R, N, C = x.shape
+    n_p = -(-N // size)
+    order = _patch_order(pos.float(), _AXES[depth % 3], (depth // 3) % 2 * (size // 2), n_p * size)
+    pad = lambda t: torch.cat([t, torch.zeros_like(t[:, :1])], 1)                    # a row for "no point"
+    take = lambda t: pad(t).gather(1, order.view(R, -1, *([1] * (t.dim() - 2))).expand(R, -1, *t.shape[2:]))
+    xs, cs = take(x).view(R * n_p, size, C), take(cond).view(R * n_p, size, C)
+    H, d = theta.shape[1], theta.shape[-1]
+    th = torch.cat([theta, torch.zeros_like(theta[:, :, :1])], 2).gather(
+        2, order[:, None, :, None].expand(R, H, -1, d))
+    th = th.view(R, H, n_p, size, d).transpose(1, 2).reshape(R * n_p, H, size, d)
+    lv = take(live).view(R * n_p, size)
+    vp = None if v is None else take(v).view(R * n_p, size, -1)
+    kn = None if known is None else take(known).view(R * n_p, size)
+    out = block(xs, cs, theta=th, attn_mask=_point_bias(vp, kn, lv, scale, x.dtype))
+    # Back to each point's row: where it sits along the curve.
+    at = torch.empty(R, N + 1, dtype=torch.long, device=x.device).scatter_(
+        1, order, torch.arange(order.shape[1], device=x.device).expand(R, -1))
+    return out.view(R, -1, C).gather(1, at[:, :N, None].expand(R, N, C))
 
 
 def cells(view: torch.Tensor, h: int, w: int) -> torch.Tensor:

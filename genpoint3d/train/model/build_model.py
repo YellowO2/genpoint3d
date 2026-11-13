@@ -16,4 +16,5 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     fit_robust=a("fit_robust", 0),
                     fit_blend=bool(a("fit_blend", 0)),
                     physics=bool(a("physics", 0)),
-                    blend_hidden=bool(a("blend_hidden", 0)))
+                    blend_hidden=bool(a("blend_hidden", 0)),
+                    patch=a("patch", 0))

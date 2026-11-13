@@ -65,6 +65,9 @@ class Settings(argparse.Namespace):
                             "the points say, where its fit has too little behind it (needs --fit-blend)")
         p.add_argument("--blend-hidden", type=int, default=0, choices=[0, 1],
                        help="the blend moves only points the round believes hidden; seen ones keep their own match")
+        p.add_argument("--patch", type=int, default=0, metavar="P",
+                       help="attention between points only within patches of P points near each other (Point "
+                            "Transformer V3's serialized attention); 0: every point reads every other")
         p.add_argument("--fit-robust", type=int, default=0,
                        help="refits of the rigid proposal, each mate counting less the further it sat from the last "
                             "fit, so a few wrong mates cannot drag it (0: one plain fit)")
