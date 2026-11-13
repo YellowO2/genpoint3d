@@ -87,16 +87,23 @@ class FineFinder(nn.Module):
 
         returns (B, T, N, out_dim) for the T frames after the first
         """
+        # Pieces of at most `chunk` points, whole clips together while they fit:
+        # each point's comparison is its own, so the pieces change nothing.
         out = []
-        clips = max(1, self.chunk // uv.shape[2])
+        N = uv.shape[2]
+        clips, points = max(1, self.chunk // N), min(N, self.chunk)
         for i in range(0, fmap.shape[0], clips):
-            cut = slice(i, i + clips)
-            part = (fmap[cut], fmap0[cut], uv[cut], uv0[cut], xyz[cut], xyz0[cut], pos[cut], pos0[cut],
-                    query_t[cut], ok[cut], ok0[cut])
-            if torch.is_grad_enabled():
-                out.append(checkpoint(self._neighbourhoods, *part, use_reentrant=False))
-            else:
-                out.append(self._neighbourhoods(*part))
+            c = slice(i, i + clips)
+            row = []
+            for j in range(0, N, points):
+                p = slice(j, j + points)
+                part = (fmap[c], fmap0[c], uv[c, :, p], uv0[c, p], xyz[c], xyz0[c], pos[c, :, p], pos0[c, p],
+                        query_t[c, p], ok[c], ok0[c])
+                if torch.is_grad_enabled():
+                    row.append(checkpoint(self._neighbourhoods, *part, use_reentrant=False))
+                else:
+                    row.append(self._neighbourhoods(*part))
+            out.append(torch.cat(row, dim=2))
         return torch.cat(out)
 
     def _neighbourhoods(self, fmap: torch.Tensor, fmap0: torch.Tensor, uv: torch.Tensor,
