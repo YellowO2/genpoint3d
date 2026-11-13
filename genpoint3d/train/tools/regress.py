@@ -158,7 +158,7 @@ def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
 
 
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
-                  seen: torch.Tensor, robust: int = 0) -> torch.Tensor:
+                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0) -> torch.Tensor:
     """(B, T, N, 3) each point where its object's pose puts it. A point's
     object is its own group-mates (likeness over a half, itself included; no
     chains, so one wrong pair cannot merge two objects), kept as one rigid
@@ -167,9 +167,12 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
     the shape onto the mates believed seen there (`seen` (B, T, N); a weighted
     Kabsch fit, refit `robust` times) places the point, so it is placed as
     well as its whole object's pose is known, and nothing builds up from frame
-    to frame. Where fewer than 3 mates back a pose the last one holds; a point
-    not yet given keeps its own guess. pos, q, groups, member as
-    `rigid_proposal`'s."""
+    to frame. With `fresh` (degrees), a mate counts 1 / (1 + turn / fresh)^2
+    as much, its turn being how far the object has turned since the mate was
+    given: a tracked point drifts as it turns from the look it was given by
+    (on the ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). Where fewer
+    than 3 mates back a pose the last one holds; a point not yet given keeps
+    its own guess. pos, q, groups, member as `rigid_proposal`'s."""
     B, T, N, _ = pos.shape
     with torch.autocast(device_type=pos.device.type, enabled=False):
         pos, seen = pos.float(), seen.float()
@@ -180,10 +183,17 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
         R = torch.eye(3, device=pos.device).expand(B, N, 3, 3)
         ms = md = torch.zeros(B, N, 3, device=pos.device)
         out, own = pos.clone(), torch.arange(N, device=pos.device)
+        turns = []                                                                         # each frame's poses so far
         for t in range(T):
             w = a * seen[:, t, None, :] * given
+            if fresh and turns:
+                # How far each object has turned since each mate was given, by the last pose.
+                then = torch.stack(turns, 2)[torch.arange(B, device=pos.device)[:, None, None], own[None, :, None],
+                                             q.clamp(max=len(turns) - 1)[:, None, :]]      # (B, N, N, 3, 3)
+                cos = (((R[:, :, None] * then).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
+                w = w / (1 + torch.rad2deg(torch.acos(cos)) / fresh).pow(2)
             Rn, msn, mdn, _ = robust_kabsch(w, shape, pos[:, t, None], robust)
-            ok = w.sum(-1) >= 3
+            ok = (a * seen[:, t, None, :] * given).sum(-1) >= 3                               # the mates seen, unweighted
             R = torch.where(ok[..., None, None], Rn, R)
             ms, md = torch.where(ok[..., None], msn, ms), torch.where(ok[..., None], mdn, md)
             new = (q[:, None, :] == t) & (a > 0) & ~given
@@ -191,6 +201,7 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
                     + ms[:, :, None])                                                      # each j into i's shape
             shape = torch.where(new[..., None], back, shape)
             given = given | new
+            turns.append(R)
             mine = shape[:, own, own]                                                      # (B, N, 3) i in its own shape
             out[:, t] = torch.where(given[:, own, own][..., None],
                                     (R @ (mine - ms)[..., None])[..., 0] + md, pos[:, t])
