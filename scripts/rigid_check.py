@@ -175,6 +175,14 @@ def main() -> int:
         err = (to_metres(fits["object pose"], b) - gt).norm(dim=-1)
         for kind, mask in (("hidden", ~vis & moving & (seen_mates >= 3)), ("seen", vis & moving & (seen_mates >= 3))):
             rows.setdefault(("by distance", kind), []).append(torch.stack([far_from[mask], err[mask]], -1).cpu())
+        # Each point that hides, lined up on the frame it hides in: its object-pose error the frames
+        # before (seen) and after (hidden), to see a jump at the moment from a slow drift.
+        hides = vis[:, :-1] & ~vis[:, 1:]                                                     # (B, T-1, N) hides at t+1
+        for bi, t1, i in torch.nonzero(hides).tolist():
+            t0 = t1 + 1
+            for k in range(-3, 9):
+                if 0 <= t0 + k < T and (k < 0 or not vis[bi, t0:t0 + k + 1, i].any()):
+                    rows.setdefault(("hiding", k), []).append(err[bi, t0 + k, i].item())
         if not args.spawn:
             # For the hidden moving point-frames with 10+ seen mates: how good the seen mates
             # the fit rests on are in those frames, and its turn from the predicted places
@@ -208,6 +216,12 @@ def main() -> int:
               f"{clip_mean(rows['used mates', 'apd']):.4f} (all seen: {clip_mean(rows['seen', 'all', 'guess']):.4f}); "
               f"the piece's turn since the query frame, median degrees: true {med('true'):.1f}, "
               f"from the predicted places {med('pred'):.1f}, the two {med('apart'):.1f} apart")
+    ks = sorted(k for kind, k in rows if kind == "hiding")
+    if ks:
+        print("\nThe object-pose placement's error (cm, median) around the frame a point hides in (0), seen before it:")
+        print("  frames from hiding " + "".join(f"{k:>6}" for k in ks))
+        print("  error              " + "".join(f"{100 * torch.tensor(rows['hiding', k]).median():>6.1f}" for k in ks))
+        print("  point-frames       " + "".join(f"{len(rows['hiding', k]):>6}" for k in ks))
     print("\nThe object-pose placement with a fifth of the seen points kept out of its fits, error (cm, median) by frame:")
     print("  frame     " + "".join(f"{t:>6}" for t in range(len(rows["held", "frames"][0]))))
     for kind in ("in the fit", "kept out", "hidden"):
