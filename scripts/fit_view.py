@@ -58,7 +58,7 @@ def main() -> int:
     pos = model.lookup_pos(guess, anchor)
     belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
     ref = last_seen(belief, eq)
-    fit = guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T, robust=3, ref=ref)[..., :3] / model.traj_scale
+    fit = guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T, robust=3)[..., :3] / model.traj_scale
     metres = lambda x: to_metres(x, every)[0]
     # The fit's weights before its refits, as `_rigid_fit` builds them.
     a = 2 * torch.sigmoid(-_sq_dist(sweeps.groups.float())) * (member[:, :, None] & member[:, None, :])

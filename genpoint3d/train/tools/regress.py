@@ -117,17 +117,18 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
                    member: torch.Tensor, seen: torch.Tensor, start: int, end: int,
-                   robust: int = 0, ref: torch.Tensor | None = None) -> torch.Tensor:
+                   robust: int = 0) -> torch.Tensor:
     """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
     would put each point, as an offset from its guess there, how much backs it
     (0 for nothing, towards 1), and how far its piece has turned since the
-    frame it is carried from (radians).
+    frame it is carried from (radians): the nearest frame it is believed seen
+    in (`last_seen`), so the turn carried is a short one and the mates are
+    ones seen there, where carrying from its query frame could use only mates
+    seen in that one frame.
 
     pos (B, T, N, 3) every guess; q (B, N) query frames;
     groups (B, N, E) the group vectors, member (B, N) the points that count;
-    seen (B, T, N) the belief each point is visible; ref (B, T, N) the frame
-    each point is carried from in each frame, its query frame by default. For
-    each point, in each frame, the points its group vector puts on its piece,
+    seen (B, T, N) the belief each point is visible. For each point, in each frame, the points its group vector puts on its piece,
     weighted by that likelihood and by being seen both there and in the frame
     it is carried from: the turn and shift that best carry them from that
     frame to this one (a weighted Kabsch fit), a shift alone with little behind
@@ -136,7 +137,7 @@ def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
     the typical mate, so a few wrong mates cannot drag it. In float32: the
     fit's SVD has no bfloat16 on the GPU."""
     B, T, N, _ = pos.shape
-    ref = (q[:, None].expand(B, T, N) if ref is None else ref)[:, start:end]
+    ref = last_seen(seen, q)[:, start:end]
     with torch.autocast(device_type=pos.device.type, enabled=False):
         pos = pos.float()
         R, ms, md, s = _rigid_fit(pos, ref, groups.float(), member, seen.float(), start, end, robust)
@@ -147,7 +148,7 @@ def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
 def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     """(B, T, N) for each point and frame the nearest frame it is believed seen
     in (`seen` (B, T, N) over 0.5): the latest up to it, else the first after,
-    else its query frame (`q` (B, N)). A `rigid_proposal` `ref`."""
+    else its query frame (`q` (B, N))."""
     B, T, N = seen.shape
     t = torch.arange(T, device=seen.device)[None, :, None]
     on = seen > 0.5
