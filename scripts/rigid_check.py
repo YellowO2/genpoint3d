@@ -216,7 +216,7 @@ def main() -> int:
               f"{clip_mean(rows['used mates', 'apd']):.4f} (all seen: {clip_mean(rows['seen', 'all', 'guess']):.4f}); "
               f"the piece's turn since the query frame, median degrees: true {med('true'):.1f}, "
               f"from the predicted places {med('pred'):.1f}, the two {med('apart'):.1f} apart")
-    ks = sorted(k for kind, k in rows if kind == "hiding")
+    ks = sorted(key[1] for key in rows if key[0] == "hiding")
     if ks:
         print("\nThe object-pose placement's error (cm, median) around the frame a point hides in (0), seen before it:")
         print("  frames from hiding " + "".join(f"{k:>6}" for k in ks))
