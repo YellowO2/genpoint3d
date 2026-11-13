@@ -155,6 +155,14 @@ def main() -> int:
                 rows.setdefault(("mates", label, name), []).append(apd)
         for kind, mask in (("hidden", ~vis), ("seen", vis)):
             backing[kind].append(prop[:, :, :N, 3][mask].float().cpu())
+        # The object-pose placement's error by how far a point is from the centre of its true
+        # piece's points seen in that frame: a turn measured from those carries farther points worse.
+        seen_w = vis.float()[:, :, None, :] * mates.float()[:, None]                          # (B, T, N, N)
+        centre = (seen_w[..., None] * gt[:, :, None]).sum(3) / seen_w.sum(3, keepdim=True).clamp_min(1)
+        far_from = (gt - centre).norm(dim=-1)                                                 # (B, T, N) metres
+        err = (to_metres(fits["object pose"], b) - gt).norm(dim=-1)
+        for kind, mask in (("hidden", ~vis & moving & (seen_mates >= 3)), ("seen", vis & moving & (seen_mates >= 3))):
+            rows.setdefault(("by distance", kind), []).append(torch.stack([far_from[mask], err[mask]], -1).cpu())
         if not args.spawn:
             # For the hidden moving point-frames with 10+ seen mates: how good the seen mates
             # the fit rests on are in those frames, and its turn from the predicted places
@@ -188,6 +196,17 @@ def main() -> int:
               f"{clip_mean(rows['used mates', 'apd']):.4f} (all seen: {clip_mean(rows['seen', 'all', 'guess']):.4f}); "
               f"the piece's turn since the query frame, median degrees: true {med('true'):.1f}, "
               f"from the predicted places {med('pred'):.1f}, the two {med('apart'):.1f} apart")
+    print("\nThe object-pose placement's error (cm, median) by distance from the centre of the piece's seen points:")
+    for kind in ("seen", "hidden"):
+        v = torch.cat(rows["by distance", kind])
+        if not len(v):
+            continue
+        edges = torch.quantile(v[:, 0], torch.linspace(0, 1, 5))
+        parts = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            m = (v[:, 0] >= lo) & (v[:, 0] <= hi)
+            parts.append(f"{lo:.2f}-{hi:.2f} m: {100 * v[m, 1].median():.1f}")
+        print(f"  {kind:<7}" + "   ".join(parts))
     for kind in ("hidden", "seen"):
         v = torch.cat(backing[kind])
         print(f"  how much backs the proposal, {kind}: median {v.median():.3f}, "
