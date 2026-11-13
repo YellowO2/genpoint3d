@@ -75,7 +75,7 @@ def main() -> int:
 
         sweeps, every = track(b), b
         if args.spawn:
-            every = spawn_all(model, b, fine, view, args.spawn, 0.05, lambda bb: track(bb).whole)
+            every = spawn_all(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
             sweeps = track(every)
         # Fitted over every point, the added ones too; only the clip's own are scored.
         anchor, eq = every["anchor"].float(), every["query_t"]

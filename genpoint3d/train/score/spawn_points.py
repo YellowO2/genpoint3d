@@ -17,23 +17,24 @@ from genpoint3d.train.tools.camera import project
 
 def spawn_all(model, b: dict, fine: dict, view: torch.Tensor, cap: int, gap: float, tracks_of) -> dict:
     """`b` with points added in two rounds, each tracked before the next
-    (`tracks_of(clip)` gives a clip's tracks): the first frame's gaps, then up
-    to `cap` on new surface after it."""
-    b = spawned(model, b, fine, tracks_of(b), view, gap, None)
-    return spawned(model, b, fine, tracks_of(b), view, gap, cap)
+    (`tracks_of(clip)` gives a clip's tracks and visibility logits): the first
+    frame's gaps, then up to `cap` on new surface after it."""
+    b = spawned(model, b, fine, *tracks_of(b), view, gap, None)
+    return spawned(model, b, fine, *tracks_of(b), view, gap, cap)
 
 
 @torch.no_grad()
-def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor, gap: float, cap: int | None) -> dict:
+def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None, view: torch.Tensor, gap: float,
+            cap: int | None) -> dict:
     """`b` (one clip) with points added after its own: in the first frame seen
     whole if `cap` is None, else up to `cap` in the frames seen whole after
     it, frame by frame. They go where no point covers the CNN cells, the
     farthest first, each starting at its cell in that frame, its look read
     there. A point covers the cells within `gap` (a share of the frame's
-    width) of it in the image if it sits on the surface its own pixel shows
-    (at the depth there), seen or not, so a point turned to the far side of an object leaves
-    the near side to new points while one merely believed hidden still covers
-    its place. `tracks` is a first pass over `b`'s own points; a point added
+    width) of it in the image if it is believed seen there (as training's
+    spawning counts the points seen) and sits on the surface its own pixel
+    shows (at the depth there): a hidden point's guess, wherever it lands,
+    covers nothing. `tracks` is a first pass over `b`'s own points; a point added
     earlier in the same round is carried by the motion of the own point
     nearest it in 3D. The added points' truth is unknown: never visible, so
     never scored."""
@@ -46,6 +47,8 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
     whole = view[0].flatten(1).all(-1)                                                  # (T,)
     q = b["query_t"][0]
     exists = (q[None] <= torch.arange(T, device=q.device)[:, None]) & whole[q][None]   # (T, N) given by then
+    believed = (torch.sigmoid(logits[0].float()) > 0.5 if logits is not None           # (T, N)
+                else torch.ones(T, N, dtype=torch.bool, device=pos.device))
     xyz = fine["fine_xyz"][0].flatten(2).transpose(1, 2)                                # (T, h*w, 3)
     h, w = fine["fine_xyz"].shape[-2:]
     v, u = torch.meshgrid(torch.arange(h, device=pos.device), torch.arange(w, device=pos.device), indexing="ij")
@@ -56,6 +59,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
     for t in (seen[:1] if cap is None else seen[1:]):
         own = torch.nonzero(exists[t])[:, 0]
         here = torch.cat([pos[t, own]] + [(p + pos[t, i] - pos[t0, i])[None] for t0, _, p, i in born])
+        shown = torch.cat([believed[t, own], believed[t, [i for *_, i in born]]])          # an added one as its carrier
         depth = b["depth"][0, t].flatten().float()
         cand = torch.nonzero(depth < RADIUS)[:, 0]
         if not len(cand) or not len(own):
@@ -65,7 +69,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
         # On the surface its own pixel shows (the depth there, as a z-buffer would test),
         # not hidden behind it; a slope's depth changes across a gap, so test it there.
         at = ((uv[:, 1] * h).long().clamp(0, h - 1) * w + (uv[:, 0] * w).long().clamp(0, w - 1))
-        on = (z - depth[at]).abs() < 0.03 * depth[at]
+        on = ((z - depth[at]).abs() < 0.03 * depth[at]) & shown
         d = (torch.cdist(cell_px[cand], uv[on] * uv.new_tensor([W, H])).min(1).values if on.any()
              else torch.full((len(cand),), float("inf"), device=pos.device))
         picked = farthest_first(cell_px[cand], d, far, len(cand) if cap is None else cap - len(born))
