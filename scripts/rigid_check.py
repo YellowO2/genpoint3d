@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawned
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.camera import project, unproject
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import Sweeps, last_seen, rigid_motion, rigid_proposal
 
@@ -56,7 +57,7 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "proposal", "robust", "last seen") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
+    names = ("guess", "proposal", "robust", "last seen", "true depth", "true image", "true both") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -88,6 +89,16 @@ def main() -> int:
                 # Each point carried from the nearest frame it is believed seen in, not its query frame.
                 "last seen": guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T, robust=3,
                                                     ref=last_seen(belief, eq))[..., :3] / model.traj_scale}
+        # The same with the clip's own points at their true depth (their predicted place in the
+        # image kept), at their true place in the image (their predicted depth kept), and both.
+        proj = fine["fine_proj"].float()
+        true_pos = pos.clone()
+        true_pos[:, :, :N] = model.lookup_pos(b["traj"].float(), anchor[:, :N])
+        (uv_p, z_p), (uv_t, z_t) = project(pos, proj), project(true_pos, proj)
+        for name, mixed in (("true depth", unproject(uv_p, z_t, proj)), ("true image", unproject(uv_t, z_p, proj)),
+                            ("true both", true_pos)):
+            fits[name] = guess + rigid_proposal(mixed, eq, sweeps.groups, member, belief, 0, T, robust=3,
+                                                ref=last_seen(belief, eq))[..., :3] / model.traj_scale
         if not args.spawn:
             # The true pieces as group vectors: one axis each, far apart.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
