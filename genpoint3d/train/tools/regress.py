@@ -222,10 +222,17 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
             placed = placed + new.float()
             poses.append((R, ms, md))
         for _ in range(refine):
+            # Each frame's view of every mate's place, counted less the farther it sits from the
+            # place the shape holds against the typical one (robust, as bundle adjustment weighs
+            # its residuals), so a few badly tracked frames cannot drag the shape.
+            views = [into(R, ms, md, pos[:, t]) for t, (R, ms, md) in enumerate(poses)]
+            w0 = [a * w_t[:, t, None, :] * (placed > 0) for t in range(T)]
+            left = [(v - shape).norm(dim=-1) for v in views]
+            typical = sum((w * l).sum() for w, l in zip(w0, left)) / sum(w.sum() for w in w0).clamp_min(1e-6) + 1e-6
             num, den = torch.zeros_like(shape), torch.zeros_like(placed)
-            for t, (R, ms, md) in enumerate(poses):
-                w = a * w_t[:, t, None, :]
-                num, den = num + w[..., None] * into(R, ms, md, pos[:, t]), den + w
+            for v, w, l in zip(views, w0, left):
+                w = w / (1 + (l / typical).pow(2))
+                num, den = num + w[..., None] * v, den + w
             shape = torch.where((den > 1e-6)[..., None], num / den.clamp_min(1e-6)[..., None], shape)
             placed = torch.maximum(placed, den)
             R, ms, md = poses[0]

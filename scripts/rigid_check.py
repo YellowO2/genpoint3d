@@ -43,6 +43,7 @@ def main() -> int:
     p.add_argument("--points", type=int, default=256)
     p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to first where surface has none")
     p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
+    p.add_argument("--refine", type=int, default=3, help="rounds refining the object shapes from every frame")
     p.add_argument("--train-spawn", type=int, default=0,
                    help="up to this many of the clip's tracks started where they come into view, as training draws them")
     args = p.parse_args()
@@ -91,10 +92,10 @@ def main() -> int:
                 "robust": guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T,
                                                  robust=3)[..., :3] / model.traj_scale,
                 # Carried a frame at a time, each step from the piece's points seen in both frames.
-                "frame by frame": (frame_by_frame(pos, sweeps.groups, member, belief, robust=3) - anchor[:, None])
+                "frame by frame": (frame_by_frame(pos, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None])
                                   / model.traj_scale,
                 # Each object kept as one rigid shape, its pose fit every frame from its seen points.
-                "object pose": (object_places(pos, eq, sweeps.groups, member, belief, robust=3) - anchor[:, None])
+                "object pose": (object_places(pos, eq, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None])
                                / model.traj_scale}
         # The same with the clip's own points at their true depth (their predicted place in the
         # image kept), at their true place in the image (their predicted depth kept), and both.
@@ -130,8 +131,8 @@ def main() -> int:
             fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q,
                                                                   truth, sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
         # The same carried a frame at a time from true places (the clip's own; added points as predicted).
-        fits["frame true"] = (frame_by_frame(true_pos, sweeps.groups, member, belief, robust=3) - anchor[:, None]) / model.traj_scale
-        fits["object true"] = (object_places(true_pos, eq, sweeps.groups, member, belief, robust=3) - anchor[:, None]) / model.traj_scale
+        fits["frame true"] = (frame_by_frame(true_pos, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None]) / model.traj_scale
+        fits["object true"] = (object_places(true_pos, eq, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None]) / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
         gt = to_metres(traj, b)
@@ -160,7 +161,7 @@ def main() -> int:
         held = (torch.rand(vis.shape, device=vis.device) < 0.2) & vis
         out_belief = belief.clone()
         out_belief[:, :, :N] = belief[:, :, :N] * ~held
-        e_held = (to_metres((object_places(pos, eq, sweeps.groups, member, out_belief, robust=3)
+        e_held = (to_metres((object_places(pos, eq, sweeps.groups, member, out_belief, robust=3, refine=args.refine)
                              - anchor[:, None])[:, :, :N] / model.traj_scale, b) - gt).norm(dim=-1)        # (B, T, N)
         per_frame = lambda m: torch.stack([e_held[:, t][m[:, t]].median() if m[:, t].any() else e_held.new_tensor(float("nan"))
                                            for t in range(T)])
