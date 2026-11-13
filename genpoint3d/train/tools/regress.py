@@ -117,10 +117,11 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """The points `member` (B, N) put into objects without chains, so one
     wrong pair cannot merge two: the first point in none seeds one of itself
-    and its own group-mates in none (likeness over a half), and so on. (B, K,
-    N) each object's points weighted by their likeness to its seed (0 for the
-    others; the group vectors' gradient goes through it), and (B, N) each
-    point's object, -1 for none."""
+    and its own group-mates in none (likeness over a half), and so on; one of
+    under 3 points, which cannot hold a pose, is left out. (B, K, N) each
+    object's points weighted by their likeness to its seed (0 for the others;
+    the group vectors' gradient goes through it), and (B, N) each point's
+    object, -1 for none."""
     B, N, _ = groups.shape
     a = 2 * torch.sigmoid(-_sq_dist(groups.float())) * (member[:, :, None] & member[:, None, :])
     which = torch.full((B, N), -1, dtype=torch.long, device=groups.device)
@@ -130,9 +131,11 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
         while free.any():
             seed = int(torch.nonzero(free)[0])
             take = free & (a[b, seed] > 0.5)
-            which[b, take] = len(rows[b])
-            rows[b].append(a[b, seed] * take)
             free &= ~take
+            # Under 3 points cannot hold a pose: those keep their own guesses and take no room.
+            if take.sum() >= 3:
+                which[b, take] = len(rows[b])
+                rows[b].append(a[b, seed] * take)
     weight = torch.zeros(B, max(max(len(r) for r in rows), 1), N, device=groups.device)
     for b, r in enumerate(rows):
         if r:
