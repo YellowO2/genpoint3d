@@ -96,8 +96,8 @@ def main() -> int:
             seen_true = b["visibility"].float()
             fits["true seen"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, seen_true, 0, T,
                                                        robust=3)[..., :3] / model.traj_scale
-            fits["all true"] = guess + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q, anchor, truth,
-                                                      sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
+            fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q, anchor,
+                                                                  truth, sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
         gt = to_metres(traj, b)
