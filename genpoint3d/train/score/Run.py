@@ -28,16 +28,17 @@ class Run:
         model.load_state_dict(ckpt["model"])
         return cls(model.eval(), settings, ckpt["step"])
 
-    def dataset(self, clips, frames, points: int | None = None, query_before: int = 0) -> ClipDataset:
+    def dataset(self, clips, frames, points: int | None = None, query_before: int = 0, spawn: int = 0) -> ClipDataset:
         """`clips`, a cache directory (every clip in it) or a list of clip
         files, their first `points` points (the run's own count by default),
-        with the frames in `frames`."""
+        with the frames in `frames`; with `spawn`, up to that many of them
+        started where new surface comes into view, as training draws them."""
         if isinstance(clips, (str, Path)):
             clips = sorted(Path(clips).expanduser().glob("*.pt"))
         if not clips:
             raise SystemExit("no cached clips to score")
         return ClipDataset(clips, points or self.settings.points, resample=False, frames=Path(frames),
-                           query_before=query_before)
+                           query_before=query_before, spawn=spawn)
 
     def judging(self, device: torch.device, cutoff: int = 0, **kw) -> ScoreSettings:
         """Scoring with the run's own refinement, from `cutoff` (0: every frame has its image)."""
