@@ -1,7 +1,7 @@
 """One clip's rigid fit, written out to look at (docs: the fit-view page): per
 frame, each point's true place and visibility (the clip's own points), the
-model's place and belief that it is seen, and where the fit carried from the
-nearest seen frame puts it; for each of the clip's hidden points, the mates
+model's place and belief that it is seen, and where its object's pose puts it
+(`object_places`); for each of the clip's hidden points, the mates
 its fit rests on there and their weights. Points added at test time are in
 too, with no truth. Places in metres, the first frame's camera.
 
@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader, Subset
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_all
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
-from genpoint3d.train.tools.regress import Sweeps, _sq_dist, last_seen, rigid_proposal
+from genpoint3d.train.tools.regress import Sweeps, _sq_dist, object_places
 
 
 @torch.no_grad()
@@ -57,13 +57,13 @@ def main() -> int:
     guess = sweeps.whole.float()
     pos = model.lookup_pos(guess, anchor)
     belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
-    ref = last_seen(belief, eq)
-    fit = guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T, robust=3)[..., :3] / model.traj_scale
+    fit = (object_places(pos, eq, sweeps.groups, member, belief, model.fit_robust, model.fit_fresh)[0]
+           - anchor[:, None]) / model.traj_scale
     metres = lambda x: to_metres(x, every)[0]
-    # The fit's weights before its refits, as `_rigid_fit` builds them.
+    # Each point's mates as the object's pose weighs them: likeness over a half, seen in the frame.
     a = 2 * torch.sigmoid(-_sq_dist(sweeps.groups.float())) * (member[:, :, None] & member[:, None, :])
-    a = (a * (a > 0.5)).masked_fill(torch.eye(a.shape[1], dtype=torch.bool, device=device), 0.0)
-    w = a[:, None] * belief[:, :, None, :] * belief[torch.arange(1, device=device)[:, None, None], ref]   # (1, T, M, M)
+    a = a * (a > 0.5)
+    w = a[:, None] * belief[:, :, None, :]                                                     # (1, T, M, M)
     vis = b["visibility"][0].bool()
     true = to_metres(b["traj"].float(), b)[0]
     piece = rigid_groups(b)[0].float().argmax(-1)                     # each point's piece: its first point
@@ -72,7 +72,7 @@ def main() -> int:
         for i in torch.nonzero(~vis[t])[:, 0].tolist():
             top = w[0, t, i].topk(args.mates)
             keep = top.values > 1e-3
-            hidden.append({"t": t, "i": i, "ref": int(ref[0, t, i]),
+            hidden.append({"t": t, "i": i,
                            "mates": top.indices[keep].tolist(), "w": [round(v, 3) for v in top.values[keep].tolist()]})
     r = lambda x: [[round(v, 4) for v in row] for row in x.tolist()]
     out = {"clip": ds.clips[args.clip].stem, "T": T, "given": N, "total": pos.shape[2],

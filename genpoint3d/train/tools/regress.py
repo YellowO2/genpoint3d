@@ -25,7 +25,7 @@ from typing import Callable, Optional
 import torch
 from torch import nn
 
-from genpoint3d.train.tools.kabsch import kabsch, robust_kabsch
+from genpoint3d.train.tools.kabsch import robust_kabsch
 from genpoint3d.train.tools.visibility import visibility_error
 
 
@@ -114,52 +114,10 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
     return alive, at
 
 
-def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
-                   member: torch.Tensor, seen: torch.Tensor, start: int, end: int,
-                   robust: int = 0) -> torch.Tensor:
-    """(B, L, N, 4) for frames `start` to `end`: where moving with its piece
-    would put each point, as an offset from its guess there, and how much backs
-    it (0 for nothing, towards 1). It is carried from the nearest frame it is
-    believed seen in (`last_seen`), so the turn carried is a short one and the mates are
-    ones seen there, where carrying from its query frame could use only mates
-    seen in that one frame.
-
-    pos (B, T, N, 3) every guess; q (B, N) query frames;
-    groups (B, N, E) the group vectors, member (B, N) the points that count;
-    seen (B, T, N) the belief each point is visible. For each point, in each frame, the points its group vector puts on its piece,
-    weighted by that likelihood and by being seen both there and in the frame
-    it is carried from: the turn and shift that best carry them from that
-    frame to this one (a weighted Kabsch fit), a shift alone with little behind
-    it, applied to where the point was in that frame. With `robust`, that many
-    refits, each mate's weight cut by how far it sat from the last fit against
-    the typical mate, so a few wrong mates cannot drag it. In float32: the
-    fit's SVD has no bfloat16 on the GPU."""
-    B, T, N, _ = pos.shape
-    ref = last_seen(seen, q)[:, start:end]
-    with torch.autocast(device_type=pos.device.type, enabled=False):
-        pos = pos.float()
-        R, ms, md, s = _rigid_fit(pos, ref, groups.float(), member, seen.float(), start, end, robust)
-        own = pos.gather(1, ref[..., None].expand(-1, -1, -1, 3))                    # (B, L, N, 3) where it was there
-        prop = (R @ (own - ms)[..., None])[..., 0] + md
-        off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
-        return torch.cat([off, (s / (s + 1))[..., None]], -1)
-
-
-def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-    """(B, T, N) for each point and frame the nearest frame it is believed seen
-    in (`seen` (B, T, N) over 0.5): the latest up to it, else the first after,
-    else its query frame (`q` (B, N))."""
-    B, T, N = seen.shape
-    t = torch.arange(T, device=seen.device)[None, :, None]
-    on = seen > 0.5
-    before = torch.where(on, t, -1).cummax(1).values
-    after = torch.where(on, t, T).flip(1).cummin(1).values.flip(1)
-    return torch.where(before >= 0, before, torch.where(after < T, after, q[:, None].expand(B, T, N)))
-
-
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
-                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0) -> torch.Tensor:
-    """(B, T, N, 3) each point where its object's pose puts it. A point's
+                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+    """(B, T, N, 3) each point where its object's pose puts it, and (B, T, N)
+    how many of its mates are seen behind that pose. A point's
     object is its own group-mates (likeness over a half, itself included; no
     chains, so one wrong pair cannot merge two objects), kept as one rigid
     shape in which a mate's place is fixed when it is given (in its query
@@ -172,7 +130,12 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
     given: a tracked point drifts as it turns from the look it was given by
     (on the ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). Where fewer
     than 3 mates back a pose the last one holds; a point not yet given keeps
-    its own guess. pos, q, groups, member as `rigid_proposal`'s."""
+    its own guess. The turn and the shape carry no gradient (an SVD's is
+    unstable where mates lie nearly in a line); the group vectors reach the
+    places through the weights' centres.
+
+    pos (B, T, N, 3) every guess; q (B, N) query frames; groups (B, N, E) the
+    group vectors, member (B, N) the points that count."""
     B, T, N, _ = pos.shape
     with torch.autocast(device_type=pos.device.type, enabled=False):
         pos, seen = pos.float(), seen.float()
@@ -183,6 +146,7 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
         R = torch.eye(3, device=pos.device).expand(B, N, 3, 3)
         ms = md = torch.zeros(B, N, 3, device=pos.device)
         out, own = pos.clone(), torch.arange(N, device=pos.device)
+        support = torch.zeros(B, T, N, device=pos.device)
         turns = []                                                                         # each frame's poses so far
         for t in range(T):
             w = a * seen[:, t, None, :] * given
@@ -193,57 +157,32 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
                 cos = (((R[:, :, None] * then).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
                 w = w / (1 + torch.rad2deg(torch.acos(cos)) / fresh).pow(2)
             Rn, msn, mdn, _ = robust_kabsch(w, shape, pos[:, t, None], robust)
-            ok = (a * seen[:, t, None, :] * given).sum(-1) >= 3                               # the mates seen, unweighted
-            R = torch.where(ok[..., None, None], Rn, R)
+            count = ((a > 0) & given).float().mul(seen[:, t, None, :]).sum(-1)              # the mates seen, unweighted
+            ok = count >= 3
+            support[:, t] = count * ok
+            R = torch.where(ok[..., None, None], Rn.detach(), R)
             ms, md = torch.where(ok[..., None], msn, ms), torch.where(ok[..., None], mdn, md)
             new = (q[:, None, :] == t) & (a > 0) & ~given
             back = ((R.transpose(-1, -2)[:, :, None] @ (pos[:, t, None] - md[:, :, None])[..., None])[..., 0]
                     + ms[:, :, None])                                                      # each j into i's shape
-            shape = torch.where(new[..., None], back, shape)
+            shape = torch.where(new[..., None], back.detach(), shape)
             given = given | new
             turns.append(R)
             mine = shape[:, own, own]                                                      # (B, N, 3) i in its own shape
             out[:, t] = torch.where(given[:, own, own][..., None],
                                     (R @ (mine - ms)[..., None])[..., 0] + md, pos[:, t])
-        return out
+        return out, support
 
 
-def rigid_motion(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
-                 member: torch.Tensor, seen: torch.Tensor, robust: int = 0) -> tuple:
-    """`rigid_proposal`'s fit in every frame of the clip, as its pieces: R (B,
-    T, N, 3, 3) the turn of each point's piece since its query frame, ms and
-    md (B, T, N, 3) the mates' centre there and now, s (B, T, N) the weight
-    behind it. Where moving with its piece puts a point: R (its query place - ms) + md."""
-    B, T, N, _ = pos.shape
-    with torch.autocast(device_type=pos.device.type, enabled=False):
-        return _rigid_fit(pos.float(), q[:, None].expand(B, T, N), groups.float(), member, seen.float(), 0, T, robust)
-
-
-def _rigid_fit(pos, ref, groups, member, seen, start, end, robust=0):
-    """The fit's pieces (R, ms, md, s) for frames `start` to `end`, each point's
-    mates carried from its frame `ref` (B, L, N) to each frame."""
-    B, T, N, _ = pos.shape
-    # A point's mates: every point its group vector puts on its piece (likelihood
-    # over a half; never another piece), weighted by that and by being seen both
-    # in the frame and in the one it is carried from, so the fit rests only on
-    # places seen, never on guesses of hidden ones.
-    a = 2 * torch.sigmoid(-_sq_dist(groups)) * (member[:, :, None] & member[:, None, :])
-    a = (a * (a > 0.5)).masked_fill(torch.eye(N, dtype=torch.bool, device=pos.device), 0.0)
-    b = torch.arange(B, device=pos.device)[:, None, None]
-    w0 = a[:, None] * seen[:, start:end, None, :] * seen[b, ref]                     # (B, L, N, N)
-    src = pos[b, ref]                                                               # (B, L, N, N, 3) in each one's frame
-    dst = pos[:, start:end, None]                                                   # (B, L, 1, N, 3)
-    return robust_kabsch(w0, src, dst, robust, _fit)
-
-
-def _fit(w, src, dst):
-    """`kabsch` over each point's mates (B, L, N, K), a shift alone with less
-    than 3 weight."""
-    R, ms, md, s = kabsch(w, src, dst)
-    # The turn carries no gradient (an SVD's is unstable where mates lie nearly
-    # in a line); the weights reach the fit through its centres.
-    R = torch.where((s >= 3)[..., None, None], R, torch.eye(3, device=w.device)).detach()
-    return R, ms, md, s
+def object_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
+                    seen: torch.Tensor, start: int, end: int, robust: int = 0, fresh: float = 0.0) -> torch.Tensor:
+    """(B, L, N, 4) for frames `start` to `end`: where its object's pose puts
+    each point (`object_places`), as an offset from its guess there (0 with
+    nothing behind it), and how much backs it, s / (s + 1) for s seen mates."""
+    places, support = object_places(pos, q, groups, member, seen, robust, fresh)
+    off = (places - pos.float())[:, start:end] * (support[:, start:end, :, None] > 0)
+    s = support[:, start:end, :, None]
+    return torch.cat([off, s / (s + 1)], -1)
 
 
 def _sq_dist(v: torch.Tensor) -> torch.Tensor:
@@ -321,9 +260,10 @@ class Sweeps:
                     vis = self.vis[:, start:end] if model.visibility else None
                     rigid = None
                     if model.rigid_proposal and self.groups is not None:
-                        rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], self.groups,
-                                               self.seen & self.known, torch.sigmoid(self.vis), start, end,
-                                               robust=model.fit_robust).detach()
+                        with torch.no_grad():
+                            rigid = object_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], self.groups,
+                                                    self.seen & self.known, torch.sigmoid(self.vis), start, end,
+                                                    robust=model.fit_robust, fresh=model.fit_fresh)
                     step, logits, emb, down = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
@@ -431,9 +371,9 @@ def regress_loss(
     vectors' error against `groups(start, end)`, the pairs to put together in
     the window's frames (what the window can see and its rigid fit needs),
     which way is down (the angle, radians) against `down_true` (B, 3) on the
-    clips `down_scored` (B,), those not told it, the rigid fit's own positions
-    from the group vectors the round said (`rigid_proposal`, the guess fixed)
-    against the truth, so the groups learn what the fit needs, and the
+    clips `down_scored` (B,), those not told it, the places the objects' poses
+    give from the group vectors the round said (`object_proposal`, the guess
+    fixed) against the truth, so the groups learn what the fit needs, and the
     visibility head's against
     `visible`. With `backward`, each round's loss times it is back-propagated
     at once (one round in memory) and the loss comes back detached. The dict
@@ -459,8 +399,8 @@ def regress_loss(
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, *groups(r.start, r.end), r.alive)
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
-            fit = rigid_proposal(clip, cond["query_t"], r.groups, run.seen & run.known,
-                                 torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust)
+            fit = object_proposal(clip, cond["query_t"], r.groups, run.seen & run.known,
+                                  torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust, fresh=model.fit_fresh)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if down_weight and down_scored.any():

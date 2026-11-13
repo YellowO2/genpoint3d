@@ -41,6 +41,7 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         rigid_proposal: bool = False,
         fit_robust: int = 0,
+        fit_fresh: float = 0.0,
         patch: int = 0,
     ) -> None:
         super().__init__()
@@ -111,13 +112,14 @@ class PointDiT(nn.Module):
             self.group_out = nn.Linear(dim, group_feedback)
             self.group_in = zero_init(nn.Linear(group_feedback, dim, bias=False), almost=False)
             self.group_bias = nn.Parameter(torch.zeros(depth, num_heads))
-        # Where moving with its piece would put each point (`regress.rigid_proposal`):
+        # Where its object's pose puts each point (`regress.object_proposal`):
         # the offset from its guess, Fourier-encoded, and how much backs it.
         if rigid_proposal and not group_feedback:
             raise ValueError("the rigid proposal comes from the group vectors: needs group_feedback")
         self.rigid_proposal = rigid_proposal
-        # Refits of the rigid proposal with far mates counting less (`regress.rigid_proposal`).
-        self.fit_robust = fit_robust
+        # Refits of the object's pose with far mates counting less, and mates counting less the
+        # farther their object has turned since they were given (`regress.object_places`).
+        self.fit_robust, self.fit_fresh = fit_robust, fit_fresh
         if rigid_proposal:
             self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
 
@@ -176,9 +178,9 @@ class PointDiT(nn.Module):
         group_known  (B, N) bool     the points that have said one (None: all)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
-        rigid        (B, T, N, 4)    where moving with its piece would put each point,
-                                     as an offset from its guess, and its support
-                                     (`regress.rigid_proposal`)
+        rigid        (B, T, N, 4)    where its object's pose puts each point, as an
+                                     offset from its guess, and its support
+                                     (`regress.object_proposal`)
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
         the group vectors (B, N, E) (those two None without their heads), and which way is

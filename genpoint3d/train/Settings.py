@@ -78,6 +78,8 @@ class Settings(argparse.Namespace):
         p.add_argument("--fit-robust", type=int, default=0,
                        help="refits of the rigid proposal, each mate counting less the further it sat from the last "
                             "fit, so a few wrong mates cannot drag it (0: one plain fit)")
+        p.add_argument("--fit-fresh", type=float, default=30.0, metavar="DEG",
+                       help="the object's pose counts a mate 1 / (1 + turn / DEG)^2 as much, its turn since given (0: alike)")
         p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],
                        help="each point told where moving with its piece would put it (needs --group-feedback)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
