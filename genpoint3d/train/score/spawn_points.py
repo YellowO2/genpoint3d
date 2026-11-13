@@ -1,8 +1,8 @@
-"""New points where a clip shows surface no point covers, as a tracker on real
-video adds them: training's spawning (`ClipDataset._spawned`) at test time,
-without the truth. From frame 0 on, the same rule: the first frame's gaps get
-points as CoTracker's predictor adds a support grid beside the queries, later
-frames' gaps are surface coming into view."""
+"""New points where surface comes into view with no point on it, as a tracker
+on real video adds them: training's spawning (`ClipDataset._spawned`) at test
+time, without the truth. As there, from the frame after the first and only on
+new surface: a gap that was a gap the frame before (scene no point was ever
+on) is not new."""
 
 import torch
 
@@ -16,10 +16,11 @@ from genpoint3d.train.tools.camera import project
 def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None,
             view: torch.Tensor, cap: int, gap: float) -> dict:
     """`b` (one clip) with up to `cap` points added after its own: frame by
-    frame, in each frame seen whole, the CNN cells farther than `gap` (a share
-    of the frame's width) from every point placed there and believed visible,
-    the farthest first, each starting at its cell in that frame, its look read
-    there. `tracks` and `logits` are a first pass over `b`'s own points; a
+    frame, in each frame seen whole after the first, the CNN cells farther than
+    `gap` (a share of the frame's width) from every point placed there and
+    believed visible, and in 3D farther than about a cell from every such cell
+    the frame before, the farthest first, each starting at its cell in that
+    frame, its look read there. `tracks` and `logits` are a first pass over `b`'s own points; a
     point added earlier is carried by the motion of the own point nearest it
     in 3D, seen where that one is. The added points' truth is unknown: never
     visible, so never scored."""
@@ -39,11 +40,17 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
     h, w = fine["fine_xyz"].shape[-2:]
     v, u = torch.meshgrid(torch.arange(h, device=pos.device), torch.arange(w, device=pos.device), indexing="ij")
     cell_px = torch.stack([(u.flatten() + 0.125) / w * W, (v.flatten() + 0.125) / h * H], -1).float()
+    # How far apart neighbouring cells are in 3D, the nearest of the four: a
+    # cell this near a gap of the frame before is that gap again.
+    g = fine["fine_xyz"][0].float()                                                     # (T, 3, h, w)
+    inf = lambda shape: torch.full(shape, float("inf"), device=g.device)
+    dx, dy = (g[..., 1:] - g[..., :-1]).norm(dim=1), (g[..., 1:, :] - g[..., :-1, :]).norm(dim=1)
+    spacing = torch.stack([torch.cat([inf((T, h, 1)), dx], 2), torch.cat([dx, inf((T, h, 1))], 2),
+                           torch.cat([inf((T, 1, w)), dy], 1), torch.cat([dy, inf((T, 1, w))], 1)]).amin(0).flatten(1)
     far = gap * W
     born = []                                                       # (frame, cell, position, nearest own point)
+    before = None                                                   # the frame before's gaps, in 3D
     for t in range(T):
-        if len(born) >= cap:
-            break
         if not whole[t]:
             continue
         cover = [pos[t, believed[t]]]
@@ -55,10 +62,17 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
         d = (torch.cdist(cell_px[cand], px(cover, t)).min(1).values if len(cover)
              else torch.full((len(cand),), float("inf"), device=pos.device))
         own = torch.nonzero(believed[t])[:, 0]
-        for j in farthest_first(cell_px[cand], d, far, cap - len(born) if len(own) else 0):
+        new = d if before is None else torch.where(
+            torch.cdist(xyz[t, cand], before).min(1).values > 1.5 * spacing[t, cand] if len(before)
+            else torch.ones_like(d, dtype=torch.bool), d, torch.zeros_like(d))
+        picked = farthest_first(cell_px[cand], new, far, cap - len(born) if len(own) and before is not None else 0)
+        for j in picked:
             p = xyz[t, cand[j]]
             i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])
             born.append((t, int(cand[j]), p, i))
+        if picked:
+            d = torch.minimum(d, torch.cdist(cell_px[cand], cell_px[cand[picked]]).min(1).values)
+        before = xyz[t, cand[d > far]]
     if not born:
         return b
     M = len(born)
