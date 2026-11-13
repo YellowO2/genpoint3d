@@ -155,6 +155,18 @@ def main() -> int:
                 rows.setdefault(("mates", label, name), []).append(apd)
         for kind, mask in (("hidden", ~vis), ("seen", vis)):
             backing[kind].append(prop[:, :, :N, 3][mask].float().cpu())
+        # A fifth of the truly seen points kept out of the fits, then placed like hidden ones: placed
+        # as well as the points the fit rests on, or as badly as the hidden ones?
+        held = (torch.rand(vis.shape, device=vis.device) < 0.2) & vis
+        out_belief = belief.clone()
+        out_belief[:, :, :N] = belief[:, :, :N] * ~held
+        e_held = (to_metres((object_places(pos, eq, sweeps.groups, member, out_belief, robust=3)
+                             - anchor[:, None])[:, :, :N] / model.traj_scale, b) - gt).norm(dim=-1)        # (B, T, N)
+        per_frame = lambda m: torch.stack([e_held[:, t][m[:, t]].median() if m[:, t].any() else e_held.new_tensor(float("nan"))
+                                           for t in range(T)])
+        rows.setdefault(("held", "frames"), []).append(torch.arange(T))
+        for kind, m in (("in the fit", vis & ~held & moving), ("kept out", held & moving), ("hidden", ~vis & moving)):
+            rows.setdefault(("held", kind), []).append(per_frame(m).cpu())
         # The object-pose placement's error by how far a point is from the centre of its true
         # piece's points seen in that frame: a turn measured from those carries farther points worse.
         seen_w = vis.float()[:, :, None, :] * mates.float()[:, None]                          # (B, T, N, N)
@@ -196,6 +208,11 @@ def main() -> int:
               f"{clip_mean(rows['used mates', 'apd']):.4f} (all seen: {clip_mean(rows['seen', 'all', 'guess']):.4f}); "
               f"the piece's turn since the query frame, median degrees: true {med('true'):.1f}, "
               f"from the predicted places {med('pred'):.1f}, the two {med('apart'):.1f} apart")
+    print("\nThe object-pose placement with a fifth of the seen points kept out of its fits, error (cm, median) by frame:")
+    print("  frame     " + "".join(f"{t:>6}" for t in range(len(rows["held", "frames"][0]))))
+    for kind in ("in the fit", "kept out", "hidden"):
+        e = torch.stack([v for v in rows["held", kind]]).nanmedian(0).values
+        print(f"  {kind:<10}" + "".join(f"{x:>6.1f}" if x == x else f"{'-':>6}" for x in (100 * e).tolist()))
     print("\nThe object-pose placement's error (cm, median) by distance from the centre of the piece's seen points:")
     for kind in ("seen", "hidden"):
         v = torch.cat(rows["by distance", kind])
