@@ -95,12 +95,15 @@ def main() -> int:
         true_pos = pos.clone()
         true_pos[:, :, :N] = model.lookup_pos(b["traj"].float(), anchor[:, :N])
         (uv_p, z_p), (uv_t, z_t) = project(pos, proj), project(true_pos, proj)
-        # The model's own errors, the same sizes and directions, dealt out to other points of
-        # the clip at random each frame: their size kept, any pattern across points broken.
-        err = (pos - true_pos)[:, :, :N]
-        deal = torch.argsort(torch.rand(err.shape[:3], device=err.device), dim=2)
-        shuffled = true_pos.clone()
-        shuffled[:, :, :N] += err.gather(2, deal[..., None].expand(-1, -1, -1, 3))
+        # The seen points' own errors, the same sizes and directions, dealt out among the
+        # points seen in that frame at random: their size kept, any pattern across points
+        # broken. The rest keep their predicted places.
+        err = pos - true_pos
+        shuffled = pos.clone()
+        for bi in range(err.shape[0]):
+            for t in range(T):
+                on = torch.nonzero(vis[bi, t])[:, 0]
+                shuffled[bi, t, on] = true_pos[bi, t, on] + err[bi, t, on[torch.randperm(len(on), device=on.device)]]
         for name, mixed in (("true depth", unproject(uv_p, z_t, proj)), ("true image", unproject(uv_t, z_p, proj)),
                             ("true both", true_pos), ("errors dealt", shuffled)):
             # The fit's offset is from the places it was given, here not the guess.
