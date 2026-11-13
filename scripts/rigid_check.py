@@ -12,12 +12,9 @@ fit refit 3 times with mates far from it counting less (`robust`): good says
 a few wrong mates were what dragged it. The hidden moving
 point-frames are then split by how many points of the point's true piece are
 seen in that frame: with none, the fit has only guesses to go on; with many,
-it should be about as good as the seen points. Beside them, each point
-carried frame by frame instead (`chained_places`: a mate counts for every step
-it is seen through), with the model's groups and the true ones. With
-`--spawn`, points are first added on new surface as at test time; they are
-mates but not scored, and have no truth, so the true-group columns are left
-out.
+it should be about as good as the seen points. With `--spawn`, points are
+first added on new surface as at test time; they are mates but not scored,
+and have no truth, so the true-group columns are left out.
 
 Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
 """
@@ -31,7 +28,7 @@ from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawned
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
-from genpoint3d.train.tools.regress import Sweeps, chained_places, rigid_proposal
+from genpoint3d.train.tools.regress import Sweeps, rigid_proposal
 
 
 @torch.no_grad()
@@ -57,7 +54,7 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "proposal", "robust", "chained") + (() if args.spawn else ("true groups", "true robust", "true chained"))
+    names = ("guess", "proposal", "robust") + (() if args.spawn else ("true groups", "true robust"))
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -82,12 +79,10 @@ def main() -> int:
         guess = sweeps.whole.float()
         pos = model.lookup_pos(guess, anchor)
         belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
-        to_guess = lambda places: (places - anchor[:, None]) / model.traj_scale
         prop = rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T)
         fits = {"guess": guess, "proposal": guess + prop[..., :3] / model.traj_scale,
                 "robust": guess + rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T,
-                                                 robust=3)[..., :3] / model.traj_scale,
-                "chained": to_guess(chained_places(pos, sweeps.groups, member, belief, robust=3))}
+                                                 robust=3)[..., :3] / model.traj_scale}
         if not args.spawn:
             # The true pieces as group vectors: one axis each, far apart.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
@@ -95,7 +90,6 @@ def main() -> int:
             fits["true groups"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T)[..., :3] / model.traj_scale
             fits["true robust"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T,
                                                          robust=3)[..., :3] / model.traj_scale
-            fits["true chained"] = to_guess(chained_places(pos, truth, sweeps.seen, belief, robust=3))
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
         gt = to_metres(traj, b)
