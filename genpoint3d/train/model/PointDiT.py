@@ -22,11 +22,6 @@ from genpoint3d.train.model.tools.layers import (
 from genpoint3d.train.tools.camera import project
 
 
-# The acceleration head's unit: an output of 1 is 0.01 of the clip's unit (or a
-# radian) per frame squared, about gravity on a typical Kubric clip.
-ACC_SCALE = 0.01
-
-
 class PointDiT(nn.Module):
     """Tokens on a (T frames) x (N points) grid, attention factorised into
     one point across time and all points within one frame."""
@@ -46,9 +41,6 @@ class PointDiT(nn.Module):
         feedback_scale: float = 1.0,
         rigid_proposal: bool = False,
         fit_robust: int = 0,
-        fit_blend: bool = False,
-        physics: bool = False,
-        blend_hidden: bool = False,
         patch: int = 0,
     ) -> None:
         super().__init__()
@@ -127,28 +119,7 @@ class PointDiT(nn.Module):
         # Refits of the rigid proposal with far mates counting less (`regress.rigid_proposal`).
         self.fit_robust = fit_robust
         if rigid_proposal:
-            # With `fit_blend`, also how far the piece has turned.
-            self.rigid_in = zero_init(nn.Linear(99 + 1 + fit_blend, dim, bias=False), almost=False)
-        # How far each point trusts its own match in each frame: the rest of the
-        # way, `regress.Sweeps` moves it to where its piece's fit puts it. From
-        # near full trust.
-        self.fit_blend = fit_blend
-        # Only points believed hidden are moved towards their piece's place.
-        self.blend_hidden = blend_hidden
-        if fit_blend:
-            if not rigid_proposal:
-                raise ValueError("the blend moves points towards the rigid fit: needs rigid_proposal")
-            self.trust_out = zero_init(nn.Linear(dim, 1), almost=False)
-            nn.init.constant_(self.trust_out.bias, 3.0)
-        # What each point says of its piece's acceleration and change of spin in
-        # each frame (the clip's unit, radians, per frame squared), from zero:
-        # the piece's motion carried on where its fit has too little behind it
-        # (`regress.object_paths`).
-        self.physics = physics
-        if physics:
-            if not fit_blend:
-                raise ValueError("the carried motion reaches the points through the blend: needs fit_blend")
-            self.acc_out = zero_init(nn.Linear(dim, 6, bias=False), almost=False)
+            self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -205,15 +176,13 @@ class PointDiT(nn.Module):
         group_known  (B, N) bool     the points that have said one (None: all)
         frames       (start, end)    the clip frames `x` covers; None = all
         x_before     (B, 1, N, 3)    the guess in the clip frame before `frames`
-        rigid        (B, T, N, 5)    where moving with its piece would put each point,
-                                     as an offset from its guess, its support and how far
-                                     its piece has turned (`regress.rigid_proposal`)
+        rigid        (B, T, N, 4)    where moving with its piece would put each point,
+                                     as an offset from its guess, and its support
+                                     (`regress.rigid_proposal`)
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
-        the group vectors (B, N, E) (those two None without their heads), which way is
-        down (B, 3), a unit vector, with `fit_blend` the logit of how far each point trusts its
-        own match (B, T, N), and with `physics` what it says of its piece's acceleration and
-        change of spin (B, T, N, 6) (each None without).
+        the group vectors (B, N, E) (those two None without their heads), and which way is
+        down (B, 3), a unit vector.
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
@@ -295,7 +264,7 @@ class PointDiT(nn.Module):
         if rigid is not None:
             with torch.autocast(device_type=dev.type, enabled=False):
                 r = torch.cat([_posenc(rigid[..., :3].float().clamp(-2, 2)),
-                               rigid[..., 3:5 if self.fit_blend else 4].float()], -1)
+                               rigid[..., 3:4].float()], -1)
             h = h + self.rigid_in(r.to(h.dtype))
         if self.visibility != (vis_prev is not None):
             raise ValueError("vis_prev is given exactly to a model with the visibility head")
@@ -362,9 +331,7 @@ class PointDiT(nn.Module):
         here = (alive if alive is not None else torch.ones(B, N, dtype=torch.bool, device=dev)).float()
         pooled = (h.float().mean(1) * here[..., None]).sum(1) / here.sum(1, keepdim=True).clamp_min(1)
         down_said = F.normalize(self.down_out(pooled).float(), dim=-1)
-        trust = self.trust_out(h)[..., 0].float() if self.fit_blend else None
-        acc = self.acc_out(h).float() * ACC_SCALE if self.physics else None
-        return self.place(h), logits, groups, down_said, trust, acc
+        return self.place(h), logits, groups, down_said
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):

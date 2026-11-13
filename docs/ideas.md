@@ -24,6 +24,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 ## Ruled out
 
 - Physics carried by an object centre (v1, `--physics`, object_paths): an object's true centre cannot be found from one side of it, and floors and walls have none.
+- Trust and blend (`--fit-blend`): broke training at the full learning rate (runs.md, physics_3k); the trust target compared two moving answers.
 - Telling the model how far its mates sit from its rigid fit (`--fit-left`): no better hidden points (runs.md, 13 Nov).
 - A pairwise motion check as an attention bias between points (how much each pair's distance changed): no better groups or fit at step 500 (runs.md, 13 Nov).
 - A point's own template refreshed to its latest clear look at its guessed position (`--template latest`): standard moving 0.729 against 0.768 at step 500; the guess's error becomes the target (0.543 late, against 0.775 with the true position).

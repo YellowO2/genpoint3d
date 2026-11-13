@@ -5,7 +5,7 @@ from genpoint3d.train.model.PointDiT import PointDiT
 
 def build_model(settings, feat_dim: int) -> PointDiT:
     """The model of a run's settings, or of a checkpoint's
-    (`Settings(**ckpt["args"])`); a setting the checkpoint predates is off."""
+    (`Settings.saved(ckpt["args"])`); a setting the checkpoint predates is off."""
     a = lambda name, default: getattr(settings, name, default)
     return PointDiT(dim=settings.dim, depth=settings.depth, num_heads=settings.heads, feat_dim=feat_dim,
                     cross_window=a("cross_window", 49), fine_neigh=a("fine_neigh", 32),
@@ -14,7 +14,4 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     feedback_scale=a("feedback_scale", 1.0),
                     rigid_proposal=bool(a("rigid_proposal", 0)),
                     fit_robust=a("fit_robust", 0),
-                    fit_blend=bool(a("fit_blend", 0)),
-                    physics=bool(a("physics", 0)),
-                    blend_hidden=bool(a("blend_hidden", 0)),
                     patch=a("patch", 0))

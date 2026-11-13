@@ -3,10 +3,25 @@
 import argparse
 
 
+# Flags since removed, as a checkpoint may still hold them: each with the value
+# that left it off. A loss weight here only weighed its feature's loss.
+REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None}
+
+
 class Settings(argparse.Namespace):
     """The run's flags, one attribute each. `vars(settings)` is what a
-    checkpoint saves as its `args`, and `Settings(**ckpt["args"])` is that
+    checkpoint saves as its `args`, and `Settings.saved(ckpt["args"])` is that
     run's settings again. The defaults are the current design."""
+
+    @classmethod
+    def saved(cls, args: dict) -> "Settings":
+        """A checkpoint's settings, its removed flags dropped where they were
+        off; one that was on is an error, not a different model."""
+        on = {k: args[k] for k, off in REMOVED.items() if off is not None and args.get(k, off) != off}
+        if on:
+            raise ValueError(f"the checkpoint was trained with features since removed: {on} "
+                             "(check out a commit from before their removal to load it)")
+        return cls(**{k: v for k, v in args.items() if k not in REMOVED})
 
     @classmethod
     def from_command_line(cls, argv: list[str] | None = None) -> "Settings":
@@ -57,14 +72,6 @@ class Settings(argparse.Namespace):
         p.add_argument("--fine-neigh", type=int, default=32, help="CNN cells per 3D neighbourhood")
         p.add_argument("--group-feedback", type=int, default=16, metavar="E",
                        help="width of each point's group vector, fed back each call (0: none)")
-        p.add_argument("--fit-blend", type=int, default=0, choices=[0, 1],
-                       help="each point says how far it trusts its own match; the rest of the way it moves to "
-                            "where its piece's rigid fit puts it, and it counts that much as a mate in the fit")
-        p.add_argument("--physics", type=int, default=0, choices=[0, 1],
-                       help="each point's piece carried on, by its centre's velocity and spin and the acceleration "
-                            "the points say, where its fit has too little behind it (needs --fit-blend)")
-        p.add_argument("--blend-hidden", type=int, default=0, choices=[0, 1],
-                       help="the blend moves only points the round believes hidden; seen ones keep their own match")
         p.add_argument("--patch", type=int, default=0, metavar="P",
                        help="attention between points only within patches of P points near each other (Point "
                             "Transformer V3's serialized attention); 0: every point reads every other")
@@ -99,11 +106,6 @@ class Settings(argparse.Namespace):
         p.add_argument("--fit-loss", type=float, default=1.0,
                        help="the rigid fit's own positions from each round's group vectors against the truth, "
                             "training the groups through the fit (0: off)")
-        p.add_argument("--trust-loss", type=float, default=1.0,
-                       help="each point's trust in its own match against whether it is nearer the truth than its "
-                            "piece's place (with --fit-blend)")
-        p.add_argument("--physics-loss", type=float, default=1.0,
-                       help="the carried-on places against the truth (with --physics)")
         p.add_argument("--down-loss", type=float, default=1.0,
                        help="which way is down, said for clips not told it: its angle off the truth")
         p.add_argument("--group-labels", default="motion", choices=["object", "motion"],

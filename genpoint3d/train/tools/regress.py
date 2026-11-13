@@ -23,7 +23,6 @@ from itertools import groupby
 from typing import Callable, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from genpoint3d.train.tools.kabsch import kabsch, robust_kabsch
@@ -118,11 +117,10 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
 def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
                    member: torch.Tensor, seen: torch.Tensor, start: int, end: int,
                    robust: int = 0) -> torch.Tensor:
-    """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
-    would put each point, as an offset from its guess there, how much backs it
-    (0 for nothing, towards 1), and how far its piece has turned since the
-    frame it is carried from (radians): the nearest frame it is believed seen
-    in (`last_seen`), so the turn carried is a short one and the mates are
+    """(B, L, N, 4) for frames `start` to `end`: where moving with its piece
+    would put each point, as an offset from its guess there, and how much backs
+    it (0 for nothing, towards 1). It is carried from the nearest frame it is
+    believed seen in (`last_seen`), so the turn carried is a short one and the mates are
     ones seen there, where carrying from its query frame could use only mates
     seen in that one frame.
 
@@ -142,7 +140,9 @@ def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
         pos = pos.float()
         R, ms, md, s = _rigid_fit(pos, ref, groups.float(), member, seen.float(), start, end, robust)
         own = pos.gather(1, ref[..., None].expand(-1, -1, -1, 3))                    # (B, L, N, 3) where it was there
-        return _proposal(pos[:, start:end], own, R, ms, md, s)
+        prop = (R @ (own - ms)[..., None])[..., 0] + md
+        off = (prop - pos[:, start:end]) * (s > 1e-3)[..., None]
+        return torch.cat([off, (s / (s + 1))[..., None]], -1)
 
 
 def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
@@ -155,27 +155,6 @@ def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     before = torch.where(on, t, -1).cummax(1).values
     after = torch.where(on, t, T).flip(1).cummin(1).values.flip(1)
     return torch.where(before >= 0, before, torch.where(after < T, after, q[:, None].expand(B, T, N)))
-
-
-def frame_by_frame(pos: torch.Tensor, groups: torch.Tensor, member: torch.Tensor, seen: torch.Tensor,
-                   robust: int = 0) -> torch.Tensor:
-    """(B, T, N, 3) each point where its piece carries it a frame at a time:
-    in each frame, the turn and shift that best carry the piece's points seen
-    both there and in the frame before (`_rigid_fit`'s mates), applied to
-    where the point was in the frame before; its own guess where it is
-    believed seen (`seen` (B, T, N) over 0.5) or nothing backs the step.
-    pos, groups, member as `rigid_proposal`'s."""
-    B, T, N, _ = pos.shape
-    with torch.autocast(device_type=pos.device.type, enabled=False):
-        pos, seen = pos.float(), seen.float()
-        out = [pos[:, 0]]
-        for t in range(1, T):
-            ref = torch.full((B, T, N), t - 1, dtype=torch.long, device=pos.device)
-            R, ms, md, s = _rigid_fit(pos, ref[:, t:t + 1], groups.float(), member, seen, t, t + 1, robust)
-            carried = (R @ (out[-1][:, None] - ms)[..., None])[..., 0] + md                 # (B, 1, N, 3)
-            own = (seen[:, t] > 0.5) | (s[:, 0] <= 1e-3)
-            out.append(torch.where(own[..., None], pos[:, t], carried[:, 0]))
-        return torch.stack(out, 1)
 
 
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
@@ -229,15 +208,6 @@ def rigid_motion(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
         return _rigid_fit(pos.float(), q[:, None].expand(B, T, N), groups.float(), member, seen.float(), 0, T, robust)
 
 
-def _proposal(pos_w, own, R, ms, md, s):
-    """`rigid_proposal`'s (B, L, N, 5) from the fit's pieces in those frames,
-    `own` (B, L, N, 3) where each point was in the frame it is carried from."""
-    prop = (R @ (own - ms)[..., None])[..., 0] + md
-    off = (prop - pos_w) * (s > 1e-3)[..., None]
-    turn = torch.acos(((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1))
-    return torch.cat([off, (s / (s + 1))[..., None], turn[..., None]], -1)
-
-
 def _rigid_fit(pos, ref, groups, member, seen, start, end, robust=0):
     """The fit's pieces (R, ms, md, s) for frames `start` to `end`, each point's
     mates carried from its frame `ref` (B, L, N) to each frame."""
@@ -263,84 +233,6 @@ def _fit(w, src, dst):
     # in a line); the weights reach the fit through its centres.
     R = torch.where((s >= 3)[..., None, None], R, torch.eye(3, device=w.device)).detach()
     return R, ms, md, s
-
-
-# A piece's fit counts as supported with this much weight behind it (3 mates,
-# backing s / (s + 1) of 0.75).
-SUPPORTED = 3.0
-
-
-def object_paths(R, ms, md, s, anchor, acc):
-    """(B, T, N, 3) where each point's piece carries it, anchor's space, in the
-    frames its fit is not `SUPPORTED`, and (B, T, N) where it does so: from
-    the piece's last two supported frames its centre's velocity and its spin,
-    then each frame its acceleration and change of spin `acc` (B, T, N, 6, the
-    clip's unit and radians per frame squared, what the point says of its
-    piece) added, the point carried rigidly with it. None before the piece has
-    had two supported frames. R, ms, md, s as `rigid_motion` gives them."""
-    B, T, N = s.shape
-    dev = s.device
-    sup = s >= SUPPORTED
-    eye = torch.eye(3, device=dev).expand(B, N, 3, 3)
-    zero = torch.zeros(B, N, 3, device=dev)
-    pick = lambda m, a, b: torch.where(m.view(*m.shape, *([1] * (a.dim() - m.dim()))), a, b)
-    R1 = R2 = Rk = eye
-    ms1 = ms2 = md1 = md2 = ref = c = v = w = zero
-    t1 = t2 = torch.zeros(B, N, device=dev)
-    have = torch.zeros(B, N, dtype=torch.long, device=dev)
-    on = torch.zeros(B, N, dtype=torch.bool, device=dev)
-    paths, oks = [], []
-    for k in range(T):
-        sk = sup[:, k]
-        # The last two supported frames.
-        R1, ms1, md1, t1 = pick(sk, R2, R1), pick(sk, ms2, ms1), pick(sk, md2, md1), pick(sk, t2, t1)
-        R2, ms2, md2 = pick(sk, R[:, k], R2), pick(sk, ms[:, k], ms2), pick(sk, md[:, k], md2)
-        t2 = pick(sk, torch.full_like(t2, float(k)), t2)
-        have = torch.where(sk, (have + 1).clamp(max=2), have)
-        on = on & ~sk
-        # Carried from the frame after the last supported one: the centre the
-        # point's own mates had there, and how it and the turn were moving.
-        begin = ~sk & ~on & (have >= 2)
-        gap = (t2 - t1).clamp_min(1)[..., None]
-        c1 = (R1 @ (ms2 - ms1)[..., None])[..., 0] + md1
-        turn = _so3_log(R2 @ R1.transpose(-1, -2)) / gap
-        ref, c, v = pick(begin, ms2, ref), pick(begin, md2, c), pick(begin, (md2 - c1) / gap, v)
-        Rk, w = pick(begin, R2, Rk), pick(begin, turn, w)
-        on = on | begin
-        a = acc[:, k].float()
-        v = pick(on, v + a[..., :3], v)
-        c = pick(on, c + v, c)
-        w = pick(on, w + a[..., 3:], w)
-        Rk = pick(on, _so3_exp(w) @ Rk, Rk)
-        paths.append((Rk @ (anchor.float() - ref)[..., None])[..., 0] + c)
-        oks.append(on)
-    return torch.stack(paths, 1), torch.stack(oks, 1)
-
-
-def _skew(w: torch.Tensor) -> torch.Tensor:
-    z = torch.zeros_like(w[..., 0])
-    return torch.stack([torch.stack([z, -w[..., 2], w[..., 1]], -1),
-                        torch.stack([w[..., 2], z, -w[..., 0]], -1),
-                        torch.stack([-w[..., 1], w[..., 0], z], -1)], -2)
-
-
-def _so3_exp(w: torch.Tensor) -> torch.Tensor:
-    """(..., 3) a turn as axis times angle -> (..., 3, 3) its rotation."""
-    th = w.norm(dim=-1)[..., None, None]
-    K = _skew(w)
-    ts = th.clamp_min(1e-4)
-    a = torch.where(th < 1e-4, 1 - th ** 2 / 6, torch.sin(ts) / ts)
-    b = torch.where(th < 1e-4, 0.5 - th ** 2 / 24, (1 - torch.cos(ts)) / ts ** 2)
-    return torch.eye(3, device=w.device) + a * K + b * (K @ K)
-
-
-def _so3_log(R: torch.Tensor) -> torch.Tensor:
-    """(..., 3, 3) a rotation -> (..., 3) its axis times angle (angles below pi)."""
-    cos = ((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1 + 1e-6, 1 - 1e-6)
-    th = torch.acos(cos)
-    v = torch.stack([R[..., 2, 1] - R[..., 1, 2], R[..., 0, 2] - R[..., 2, 0], R[..., 1, 0] - R[..., 0, 1]], -1)
-    k = torch.where(th < 1e-4, torch.full_like(th, 0.5), th / (2 * torch.sin(th).clamp_min(1e-8)))
-    return k[..., None] * v
 
 
 def _sq_dist(v: torch.Tensor) -> torch.Tensor:
@@ -371,12 +263,6 @@ class _Round:
     groups: Optional[torch.Tensor]  # (B, N, E) group vectors, with their graph
     alive: torch.Tensor             # (B, N)
     down: torch.Tensor              # (B, 3) which way is down, with its graph
-    trust: Optional[torch.Tensor] = None     # (B, L, N) logits of trusting the own match, with the blend
-    own: Optional[torch.Tensor] = None       # (B, L, N, 3) the own match, before the blend
-    obj: Optional[torch.Tensor] = None       # (B, L, N, 3) where the point's piece puts it
-    obj_ok: Optional[torch.Tensor] = None    # (B, L, N) where there is one
-    phys: Optional[torch.Tensor] = None      # (B, L, N, 3) the carried part of `obj`, with its graph
-    phys_ok: Optional[torch.Tensor] = None   # (B, L, N) where `obj` is carried
 
 
 class Sweeps:
@@ -402,12 +288,6 @@ class Sweeps:
         self.known = torch.zeros(B, N, dtype=torch.bool, device=anchor.device)
         # Each point's earliest frame a window has settled; T for none yet.
         self.first = torch.full((B, N), T, dtype=torch.long, device=anchor.device)
-        # How far each point trusts its own match in each frame, as last said;
-        # its weight as a mate in the rigid fit (`--fit-blend`).
-        self.trust = torch.ones(B, T, N, device=anchor.device)
-        # What each point last said of its piece's acceleration and change of
-        # spin in each frame (`--physics`).
-        self.acc = torch.zeros(B, T, N, 6, device=anchor.device)
         # Which way is down: as told, else as the model last said once it has.
         self.told = cond["down_known"]
         self.down = cond["down"].float()
@@ -428,19 +308,12 @@ class Sweeps:
                 before = self.whole[:, start - 1:start] if start else None
                 for i in range(r0, r0 + n):
                     vis = self.vis[:, start:end] if model.visibility else None
-                    rigid = motion = None
+                    rigid = None
                     if model.rigid_proposal and self.groups is not None:
-                        clip_pos = model.lookup_pos(self.whole, anchor)
-                        fit_in = (clip_pos, self.cond["query_t"], self.groups, self.seen & self.known,
-                                  torch.sigmoid(self.vis) * self.trust)
-                        if model.physics:
-                            # Every frame's fit: the motion is carried from its supported frames.
-                            motion = tuple(t.detach() for t in rigid_motion(*fit_in, robust=model.fit_robust))
-                            rigid = _proposal(clip_pos[:, start:end].float(), anchor.float()[:, None],
-                                              *(t[:, start:end] for t in motion))
-                        else:
-                            rigid = rigid_proposal(*fit_in, start, end, robust=model.fit_robust).detach()
-                    step, logits, emb, down, trust, acc = model(
+                        rigid = rigid_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], self.groups,
+                                               self.seen & self.known, torch.sigmoid(self.vis), start, end,
+                                               robust=model.fit_robust).detach()
+                    step, logits, emb, down = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
                         rigid=rigid, **{**self.cond, "down": self.down, "down_known": self.down_known})
@@ -454,37 +327,8 @@ class Sweeps:
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
                     own = g.detach() + _corrected(step, at, self.rays)
-                    rec = {}
-                    if trust is not None and rigid is not None:
-                        # Where its piece puts it: the fit, where enough mates back it;
-                        # with --physics, the piece's motion carried on where not.
-                        obj = self.whole[:, start:end] + rigid[..., :3] / model.traj_scale
-                        obj_ok = rigid[..., 3] >= SUPPORTED / (SUPPORTED + 1)
-                        if acc is not None:
-                            clip_acc = torch.cat([self.acc[:, :start], acc.float(), self.acc[:, end:]], 1)
-                            paths, carried = object_paths(*motion, anchor, clip_acc)
-                            phys = (paths[:, start:end] - anchor[:, None].float()) / model.traj_scale
-                            phys_ok = carried[:, start:end] & ~obj_ok
-                            obj = torch.where(phys_ok[..., None], phys, obj)
-                            obj_ok = obj_ok | phys_ok
-                            rec.update(phys=phys, phys_ok=phys_ok)
-                            self.acc = self.acc.clone()
-                            self.acc[:, start:end] = torch.where(alive[:, None, :, None], acc.detach().float(),
-                                                                 self.acc[:, start:end])
-                        # Towards it, as far as the point distrusts its own match; never
-                        # at its query frame; with `blend_hidden`, only where this round
-                        # believes it hidden (a frame without its image included).
-                        if model.blend_hidden and logits is not None:
-                            obj_ok = obj_ok & (logits.float() < 0)
-                        t_w = torch.arange(end - start, device=dev)[None, :, None]
-                        p = torch.sigmoid(trust.float())
-                        pull = (1 - p) * (obj_ok & (t_w != at[:, None])).float()
-                        rec.update(trust=trust, own=own.detach(), obj=obj, obj_ok=obj_ok)
-                        own = own + pull[..., None] * (obj - own.detach())
-                        self.trust = self.trust.clone()
-                        self.trust[:, start:end] = torch.where(alive[:, None], p.detach(), self.trust[:, start:end])
                     g = torch.where(alive[:, None, :, None], own, g.detach())
-                    yield _Round(i, start, end, g, logits, emb, alive, down, **rec)
+                    yield _Round(i, start, end, g, logits, emb, alive, down)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 self.first = torch.where(alive, self.first.clamp(max=start), self.first)
                 if not back:
@@ -564,8 +408,6 @@ def regress_loss(
     down_scored: Optional[torch.Tensor] = None,
     down_weight: float = 0.0,
     fit_weight: float = 0.0,
-    trust_weight: float = 0.0,
-    phys_weight: float = 0.0,
     window: int = 0,
     overlap: int = 0,
     schedule: str = "",
@@ -607,17 +449,9 @@ def regress_loss(
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
             fit = rigid_proposal(clip, cond["query_t"], r.groups, run.seen & run.known,
-                                 torch.sigmoid(run.vis) * run.trust, r.start, r.end, robust=model.fit_robust)
+                                 torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
-        if trust_weight and r.trust is not None:
-            # Trust the own match where it is nearer the truth than the piece's place.
-            right = ((r.own - x1_w).norm(dim=-1) <= (r.obj.detach() - x1_w).norm(dim=-1)).float()
-            m = (r.obj_ok & mask_w).float()
-            bce = F.binary_cross_entropy_with_logits(r.trust.float(), right, reduction="none")
-            loss = loss + w[r.i] * trust_weight * (bce * m).sum() / m.sum().clamp_min(1)
-        if phys_weight and r.phys is not None:
-            loss = loss + w[r.i] * phys_weight * _error(r.phys, x1_w, mask_w & r.phys_ok, weight_w)
         if down_weight and down_scored.any():
             off = _angle(r.down, down_true.float())
             loss = loss + w[r.i] * down_weight * (off * down_scored).sum() / down_scored.sum()

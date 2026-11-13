@@ -31,7 +31,7 @@ from genpoint3d.train.score.spawn_points import spawn_all
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project, unproject
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
-from genpoint3d.train.tools.regress import Sweeps, frame_by_frame, object_places, rigid_motion, rigid_proposal
+from genpoint3d.train.tools.regress import Sweeps, object_places, rigid_motion, rigid_proposal
 
 
 @torch.no_grad()
@@ -61,7 +61,7 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "robust", "frame by frame", "frame true", "object pose", "object true", "true depth", "true image", "true both", "errors dealt") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
+    names = ("guess", "robust", "object pose", "object true", "true depth", "true image", "true both", "errors dealt") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -90,9 +90,6 @@ def main() -> int:
         fits = {"guess": guess, "proposal": guess + prop[..., :3] / model.traj_scale,
                 "robust": guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T,
                                                  robust=3)[..., :3] / model.traj_scale,
-                # Carried a frame at a time, each step from the piece's points seen in both frames.
-                "frame by frame": (frame_by_frame(pos, sweeps.groups, member, belief, robust=3) - anchor[:, None])
-                                  / model.traj_scale,
                 # Each object kept as one rigid shape, its pose fit every frame from its seen points.
                 "object pose": (object_places(pos, eq, sweeps.groups, member, belief, robust=3) - anchor[:, None])
                                / model.traj_scale}
@@ -129,8 +126,7 @@ def main() -> int:
                                                        robust=3)[..., :3] / model.traj_scale
             fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q,
                                                                   truth, sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
-        # The same carried a frame at a time from true places (the clip's own; added points as predicted).
-        fits["frame true"] = (frame_by_frame(true_pos, sweeps.groups, member, belief, robust=3) - anchor[:, None]) / model.traj_scale
+        # The same from true places (the clip's own; added points as predicted).
         fits["object true"] = (object_places(true_pos, eq, sweeps.groups, member, belief, robust=3) - anchor[:, None]) / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]

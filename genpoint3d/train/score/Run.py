@@ -23,7 +23,7 @@ class Run:
     def load(cls, path, device: torch.device) -> "Run":
         """The checkpoint at `path`, in eval mode on `device`."""
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
-        settings = Settings(**ckpt["args"])
+        settings = Settings.saved(ckpt["args"])
         model = build_model(settings, ckpt["model"]["frame_proj.weight"].shape[1]).to(device)
         model.load_state_dict(ckpt["model"])
         return cls(model.eval(), settings, ckpt["step"])
