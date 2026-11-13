@@ -179,71 +179,42 @@ def frame_by_frame(pos: torch.Tensor, groups: torch.Tensor, member: torch.Tensor
 
 
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
-                  seen: torch.Tensor, robust: int = 0, refine: int = 3) -> torch.Tensor:
+                  seen: torch.Tensor, robust: int = 0) -> torch.Tensor:
     """(B, T, N, 3) each point where its object's pose puts it. A point's
     object is its own group-mates (likeness over a half, itself included; no
     chains, so one wrong pair cannot merge two objects), kept as one rigid
-    shape. In each frame the pose that best carries the shape onto the mates
-    believed seen there (`seen` (B, T, N); a weighted Kabsch fit, refit
-    `robust` times) places the point. The shape is first built as the points
-    are given (a mate's place set in its query frame, through the pose
-    there), then `refine` times every mate's place is set again from all the
-    frames it is seen in and every pose fit again to it, as bundle adjustment
-    does: a place set from one frame bakes that frame's pose error into the
-    shape, and the poses fit to it later carry it on. Where fewer than 3
-    mates back a pose the last one holds; a point with no place in its shape
-    keeps its own guess. pos, q, groups, member as `rigid_proposal`'s."""
+    shape in which a mate's place is fixed when it is given (in its query
+    frame, through the pose there). In each frame the pose that best carries
+    the shape onto the mates believed seen there (`seen` (B, T, N); a weighted
+    Kabsch fit, refit `robust` times) places the point, so it is placed as
+    well as its whole object's pose is known, and nothing builds up from frame
+    to frame. Where fewer than 3 mates back a pose the last one holds; a point
+    not yet given keeps its own guess. pos, q, groups, member as
+    `rigid_proposal`'s."""
     B, T, N, _ = pos.shape
-    dev = pos.device
-    with torch.autocast(device_type=dev.type, enabled=False):
+    with torch.autocast(device_type=pos.device.type, enabled=False):
         pos, seen = pos.float(), seen.float()
         a = 2 * torch.sigmoid(-_sq_dist(groups.float())) * (member[:, :, None] & member[:, None, :])
         a = a * (a > 0.5)                                                                  # (B, N, N) i's mates j
-        # Seen and already given: what a frame's pose may rest on.
-        w_t = seen * (q[:, None, :] <= torch.arange(T, device=dev)[None, :, None])         # (B, T, N)
-        shape = torch.zeros(B, N, N, 3, device=dev)                                        # j's place in i's shape
-        placed = torch.zeros(B, N, N, device=dev)                                          # weight behind it
-        R = torch.eye(3, device=dev).expand(B, N, 3, 3)
-        ms = md = torch.zeros(B, N, 3, device=dev)
-        into = lambda R, ms, md, p: (R.transpose(-1, -2)[:, :, None] @ (p[:, None] - md[:, :, None])[..., None])[..., 0] + ms[:, :, None]
-
-        def pose(t, R, ms, md):
-            w = a * w_t[:, t, None, :] * (placed > 0)
-            Rn, msn, mdn, _ = robust_kabsch(w, shape, pos[:, t, None], robust)
-            ok = (w.sum(-1) >= 3)
-            return (torch.where(ok[..., None, None], Rn, R), torch.where(ok[..., None], msn, ms),
-                    torch.where(ok[..., None], mdn, md))
-
-        poses = []
+        shape = torch.zeros(B, N, N, 3, device=pos.device)                                 # j's place in i's shape
+        given = torch.zeros(B, N, N, dtype=torch.bool, device=pos.device)
+        R = torch.eye(3, device=pos.device).expand(B, N, 3, 3)
+        ms = md = torch.zeros(B, N, 3, device=pos.device)
+        out, own = pos.clone(), torch.arange(N, device=pos.device)
         for t in range(T):
-            R, ms, md = pose(t, R, ms, md)
-            new = (q[:, None, :] == t) & (a > 0) & (placed == 0)
-            shape = torch.where(new[..., None], into(R, ms, md, pos[:, t]), shape)
-            placed = placed + new.float()
-            poses.append((R, ms, md))
-        for _ in range(refine):
-            # Each frame's view of every mate's place, counted less the farther it sits from the
-            # place the shape holds against the typical one (robust, as bundle adjustment weighs
-            # its residuals), so a few badly tracked frames cannot drag the shape.
-            views = [into(R, ms, md, pos[:, t]) for t, (R, ms, md) in enumerate(poses)]
-            w0 = [a * w_t[:, t, None, :] * (placed > 0) for t in range(T)]
-            left = [(v - shape).norm(dim=-1) for v in views]
-            typical = sum((w * l).sum() for w, l in zip(w0, left)) / sum(w.sum() for w in w0).clamp_min(1e-6) + 1e-6
-            num, den = torch.zeros_like(shape), torch.zeros_like(placed)
-            for v, w, l in zip(views, w0, left):
-                w = w / (1 + (l / typical).pow(2))
-                num, den = num + w[..., None] * v, den + w
-            shape = torch.where((den > 1e-6)[..., None], num / den.clamp_min(1e-6)[..., None], shape)
-            placed = torch.maximum(placed, den)
-            R, ms, md = poses[0]
-            for t in range(T):
-                R, ms, md = pose(t, R, ms, md)
-                poses[t] = (R, ms, md)
-        own = torch.arange(N, device=dev)
-        mine, known = shape[:, own, own], placed[:, own, own] > 0                          # (B, N, 3), (B, N)
-        out = pos.clone()
-        for t, (R, ms, md) in enumerate(poses):
-            out[:, t] = torch.where(known[..., None], (R @ (mine - ms)[..., None])[..., 0] + md, pos[:, t])
+            w = a * seen[:, t, None, :] * given
+            Rn, msn, mdn, _ = robust_kabsch(w, shape, pos[:, t, None], robust)
+            ok = w.sum(-1) >= 3
+            R = torch.where(ok[..., None, None], Rn, R)
+            ms, md = torch.where(ok[..., None], msn, ms), torch.where(ok[..., None], mdn, md)
+            new = (q[:, None, :] == t) & (a > 0) & ~given
+            back = ((R.transpose(-1, -2)[:, :, None] @ (pos[:, t, None] - md[:, :, None])[..., None])[..., 0]
+                    + ms[:, :, None])                                                      # each j into i's shape
+            shape = torch.where(new[..., None], back, shape)
+            given = given | new
+            mine = shape[:, own, own]                                                      # (B, N, 3) i in its own shape
+            out[:, t] = torch.where(given[:, own, own][..., None],
+                                    (R @ (mine - ms)[..., None])[..., 0] + md, pos[:, t])
         return out
 
 
