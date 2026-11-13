@@ -33,15 +33,14 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--raw", required=True, help="the rendered clips, with the ball's centre")
-p.add_argument("--spawn", type=int, default=0, help="at most this many points added on new surface after the first frame")
-p.add_argument("--spawn-first", type=int, default=0, help="at most this many added in the first frame's gaps")
+p.add_argument("--spawn", type=int, default=0, help="at most this many points added where new surface has none")
 args = p.parse_args()
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 run = Run.load(args.ckpt, dev)
 ds = run.dataset(args.cache, args.frames_cache, points=1000)
 clips = ds.clips
-predictor = Predictor(run.model, run.judging(dev, spawn=args.spawn, spawn_first=args.spawn_first))
+predictor = Predictor(run.model, run.judging(dev, spawn=args.spawn))
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():

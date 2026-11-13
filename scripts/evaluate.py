@@ -102,8 +102,7 @@ def main() -> int:
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="frames C on get no image, observed (_obs) and forecast (_fut) scored apart")
     p.add_argument("--per-frame", action="store_true", help="also APD by frame, every frame seen")
-    p.add_argument("--spawn", type=int, default=0, help="at most this many points added on new surface after the first frame")
-    p.add_argument("--spawn-first", type=int, default=0, help="at most this many added in the first frame's gaps")
+    p.add_argument("--spawn", type=int, default=0, help="at most this many points added where new surface has none")
     p.add_argument("--spawn-gap", type=float, default=0.05, help="a gap that wide (a share of the frame's width) gets one")
     args = p.parse_args()
     if args.eval_cutoff == 1 or args.eval_cutoff < 0:
@@ -119,7 +118,7 @@ def main() -> int:
     per_frame = per_frame_apd(run, loader, device) if args.per_frame else None
     judging = run.judging(device, cutoff=args.eval_cutoff, space=args.space, oracle_axis=args.oracle_axis,
                           scaling=args.scaling, min_motion_px=args.min_motion_px,
-                          spawn=args.spawn, spawn_gap=args.spawn_gap, spawn_first=args.spawn_first)
+                          spawn=args.spawn, spawn_gap=args.spawn_gap)
     m = score(run.model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

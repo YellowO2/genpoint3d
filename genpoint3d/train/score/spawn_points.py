@@ -1,9 +1,8 @@
-"""New points where a clip shows surface with no point on it, as a tracker on
-real video adds them: training's spawning (`ClipDataset._spawned`) at test
-time, without the truth. As there, two budgets: the first frame's gaps are
-filled from `first` (training's points drawn over the whole frame), and later
-frames add up to `cap` on new surface only, a gap that was a gap the frame
-before (scene no point was put on) not being new."""
+"""New points where surface comes into view with no point on it, as a tracker
+on real video adds them: training's spawning (`ClipDataset._spawned`) at test
+time, without the truth. One rule for every frame: a gap that was a gap the
+frame before (scene no point was put on) is not new; the first frame has no
+frame before, so all its gaps are."""
 
 import torch
 
@@ -15,13 +14,12 @@ from genpoint3d.train.tools.camera import project
 
 @torch.no_grad()
 def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None,
-            view: torch.Tensor, cap: int, gap: float, first: int = 0) -> dict:
-    """`b` (one clip) with points added after its own: frame by frame, in
-    each frame seen whole, the CNN cells farther than `gap` (a share of the
-    frame's width) from every point placed there and believed visible, the
-    farthest first: up to `first` in the first such frame, then up to `cap`
-    more where also farther in 3D than about a cell from every such cell the
-    frame before, each starting at its cell in that
+            view: torch.Tensor, cap: int, gap: float) -> dict:
+    """`b` (one clip) with up to `cap` points added after its own: frame by
+    frame, in each frame seen whole, the CNN cells farther than `gap` (a share
+    of the frame's width) from every point placed there and believed visible,
+    and farther in 3D than about a cell from every such cell the frame before,
+    the farthest first, each starting at its cell in that
     frame, its look read there. `tracks` and `logits` are a first pass over `b`'s own points; a
     point added earlier is carried by the motion of the own point nearest it
     in 3D, seen where that one is. The added points' truth is unknown: never
@@ -51,8 +49,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
                            torch.cat([inf((T, 1, w)), dy], 1), torch.cat([dy, inf((T, 1, w))], 1)]).amin(0).flatten(1)
     far = gap * W
     born = []                                                       # (frame, cell, position, nearest own point)
-    before = None                                                   # the frame before's gaps, in 3D
-    later = 0                                                       # points added after the first frame
+    before = xyz[0, :0]                                             # the frame before's gaps, in 3D
     for t in range(T):
         if not whole[t]:
             continue
@@ -65,11 +62,9 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
         d = (torch.cdist(cell_px[cand], px(cover, t)).min(1).values if len(cover)
              else torch.full((len(cand),), float("inf"), device=pos.device))
         own = torch.nonzero(believed[t])[:, 0]
-        new = d if before is None else torch.where(
-            torch.cdist(xyz[t, cand], before).min(1).values > 1.5 * spacing[t, cand] if len(before)
-            else torch.ones_like(d, dtype=torch.bool), d, torch.zeros_like(d))
-        picked = farthest_first(cell_px[cand], new, far, (first if before is None else cap - later) if len(own) else 0)
-        later += len(picked) if before is not None else 0
+        new = d if not len(before) else torch.where(
+            torch.cdist(xyz[t, cand], before).min(1).values > 1.5 * spacing[t, cand], d, torch.zeros_like(d))
+        picked = farthest_first(cell_px[cand], new, far, cap - len(born) if len(own) else 0)
         for j in picked:
             p = xyz[t, cand[j]]
             i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])
