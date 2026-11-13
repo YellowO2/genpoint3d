@@ -92,7 +92,7 @@ def main() -> int:
                 "robust": guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T,
                                                  robust=3)[..., :3] / model.traj_scale,
                 # Carried a frame at a time, each step from the piece's points seen in both frames.
-                "frame by frame": (frame_by_frame(pos, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None])
+                "frame by frame": (frame_by_frame(pos, sweeps.groups, member, belief, robust=3) - anchor[:, None])
                                   / model.traj_scale,
                 # Each object kept as one rigid shape, its pose fit every frame from its seen points.
                 "object pose": (object_places(pos, eq, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None])
@@ -131,7 +131,7 @@ def main() -> int:
             fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q,
                                                                   truth, sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
         # The same carried a frame at a time from true places (the clip's own; added points as predicted).
-        fits["frame true"] = (frame_by_frame(true_pos, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None]) / model.traj_scale
+        fits["frame true"] = (frame_by_frame(true_pos, sweeps.groups, member, belief, robust=3) - anchor[:, None]) / model.traj_scale
         fits["object true"] = (object_places(true_pos, eq, sweeps.groups, member, belief, robust=3, refine=args.refine) - anchor[:, None]) / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
