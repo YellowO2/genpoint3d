@@ -158,15 +158,46 @@ def _proposal(pos_w, anchor, R, ms, md, s):
     return torch.cat([off, (s / (s + 1))[..., None], turn[..., None]], -1)
 
 
-def _rigid_fit(pos, q, anchor, groups, member, seen, start, end, mates, robust=0):
-    B, T, N, _ = pos.shape
+def _mates(groups, member, mates):
+    """Each point's `mates` likeliest group-mates by the group vectors (B, N,
+    E), among the points `member` (B, N): their likelihood and index (B, N, K),
+    and `take`, which picks them out of a (B, L, N, ...) per-point tensor as
+    (B, L, N, K, ...)."""
+    B, N, _ = groups.shape
     K = min(mates, N - 1)
     a = 2 * torch.sigmoid(-_sq_dist(groups)) * (member[:, :, None] & member[:, None, :])
-    a = a.masked_fill(torch.eye(N, dtype=torch.bool, device=pos.device), -1.0)
+    a = a.masked_fill(torch.eye(N, dtype=torch.bool, device=groups.device), -1.0)
     aff, idx = a.topk(K, dim=-1)                                                    # (B, N, K)
-    aff = aff.clamp_min(0)
     take = lambda x: x.gather(2, idx.reshape(B, 1, N * K, *([1] * (x.dim() - 3))).expand(
         B, x.shape[1], N * K, *x.shape[3:])).reshape(B, x.shape[1], N, K, *x.shape[3:])
+    return aff.clamp_min(0), idx, take
+
+
+def chained_places(pos: torch.Tensor, groups: torch.Tensor, member: torch.Tensor, seen: torch.Tensor,
+                   mates: int = 64, robust: int = 0) -> torch.Tensor:
+    """(B, T, N, 3) each point where its piece carries it frame by frame: in
+    each frame, the turn and shift that best carry its mates from the frame
+    before (weighted by being seen in both), applied to where it was the frame
+    before; its own guess where it is believed seen (`seen` (B, T, N) over 0.5)
+    or nothing backs the step. Chained, a mate counts for every step it is seen
+    through, where `rigid_proposal`'s one fit from the query frame counts only
+    mates whose place there is known. pos, groups, member as there."""
+    with torch.autocast(device_type=pos.device.type, enabled=False):
+        aff, _, take = _mates(groups.float(), member, mates)
+        pos, seen = pos.float(), seen.float()
+        out = [pos[:, 0]]
+        for t in range(1, pos.shape[1]):
+            w0 = aff[:, None] * take(seen[:, t - 1:t] * seen[:, t:t + 1])               # (B, 1, N, K)
+            R, ms, md, s = robust_kabsch(w0, take(pos[:, t - 1:t]), take(pos[:, t:t + 1]), robust, _fit)
+            carried = (R @ (out[-1][:, None] - ms)[..., None])[..., 0] + md            # (B, 1, N, 3)
+            own = (seen[:, t] > 0.5) | (s[:, 0] <= 1e-3)
+            out.append(torch.where(own[..., None], pos[:, t], carried[:, 0]))
+        return torch.stack(out, 1)
+
+
+def _rigid_fit(pos, q, anchor, groups, member, seen, start, end, mates, robust=0):
+    B, T, N, _ = pos.shape
+    aff, idx, take = _mates(groups, member, mates)
     w0 = aff[:, None] * take(seen[:, start:end])                                    # (B, L, N, K)
     dst = take(pos[:, start:end])                                                   # (B, L, N, K, 3)
     src = pos[torch.arange(B, device=pos.device)[:, None, None], q[:, :, None], idx][:, None]   # (B, 1, N, K, 3)

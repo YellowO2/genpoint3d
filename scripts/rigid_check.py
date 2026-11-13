@@ -12,7 +12,12 @@ fit refit 3 times with mates far from it counting less (`robust`): good says
 a few wrong mates were what dragged it. The hidden moving
 point-frames are then split by how many points of the point's true piece are
 seen in that frame: with none, the fit has only guesses to go on; with many,
-it should be about as good as the seen points.
+it should be about as good as the seen points. Beside them, each point
+carried frame by frame instead (`chained_places`: a mate counts for every step
+it is seen through), with the model's groups and the true ones. With
+`--spawn`, points are first added on new surface as at test time; they are
+mates but not scored, and have no truth, so the true-group columns are left
+out.
 
 Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
 """
@@ -23,9 +28,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
+from genpoint3d.train.score.spawn_points import spawned
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
-from genpoint3d.train.tools.regress import Sweeps, rigid_proposal
+from genpoint3d.train.tools.regress import Sweeps, chained_places, rigid_proposal
 
 
 @torch.no_grad()
@@ -35,6 +41,7 @@ def main() -> int:
     p.add_argument("--cache", required=True)
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--points", type=int, default=256)
+    p.add_argument("--spawn", type=int, default=0, help="at most this many points added on new surface first")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,31 +57,47 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
+    names = ("guess", "proposal", "robust", "chained") + (() if args.spawn else ("true groups", "true robust", "true chained"))
     for batch in loader:
         b = to_device(batch, device)
-        traj, vis, q = b["traj"], b["visibility"].bool(), b["query_t"]
-        T = traj.shape[1]
-        cond = dict(context=b["context"], visual_mask=visual_mask(b, None), id_card=b["id_card"],
-                    patch_xyz=b["patch_xyz"], **fine_inputs(model, b, amp))
-        sweeps = Sweeps(model, b["anchor"], T, s.schedule, s.window, s.overlap, cond)
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            for _ in sweeps:
-                pass
+        vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
+        T = b["traj"].shape[1]
+        fine, view = fine_inputs(model, b, amp), visual_mask(b, None)
+
+        def track(bb):
+            cond = dict(context=bb["context"], visual_mask=view, id_card=bb["id_card"], patch_xyz=bb["patch_xyz"],
+                        **{**fine, "query_t": bb["query_t"]})
+            sweeps = Sweeps(model, bb["anchor"], T, s.schedule, s.window, s.overlap, cond)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                for _ in sweeps:
+                    pass
+            return sweeps
+
+        sweeps, every = track(b), b
+        if args.spawn:
+            every = spawned(model, b, fine, sweeps.whole, sweeps.vis, view, args.spawn, 0.05)
+            sweeps = track(every)
+        # Fitted over every point, the added ones too; only the clip's own are scored.
+        anchor, eq = every["anchor"].float(), every["query_t"]
         guess = sweeps.whole.float()
-        pos = model.lookup_pos(guess, b["anchor"].float())
-        prop = rigid_proposal(pos, q, b["anchor"].float(), sweeps.groups, sweeps.seen & sweeps.known,
-                              torch.sigmoid(sweeps.vis.float()), 0, T)
-        proposal = guess + prop[..., :3] / model.traj_scale
-        robust = guess + rigid_proposal(pos, q, b["anchor"].float(), sweeps.groups, sweeps.seen & sweeps.known,
-                                        torch.sigmoid(sweeps.vis.float()), 0, T, robust=3)[..., :3] / model.traj_scale
-        # The true pieces as group vectors: one axis each, far apart.
-        piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
-        truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
-        true_prop = rigid_proposal(pos, q, b["anchor"].float(), truth, sweeps.seen,
-                                   torch.sigmoid(sweeps.vis.float()), 0, T)
-        true_groups = guess + true_prop[..., :3] / model.traj_scale
-        true_robust = guess + rigid_proposal(pos, q, b["anchor"].float(), truth, sweeps.seen,
-                                             torch.sigmoid(sweeps.vis.float()), 0, T, robust=3)[..., :3] / model.traj_scale
+        pos = model.lookup_pos(guess, anchor)
+        belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
+        to_guess = lambda places: (places - anchor[:, None]) / model.traj_scale
+        prop = rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T)
+        fits = {"guess": guess, "proposal": guess + prop[..., :3] / model.traj_scale,
+                "robust": guess + rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T,
+                                                 robust=3)[..., :3] / model.traj_scale,
+                "chained": to_guess(chained_places(pos, sweeps.groups, member, belief, robust=3))}
+        if not args.spawn:
+            # The true pieces as group vectors: one axis each, far apart.
+            piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
+            truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
+            fits["true groups"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T)[..., :3] / model.traj_scale
+            fits["true robust"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T,
+                                                         robust=3)[..., :3] / model.traj_scale
+            fits["true chained"] = to_guess(chained_places(pos, truth, sweeps.seen, belief, robust=3))
+        fits = {k: v[:, :, :N] for k, v in fits.items()}
+        traj = b["traj"]
         gt = to_metres(traj, b)
         moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > 4)[:, None]
         # Each point-frame's seen points on its true piece, itself left out.
@@ -82,8 +105,7 @@ def main() -> int:
         seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)
         for label, lo, hi in bins:
             counts[label] += int((~vis & moving & (seen_mates >= lo) & (seen_mates < hi)).sum())
-        for name, pts in (("guess", guess), ("proposal", proposal), ("robust", robust), ("true groups", true_groups),
-                          ("true robust", true_robust)):
+        for name, pts in fits.items():
             m = to_metres(pts, b)
             for kind, mask in (("hidden", ~vis), ("seen", vis)):
                 for which, sel in (("all", mask), ("moving", mask & moving)):
@@ -96,19 +118,18 @@ def main() -> int:
                                        per_clip=True)["average_pts_within_thresh"].cpu()
                 rows.setdefault(("mates", label, name), []).append(apd)
         for kind, mask in (("hidden", ~vis), ("seen", vis)):
-            backing[kind].append(prop[..., 3][mask].float().cpu())
+            backing[kind].append(prop[:, :, :N, 3][mask].float().cpu())
 
-    names = ("guess", "proposal", "robust", "true groups", "true robust")
     print("\nAPD (no rescale), the model's final guess against where its piece would put it (robust: refit 3 times):")
-    print(f"  {'point-frames':<16}" + "".join(f"{n:>13}" for n in names))
+    print(f"  {'point-frames':<16}" + "".join(f"{n:>14}" for n in names))
     for kind in ("hidden", "seen"):
         for which in ("all", "moving"):
-            print(f"  {kind + ' ' + which:<16}" + "".join(f"{clip_mean(rows[kind, which, n]):>13.4f}" for n in names))
+            print(f"  {kind + ' ' + which:<16}" + "".join(f"{clip_mean(rows[kind, which, n]):>14.4f}" for n in names))
     total = max(sum(counts.values()), 1)
     print("\nHidden moving point-frames by how many points of their true piece are seen there:")
-    print(f"  {'seen mates':<10} {'share':>6}" + "".join(f"{n:>13}" for n in names))
+    print(f"  {'seen mates':<10} {'share':>6}" + "".join(f"{n:>14}" for n in names))
     for label, _, _ in bins:
-        print(f"  {label:<10} {counts[label] / total:>6.3f}" + "".join(f"{clip_mean(rows['mates', label, n]):>13.4f}" for n in names))
+        print(f"  {label:<10} {counts[label] / total:>6.3f}" + "".join(f"{clip_mean(rows['mates', label, n]):>14.4f}" for n in names))
     for kind in ("hidden", "seen"):
         v = torch.cat(backing[kind])
         print(f"  how much backs the proposal, {kind}: median {v.median():.3f}, "
