@@ -142,6 +142,17 @@ def rigid_pairs(b: dict, k: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
     return rigid_buddies(to_metres(b["traj"], b), k)
 
 
+def components(same: torch.Tensor) -> torch.Tensor:
+    """(B, N) each point's piece, its lowest-numbered point, for `same` (B, N,
+    N) the pairs on one piece: points joined through each other."""
+    label = torch.arange(same.shape[1], device=same.device).expand(same.shape[0], -1)
+    while True:
+        new = torch.where(same, label[:, None], same.shape[1]).amin(-1).minimum(label)
+        if torch.equal(new, label):
+            return label
+        label = new
+
+
 def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
                  frames: tuple[int, int] | None = None) -> torch.Tensor:
     """(B, N, N) what the group vectors should put together: with `by_object`,
