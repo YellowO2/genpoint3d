@@ -29,9 +29,9 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
     whole if `cap` is None, else up to `cap` in the frames seen whole after
     it, frame by frame. They go where no point covers the CNN cells, the
     farthest first, each starting at its cell in that frame, its look read
-    there. A point covers a cell if it sits on that surface:
-    within `gap` (a share of the frame's width) of it in the image and at its
-    depth, seen or not, so a point turned to the far side of an object leaves
+    there. A point covers the cells within `gap` (a share of the frame's
+    width) of it in the image if it sits on the surface its own pixel shows
+    (at the depth there), seen or not, so a point turned to the far side of an object leaves
     the near side to new points while one merely believed hidden still covers
     its place. `tracks` is a first pass over `b`'s own points; a point added
     earlier in the same round is carried by the motion of the own point
@@ -61,8 +61,13 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, view: torch.Tensor
         if not len(cand) or not len(own):
             continue
         uv, z = project(here[None, None], proj[None, t:t + 1])
-        on = (z[0, 0][None] - depth[cand, None]).abs() < 0.03 * depth[cand, None]          # (C, P) on that surface
-        d = torch.cdist(cell_px[cand], uv[0, 0] * uv.new_tensor([W, H])).masked_fill(~on, float("inf")).min(1).values
+        uv, z = uv[0, 0], z[0, 0]
+        # On the surface its own pixel shows (the depth there, as a z-buffer would test),
+        # not hidden behind it; a slope's depth changes across a gap, so test it there.
+        at = ((uv[:, 1] * h).long().clamp(0, h - 1) * w + (uv[:, 0] * w).long().clamp(0, w - 1))
+        on = (z - depth[at]).abs() < 0.03 * depth[at]
+        d = (torch.cdist(cell_px[cand], uv[on] * uv.new_tensor([W, H])).min(1).values if on.any()
+             else torch.full((len(cand),), float("inf"), device=pos.device))
         picked = farthest_first(cell_px[cand], d, far, len(cand) if cap is None else cap - len(born))
         for j in picked:
             p = xyz[t, cand[j]]
