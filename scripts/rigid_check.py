@@ -9,7 +9,9 @@ Beside it, the proposal built from the true groups (the training labels'
 pieces) instead of the model's: good with them and poor with the model's
 says the groups are what is wrong; poor with both, the fit. Beside each, the
 fit refit 3 times with mates far from it counting less (`robust`): good says
-a few wrong mates were what dragged it. The hidden moving
+a few wrong mates were what dragged it. Then, with the true pieces, the true
+visibility deciding which mates count (`true seen`), and the true places of
+the mates too (`all true`): what each of the fit's inputs costs it. The hidden moving
 point-frames are then split by how many points of the point's true piece are
 seen in that frame: with none, the fit has only guesses to go on; with many,
 it should be about as good as the seen points. With `--spawn`, points are
