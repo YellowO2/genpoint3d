@@ -54,7 +54,7 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "proposal", "robust") + (() if args.spawn else ("true groups", "true robust"))
+    names = ("guess", "proposal", "robust") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -90,6 +90,12 @@ def main() -> int:
             fits["true groups"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T)[..., :3] / model.traj_scale
             fits["true robust"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T,
                                                          robust=3)[..., :3] / model.traj_scale
+            # Which mates count, then where they are too, from the truth: what the fit's inputs cost it.
+            seen_true = b["visibility"].float()
+            fits["true seen"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, seen_true, 0, T,
+                                                       robust=3)[..., :3] / model.traj_scale
+            fits["all true"] = guess + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q, anchor, truth,
+                                                      sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
         gt = to_metres(traj, b)
