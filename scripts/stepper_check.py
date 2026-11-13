@@ -51,6 +51,8 @@ def _clips(ds: ClipDataset, workers: int) -> list[dict]:
     `pos` (1, T, N, 3) in the clip's unit and its gravity `g` (1, 4)."""
     out = []
     for b in DataLoader(_Lean(ds), batch_size=1, num_workers=workers):
+        # Copied out of the workers' shared memory: kept, thousands would hold a file each.
+        b = {k: v.clone() for k, v in b.items()}
         b["pos"] = b["traj"].float() * b["norm_traj_scale"][:, None, None, None] + b["norm_offset"].float()
         known = b["down_known"].float()[:, None]
         b["g"] = torch.cat([b["gravity"].float()[:, None] * GRAVITY_REF * b["down"].float() * known, known], -1)

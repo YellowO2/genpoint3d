@@ -93,6 +93,10 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
           f"forecast change when frames >= 6 change: {leak:.2e} (want 0)")
     scores = {**track_scores(pred, j), **visibility_scores(pred)}
     print(f"  {len(scores)} scores: {' '.join(sorted(scores))}")
+    js = ScoreSettings(device=torch.device("cpu"), window=8, overlap=4, schedule=sched, cutoff=6, spawn=4, spawn_gap=0.02)
+    spawn = Predictor(m, js)(b)
+    print(f"  with points added: tracks {tuple(spawn.tracks.shape)} (want {tuple(pred.tracks.shape)}), "
+          f"{len({**track_scores(spawn, js), **visibility_scores(spawn)})} scores")
     view = torch.ones(B, T, 2, 2, dtype=torch.bool)
     view[:, 5:8] = False
     gap = (masked_tracks(m, b, sched, view) - masked_tracks(m, changed(b, slice(5, 8)), sched, view)).abs().max().item()

@@ -17,3 +17,5 @@ class ScoreSettings:
     scaling: str = "median"       # the protocol's global rescale, or "none"
     min_motion_px: float = 0.0    # score only points that move more than this
     cutoff: int = 0               # frames from here on get no image; 0 = none
+    spawn: int = 0                # points added where no point covers the frame, at most; 0 = none
+    spawn_gap: float = 0.05       # a gap that wide (a share of the frame's width) gets a point

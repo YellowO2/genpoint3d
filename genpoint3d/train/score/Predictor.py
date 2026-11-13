@@ -4,6 +4,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.spawn_points import spawned
 from genpoint3d.train.tools.batch import fine_inputs, to_device, visual_mask
 from genpoint3d.train.tools.regress import regress_loss
 
@@ -20,7 +21,7 @@ class Predictor:
     def __call__(self, batch: dict) -> Prediction:
         model, j = self.model, self.judging
         b = to_device(batch, j.device)
-        traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
+        traj = b["traj"]
         # One cutoff for every clip; without one, every frame keeps its image.
         cutoff = None
         if j.cutoff:
@@ -34,14 +35,25 @@ class Predictor:
         self.served += traj.shape[0]
         truly = fine["down_known"]
         fine["down_known"] = truly & ~hide
-        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
-        # The training step's autocast: a bf16 model is scored in bf16.
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
-            loss, out = regress_loss(model, traj, anchor, mask=vis, window=j.window,
-                                     overlap=j.overlap, schedule=j.schedule, **cond)
+        loss, out = self._track(b, fine, vm)
+        if j.spawn:
+            # Again with points added where none covers the frame; only the clip's own are scored.
+            more = spawned(model, b, fine, out["tracks"], out["logits"], vm, j.spawn, j.spawn_gap)
+            _, out = self._track(more, {**fine, "query_t": more["query_t"]}, vm)
+            N = traj.shape[2]
+            out = {k: None if v is None else v[:, :N] if k == "groups" else v[:, :, :N] if k in ("tracks", "logits") else v
+                   for k, v in out.items()}
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],
                           down_scored=truly & hide)
+
+    def _track(self, b: dict, fine: dict, vm: torch.Tensor):
+        j = self.judging
+        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
+        # The training step's autocast: a bf16 model is scored in bf16.
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
+            return regress_loss(self.model, b["traj"], b["anchor"], mask=b["visibility"], window=j.window,
+                                overlap=j.overlap, schedule=j.schedule, **cond)
 
     def done(self) -> None:
         self.model.train()
