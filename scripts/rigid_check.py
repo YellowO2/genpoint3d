@@ -167,6 +167,16 @@ def main() -> int:
         rows.setdefault(("held", "frames"), []).append(torch.arange(T))
         for kind, m in (("in the fit", vis & ~held & moving), ("kept out", held & moving), ("hidden", ~vis & moving)):
             rows.setdefault(("held", kind), []).append(per_frame(m).cpu())
+        # The model's own error on seen moving points by how far each has turned since its query
+        # frame: do points that have turned little (fresh) stay accurate while old ones drift?
+        guess_err = (to_metres(guess[:, :, :N], b) - gt).norm(dim=-1)                          # (B, T, N)
+        _, _, true_turn = (lambda R: (None, None, torch.acos(((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2)
+                                                             .clamp(-1, 1)).rad2deg()))(
+            rigid_motion(model.lookup_pos(b["traj"].float(), anchor[:, :N]), q, truth, sweeps.seen[:, :N],
+                         vis.float(), robust=3)[0]) if not args.spawn else (None, None, None)
+        if true_turn is not None:
+            m = vis & moving
+            rows.setdefault(("by turn", "pairs"), []).append(torch.stack([true_turn[m], 100 * guess_err[m]], -1).cpu())
         # The object-pose placement's error by how far a point is from the centre of its true
         # piece's points seen in that frame: a turn measured from those carries farther points worse.
         seen_w = vis.float()[:, :, None, :] * mates.float()[:, None]                          # (B, T, N, N)
@@ -216,6 +226,13 @@ def main() -> int:
               f"{clip_mean(rows['used mates', 'apd']):.4f} (all seen: {clip_mean(rows['seen', 'all', 'guess']):.4f}); "
               f"the piece's turn since the query frame, median degrees: true {med('true'):.1f}, "
               f"from the predicted places {med('pred'):.1f}, the two {med('apart'):.1f} apart")
+    if ("by turn", "pairs") in rows:
+        v = torch.cat(rows["by turn", "pairs"])
+        print("\nThe model's own error (cm, median) on seen moving points by how far each has turned since its query frame:")
+        for lo, hi in ((0, 15), (15, 30), (30, 60), (60, 90), (90, 180)):
+            sel = (v[:, 0] >= lo) & (v[:, 0] < hi)
+            if sel.any():
+                print(f"  {lo:>3}-{hi:<3} deg: {v[sel, 1].median():.2f} cm ({int(sel.sum())} point-frames)")
     ks = sorted(key[1] for key in rows if key[0] == "hiding")
     if ks:
         print("\nThe object-pose placement's error (cm, median) around the frame a point hides in (0), seen before it:")
