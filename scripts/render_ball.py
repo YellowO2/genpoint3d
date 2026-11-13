@@ -11,9 +11,11 @@ checker under colour noise.
 Each clip, written in TAPVid-3D's format so `scripts/tapvid3d_cache.py` reads
 it: images (T, H, W, 3) uint8, fx_fy_cx_cy, tracks_XYZ (T, N, 3) metres in the
 camera, visibility (T, N), queries_xyt (N, 3) all at frame 0; and beside it
-`<clip>.depth.npy`, the true z-depth (T, H, W). The tracked points are points
-of the ball visible in frame 0 and a few of the floor, so `points` are mostly
-on the turning surface.
+`<clip>.depth.npy`, the true z-depth (T, H, W). The tracked points are spread
+over the whole ball, and a few are on the floor; each is queried in the first
+frame it is seen in, as Kubric's tracks are, so the surface a turning ball
+brings into view has true tracks too. queries_xyt holds each one's pixel and
+frame there.
 
   python scripts/render_ball.py --out DIR [--seeds 3]
 """
@@ -113,12 +115,10 @@ def render(name, axis, deg, vel, seed, out):
         frames.append((col.clamp(0, 1) * 255).round().byte())
         depths.append(torch.where(torch.isfinite(t_hit), pts[..., 2], torch.full_like(t_hit, 50.0)).float())
 
-    # Points of the ball facing the camera in frame 0, and some of the floor.
-    n = torch.randn(4000, 3, generator=g, dtype=torch.float64)
+    # Points over the whole ball, and some of the floor.
+    n = torch.randn(1500, 3, generator=g, dtype=torch.float64)
     n = n / n.norm(dim=-1, keepdim=True)
-    p0 = centres[0] + R_BALL * n
-    facing = ((-p0) * n).sum(-1) > 0.15 * p0.norm(dim=-1)
-    local_pts = (R_BALL * n[facing])[:300] @ rots[0]
+    local_pts = R_BALL * n
     floor_uv = torch.rand(60, 2, generator=g, dtype=torch.float64) * torch.tensor([6.0, 6.0], dtype=torch.float64) - torch.tensor([3.0, 0.0], dtype=torch.float64)
     floor_pts = floor_point + floor_uv[:, :1] * torch.tensor([1.0, 0, 0], dtype=torch.float64) + floor_uv[:, 1:] * fwd
     tracks, visible = [], []
@@ -137,10 +137,12 @@ def render(name, axis, deg, vel, seed, out):
         tracks.append(pts)
         visible.append(torch.cat([seen_ball, ~blocked]) & inside)
     tracks, visible = torch.stack(tracks).float(), torch.stack(visible)
-    keep = visible[0]
+    # Each point queried in the first frame it is seen in; never seen, dropped.
+    keep = visible.any(0)
     tracks, visible = tracks[:, keep], visible[:, keep]
-    uv0 = tracks[0, :, :2] / tracks[0, :, 2:] * F + W / 2
-    queries = torch.cat([uv0, torch.zeros(len(uv0), 1)], -1)
+    first = visible.float().argmax(0)
+    at = tracks[first, torch.arange(tracks.shape[1])]
+    queries = torch.cat([at[:, :2] / at[:, 2:] * F + W / 2, first[:, None].float()], -1)
     stem = f"{name}_{seed}"
     # The ball's centre per frame, and how many of the points are the ball's
     # (the first ones), for checks that need to know which surface is which.

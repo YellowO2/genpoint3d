@@ -33,7 +33,7 @@ from genpoint3d.CachedClip import CachedClip  # noqa: E402
 from genpoint3d.ScaleStats import ScaleStats  # noqa: E402
 from genpoint3d.prepare.VisualEncoder import VisualEncoder  # noqa: E402
 from genpoint3d.prepare.tools.geometry import batch_unproject  # noqa: E402
-from genpoint3d.tools.feature_lookup import sample_at  # noqa: E402
+from genpoint3d.tools.feature_lookup import id_cards, sample_at  # noqa: E402
 
 RES = 384
 
@@ -42,6 +42,8 @@ p.add_argument("--src", required=True, help="TAPVid-3D .npz files with their .da
 p.add_argument("--dst", required=True)
 p.add_argument("--frames-dst", required=True)
 p.add_argument("--every", type=int, default=8, help="keep every n-th query frame of a clip")
+p.add_argument("--one-clip", action="store_true",
+               help="each clip whole, every query kept in its own frame (a rendered clip with Kubric-like tracks)")
 p.add_argument("--depth-suffix", default=".da3.npy",
                help="the depth beside each clip: Depth Anything 3's, or the true one of a rendered clip")
 args = p.parse_args()
@@ -70,6 +72,24 @@ for src in sorted(Path(args.src).glob("*.npz")):
     small = F.interpolate(frames.permute(0, 3, 1, 2).float(), size=(RES, RES), mode="area")
     small = small.round().clamp(0, 255).byte().permute(0, 2, 3, 1).numpy()
     cells = cell_depth(depth.numpy(), RES)
+    if args.one_clip:
+        # Every query in the frame it starts in, as Kubric's caches hold them.
+        uv = q_xyt[:, :2]
+        z = depth[q_t, uv[:, 1].long().clamp(0, H - 1), uv[:, 0].long().clamp(0, W - 1)]
+        anchor = torch.stack([(uv[:, 0] - cx) / fx * z, (uv[:, 1] - cy) / fy * z, z], -1)
+        seq = f"{src.stem}_all"
+        clip = CachedClip(
+            seq_id=seq, traj=tracks, anchor=anchor, visibility=vis, query_uv=uv.clone(), query_t=q_t, hw=(H, W),
+            intrinsics=K.expand(T, 3, 3).clone(), extrinsics=torch.eye(4).expand(T, 4, 4).clone(),
+            stats=ScaleStats.measure(pointmap), context=VisualEncoder.tokens(feat).half(),
+            id_card=id_cards(VisualEncoder.tokens(feat), q_t, uv, (H, W)).half(),
+            patch_xyz=VisualEncoder.patch_centre_xyz(pointmap, encoder.grid).float(),
+            points=len(q_t), feat_dim=encoder.dim, image_size=RES)
+        torch.save(clip.to_dict(), dst / f"{seq}.pt")
+        np.save(fdst / f"{seq}.npy", small)
+        np.save(fdst / f"{seq}.depth.npy", cells)
+        print(f"  {src.stem}: one clip, {len(q_t)} queries over {len(q_t.unique())} frames", flush=True)
+        continue
     starts = sorted(q_t.unique().tolist())[:: args.every]
     for q in starts:
         idx = (q_t == q).nonzero()[:, 0]
