@@ -115,59 +115,80 @@ def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, ev
     return alive, at
 
 
-def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
+def rigid_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
                    member: torch.Tensor, seen: torch.Tensor, start: int, end: int,
-                   robust: int = 0) -> torch.Tensor:
+                   robust: int = 0, ref: torch.Tensor | None = None) -> torch.Tensor:
     """(B, L, N, 5) for frames `start` to `end`: where moving with its piece
     would put each point, as an offset from its guess there, how much backs it
     (0 for nothing, towards 1), and how far its piece has turned since the
-    point's query frame (radians: how stale its look there is).
+    frame it is carried from (radians).
 
-    pos (B, T, N, 3) every guess, anchor's space; q (B, N) query frames;
+    pos (B, T, N, 3) every guess; q (B, N) query frames;
     groups (B, N, E) the group vectors, member (B, N) the points that count;
-    seen (B, T, N) the belief each point is visible. For each point, in each
-    frame, the points its group vector puts on its piece, weighted by that
-    likelihood and by being seen in the frame: the turn and shift that best
-    carry them from where they are in its query frame to where they are now (a
-    weighted Kabsch fit), a shift alone with little behind it, applied to its
-    anchor. With `robust`,
-    that many refits, each mate's weight cut by how far it sat from the last
-    fit against the typical mate, so a few wrong mates cannot drag it. In
-    float32: the fit's SVD has no bfloat16 on the GPU."""
+    seen (B, T, N) the belief each point is visible; ref (B, T, N) the frame
+    each point is carried from in each frame, its query frame by default. For
+    each point, in each frame, the points its group vector puts on its piece,
+    weighted by that likelihood and by being seen both there and in the frame
+    it is carried from: the turn and shift that best carry them from that
+    frame to this one (a weighted Kabsch fit), a shift alone with little behind
+    it, applied to where the point was in that frame. With `robust`, that many
+    refits, each mate's weight cut by how far it sat from the last fit against
+    the typical mate, so a few wrong mates cannot drag it. In float32: the
+    fit's SVD has no bfloat16 on the GPU."""
+    B, T, N, _ = pos.shape
+    ref = (q[:, None].expand(B, T, N) if ref is None else ref)[:, start:end]
     with torch.autocast(device_type=pos.device.type, enabled=False):
-        R, ms, md, s = _rigid_fit(pos.float(), q, anchor.float(), groups.float(), member, seen.float(), start, end,
-                                  robust)
-        return _proposal(pos.float()[:, start:end], anchor.float(), R, ms, md, s)
+        pos = pos.float()
+        R, ms, md, s = _rigid_fit(pos, ref, groups.float(), member, seen.float(), start, end, robust)
+        own = pos.gather(1, ref[..., None].expand(-1, -1, -1, 3))                    # (B, L, N, 3) where it was there
+        return _proposal(pos[:, start:end], own, R, ms, md, s)
 
 
-def rigid_motion(pos: torch.Tensor, q: torch.Tensor, anchor: torch.Tensor, groups: torch.Tensor,
+def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """(B, T, N) for each point and frame the nearest frame it is believed seen
+    in (`seen` (B, T, N) over 0.5): the latest up to it, else the first after,
+    else its query frame (`q` (B, N)). A `rigid_proposal` `ref`."""
+    B, T, N = seen.shape
+    t = torch.arange(T, device=seen.device)[None, :, None]
+    on = seen > 0.5
+    before = torch.where(on, t, -1).cummax(1).values
+    after = torch.where(on, t, T).flip(1).cummin(1).values.flip(1)
+    return torch.where(before >= 0, before, torch.where(after < T, after, q[:, None].expand(B, T, N)))
+
+
+def rigid_motion(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
                  member: torch.Tensor, seen: torch.Tensor, robust: int = 0) -> tuple:
     """`rigid_proposal`'s fit in every frame of the clip, as its pieces: R (B,
     T, N, 3, 3) the turn of each point's piece since its query frame, ms and
     md (B, T, N, 3) the mates' centre there and now, s (B, T, N) the weight
-    behind it. Where moving with its piece puts a point: R (anchor - ms) + md."""
+    behind it. Where moving with its piece puts a point: R (its query place - ms) + md."""
+    B, T, N, _ = pos.shape
     with torch.autocast(device_type=pos.device.type, enabled=False):
-        return _rigid_fit(pos.float(), q, anchor.float(), groups.float(), member, seen.float(), 0, pos.shape[1],
-                          robust)
+        return _rigid_fit(pos.float(), q[:, None].expand(B, T, N), groups.float(), member, seen.float(), 0, T, robust)
 
 
-def _proposal(pos_w, anchor, R, ms, md, s):
-    """`rigid_proposal`'s (B, L, N, 5) from the fit's pieces in those frames."""
-    prop = (R @ (anchor[:, None, :, :, None] - ms[..., None]))[..., 0] + md
+def _proposal(pos_w, own, R, ms, md, s):
+    """`rigid_proposal`'s (B, L, N, 5) from the fit's pieces in those frames,
+    `own` (B, L, N, 3) where each point was in the frame it is carried from."""
+    prop = (R @ (own - ms)[..., None])[..., 0] + md
     off = (prop - pos_w) * (s > 1e-3)[..., None]
     turn = torch.acos(((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1))
     return torch.cat([off, (s / (s + 1))[..., None], turn[..., None]], -1)
 
 
-def _rigid_fit(pos, q, anchor, groups, member, seen, start, end, robust=0):
+def _rigid_fit(pos, ref, groups, member, seen, start, end, robust=0):
+    """The fit's pieces (R, ms, md, s) for frames `start` to `end`, each point's
+    mates carried from its frame `ref` (B, L, N) to each frame."""
     B, T, N, _ = pos.shape
     # A point's mates: every point its group vector puts on its piece (likelihood
-    # over a half; never another piece), weighted by that and by being seen in
-    # the frame, so each frame's fit rests on whoever of the piece is seen there.
+    # over a half; never another piece), weighted by that and by being seen both
+    # in the frame and in the one it is carried from, so the fit rests only on
+    # places seen, never on guesses of hidden ones.
     a = 2 * torch.sigmoid(-_sq_dist(groups)) * (member[:, :, None] & member[:, None, :])
     a = (a * (a > 0.5)).masked_fill(torch.eye(N, dtype=torch.bool, device=pos.device), 0.0)
-    w0 = a[:, None] * seen[:, start:end, None, :]                                   # (B, L, N, N)
-    src = pos[torch.arange(B, device=pos.device)[:, None], q][:, None]              # (B, 1, N, N, 3) at each point's query frame
+    b = torch.arange(B, device=pos.device)[:, None, None]
+    w0 = a[:, None] * seen[:, start:end, None, :] * seen[b, ref]                     # (B, L, N, N)
+    src = pos[b, ref]                                                               # (B, L, N, N, 3) in each one's frame
     dst = pos[:, start:end, None]                                                   # (B, L, 1, N, 3)
     return robust_kabsch(w0, src, dst, robust, _fit)
 
@@ -348,12 +369,12 @@ class Sweeps:
                     rigid = motion = None
                     if model.rigid_proposal and self.groups is not None:
                         clip_pos = model.lookup_pos(self.whole, anchor)
-                        fit_in = (clip_pos, self.cond["query_t"], anchor, self.groups, self.seen & self.known,
+                        fit_in = (clip_pos, self.cond["query_t"], self.groups, self.seen & self.known,
                                   torch.sigmoid(self.vis) * self.trust)
                         if model.physics:
                             # Every frame's fit: the motion is carried from its supported frames.
                             motion = tuple(t.detach() for t in rigid_motion(*fit_in, robust=model.fit_robust))
-                            rigid = _proposal(clip_pos[:, start:end].float(), anchor.float(),
+                            rigid = _proposal(clip_pos[:, start:end].float(), anchor.float()[:, None],
                                               *(t[:, start:end] for t in motion))
                         else:
                             rigid = rigid_proposal(*fit_in, start, end, robust=model.fit_robust).detach()
@@ -523,7 +544,7 @@ def regress_loss(
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, *groups(r.start, r.end), r.alive)
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
-            fit = rigid_proposal(clip, cond["query_t"], anchor, r.groups, run.seen & run.known,
+            fit = rigid_proposal(clip, cond["query_t"], r.groups, run.seen & run.known,
                                  torch.sigmoid(run.vis) * run.trust, r.start, r.end, robust=model.fit_robust)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)

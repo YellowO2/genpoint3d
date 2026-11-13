@@ -30,7 +30,7 @@ from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawned
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
-from genpoint3d.train.tools.regress import Sweeps, rigid_motion, rigid_proposal
+from genpoint3d.train.tools.regress import Sweeps, last_seen, rigid_motion, rigid_proposal
 
 
 @torch.no_grad()
@@ -56,7 +56,7 @@ def main() -> int:
     rows, backing = {}, {"hidden": [], "seen": []}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "proposal", "robust") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
+    names = ("guess", "proposal", "robust", "last seen") + (() if args.spawn else ("true groups", "true robust", "true seen", "all true"))
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -81,22 +81,25 @@ def main() -> int:
         guess = sweeps.whole.float()
         pos = model.lookup_pos(guess, anchor)
         belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
-        prop = rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T)
+        prop = rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T)
         fits = {"guess": guess, "proposal": guess + prop[..., :3] / model.traj_scale,
-                "robust": guess + rigid_proposal(pos, eq, anchor, sweeps.groups, member, belief, 0, T,
-                                                 robust=3)[..., :3] / model.traj_scale}
+                "robust": guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T,
+                                                 robust=3)[..., :3] / model.traj_scale,
+                # Each point carried from the nearest frame it is believed seen in, not its query frame.
+                "last seen": guess + rigid_proposal(pos, eq, sweeps.groups, member, belief, 0, T, robust=3,
+                                                    ref=last_seen(belief, eq))[..., :3] / model.traj_scale}
         if not args.spawn:
             # The true pieces as group vectors: one axis each, far apart.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
             truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
-            fits["true groups"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T)[..., :3] / model.traj_scale
-            fits["true robust"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, belief, 0, T,
+            fits["true groups"] = guess + rigid_proposal(pos, q, truth, sweeps.seen, belief, 0, T)[..., :3] / model.traj_scale
+            fits["true robust"] = guess + rigid_proposal(pos, q, truth, sweeps.seen, belief, 0, T,
                                                          robust=3)[..., :3] / model.traj_scale
             # Which mates count, then where they are too, from the truth: what the fit's inputs cost it.
             seen_true = b["visibility"].float()
-            fits["true seen"] = guess + rigid_proposal(pos, q, anchor, truth, sweeps.seen, seen_true, 0, T,
+            fits["true seen"] = guess + rigid_proposal(pos, q, truth, sweeps.seen, seen_true, 0, T,
                                                        robust=3)[..., :3] / model.traj_scale
-            fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q, anchor,
+            fits["all true"] = b["traj"].float() + rigid_proposal(model.lookup_pos(b["traj"].float(), anchor), q,
                                                                   truth, sweeps.seen, seen_true, 0, T, robust=3)[..., :3] / model.traj_scale
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         traj = b["traj"]
@@ -130,7 +133,7 @@ def main() -> int:
             apd = tapvid3d_metrics(to_metres(guess[:, :, :N], b), gt, on_used, b["intrinsics_256"], b["extrinsics"],
                                    scaling="none", per_clip=True)["average_pts_within_thresh"].cpu()
             rows.setdefault(("used mates", "apd"), []).append(apd)
-            turn = lambda places: rigid_motion(places, q, anchor, truth, sweeps.seen, seen_true, robust=3)[0][:, :, :N]
+            turn = lambda places: rigid_motion(places, q, truth, sweeps.seen, seen_true, robust=3)[0][:, :, :N]
             R_pred, R_true = turn(pos), turn(model.lookup_pos(b["traj"].float(), anchor))
             angle = lambda R: torch.acos(((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1)).rad2deg()
             if used.any():
