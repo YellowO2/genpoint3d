@@ -157,6 +157,27 @@ def last_seen(seen: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     return torch.where(before >= 0, before, torch.where(after < T, after, q[:, None].expand(B, T, N)))
 
 
+def frame_by_frame(pos: torch.Tensor, groups: torch.Tensor, member: torch.Tensor, seen: torch.Tensor,
+                   robust: int = 0) -> torch.Tensor:
+    """(B, T, N, 3) each point where its piece carries it a frame at a time:
+    in each frame, the turn and shift that best carry the piece's points seen
+    both there and in the frame before (`_rigid_fit`'s mates), applied to
+    where the point was in the frame before; its own guess where it is
+    believed seen (`seen` (B, T, N) over 0.5) or nothing backs the step.
+    pos, groups, member as `rigid_proposal`'s."""
+    B, T, N, _ = pos.shape
+    with torch.autocast(device_type=pos.device.type, enabled=False):
+        pos, seen = pos.float(), seen.float()
+        out = [pos[:, 0]]
+        for t in range(1, T):
+            ref = torch.full((B, T, N), t - 1, dtype=torch.long, device=pos.device)
+            R, ms, md, s = _rigid_fit(pos, ref[:, t:t + 1], groups.float(), member, seen, t, t + 1, robust)
+            carried = (R @ (out[-1][:, None] - ms)[..., None])[..., 0] + md                 # (B, 1, N, 3)
+            own = (seen[:, t] > 0.5) | (s[:, 0] <= 1e-3)
+            out.append(torch.where(own[..., None], pos[:, t], carried[:, 0]))
+        return torch.stack(out, 1)
+
+
 def rigid_motion(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor,
                  member: torch.Tensor, seen: torch.Tensor, robust: int = 0) -> tuple:
     """`rigid_proposal`'s fit in every frame of the clip, as its pieces: R (B,
