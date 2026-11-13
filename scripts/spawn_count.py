@@ -24,7 +24,7 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--raw", required=True)
-p.add_argument("--spawn", type=int, default=150)
+p.add_argument("--spawn", type=int, default=1000, help="points each clip is filled up to")
 args = p.parse_args()
 
 dev = torch.device("cuda")

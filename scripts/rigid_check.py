@@ -41,7 +41,7 @@ def main() -> int:
     p.add_argument("--cache", required=True)
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--points", type=int, default=256)
-    p.add_argument("--spawn", type=int, default=0, help="at most this many points added on new surface first")
+    p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to first where surface has none")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

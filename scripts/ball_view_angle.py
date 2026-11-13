@@ -33,7 +33,7 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--raw", required=True, help="the rendered clips, with the ball's centre")
-p.add_argument("--spawn", type=int, default=0, help="at most this many points added where new surface has none")
+p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to where surface has none (0: none added)")
 args = p.parse_args()
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -3,7 +3,8 @@ on real video adds them: training's spawning (`ClipDataset._spawned`) at test
 time, without the truth. One rule for every frame: a place on a surface that
 no point sits on gets one. As in training, where the scene's points come as
 given and only new surface is capped, the first frame's points are limited by
-the gap alone and the budget is for the frames after it. The first frame's
+the gap and the clip's point budget, and new surface after it fills the
+rest of that budget, as training's points per clip. The first frame's
 points are tracked before the later ones are added, so every point already
 there covers where it really goes (`spawn_all`)."""
 
@@ -15,20 +16,20 @@ from genpoint3d.train.data.ClipDataset import farthest_first
 from genpoint3d.train.tools.camera import project
 
 
-def spawn_all(model, b: dict, fine: dict, view: torch.Tensor, cap: int, gap: float, tracks_of) -> dict:
-    """`b` with points added in two rounds, each tracked before the next
-    (`tracks_of(clip)` gives a clip's tracks and visibility logits): the first
-    frame's gaps, then up to `cap` on new surface after it."""
-    b = spawned(model, b, fine, *tracks_of(b), view, gap, None)
-    return spawned(model, b, fine, *tracks_of(b), view, gap, cap)
+def spawn_all(model, b: dict, fine: dict, view: torch.Tensor, points: int, gap: float, tracks_of) -> dict:
+    """`b` with points added until it has `points`, in two rounds, each
+    tracked before the next (`tracks_of(clip)` gives a clip's tracks and
+    visibility logits): the first frame's gaps, then new surface after it."""
+    b = spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], True)
+    return spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], False)
 
 
 @torch.no_grad()
 def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None, view: torch.Tensor, gap: float,
-            cap: int | None) -> dict:
-    """`b` (one clip) with points added after its own: in the first frame seen
-    whole if `cap` is None, else up to `cap` in the frames seen whole after
-    it, frame by frame. They go where no point covers the CNN cells, the
+            cap: int, first: bool) -> dict:
+    """`b` (one clip) with up to `cap` points added after its own: in the
+    first frame seen whole if `first`, else in the frames seen whole after it,
+    frame by frame. They go where no point covers the CNN cells, the
     farthest first, each starting at its cell in that frame, its look read
     there. A point covers the cells within `gap` (a share of the frame's
     width) of it in the image if it is believed seen there (as training's
@@ -56,7 +57,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
     far = gap * W
     born = []                                                       # (frame, cell, position, nearest own point)
     seen = torch.nonzero(whole)[:, 0].tolist()
-    for t in (seen[:1] if cap is None else seen[1:]):
+    for t in (seen[:1] if first else seen[1:]):
         own = torch.nonzero(exists[t])[:, 0]
         here = torch.cat([pos[t, own]] + [(p + pos[t, i] - pos[t0, i])[None] for t0, _, p, i in born])
         shown = torch.cat([believed[t, own], believed[t, [i for *_, i in born]]])          # an added one as its carrier
@@ -72,7 +73,7 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
         on = ((z - depth[at]).abs() < 0.03 * depth[at]) & shown
         d = (torch.cdist(cell_px[cand], uv[on] * uv.new_tensor([W, H])).min(1).values if on.any()
              else torch.full((len(cand),), float("inf"), device=pos.device))
-        picked = farthest_first(cell_px[cand], d, far, len(cand) if cap is None else cap - len(born))
+        picked = farthest_first(cell_px[cand], d, far, cap - len(born))
         for j in picked:
             p = xyz[t, cand[j]]
             i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])

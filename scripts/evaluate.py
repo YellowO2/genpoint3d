@@ -102,7 +102,7 @@ def main() -> int:
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="frames C on get no image, observed (_obs) and forecast (_fut) scored apart")
     p.add_argument("--per-frame", action="store_true", help="also APD by frame, every frame seen")
-    p.add_argument("--spawn", type=int, default=0, help="at most this many points added where new surface has none")
+    p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to where surface has none (0: none added)")
     p.add_argument("--spawn-gap", type=float, default=0.05, help="a gap that wide (a share of the frame's width) gets one")
     args = p.parse_args()
     if args.eval_cutoff == 1 or args.eval_cutoff < 0:
