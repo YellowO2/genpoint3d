@@ -16,6 +16,8 @@ which way is down, where that is known).
 import torch
 from torch import nn
 
+from genpoint3d.train.tools.kabsch import kabsch
+
 
 def _mlp(i: int, o: int, width: int = 128, norm: bool = True) -> nn.Sequential:
     """GNS's MLP: two hidden layers of `width` with ReLU, LayerNorm on the output
@@ -45,17 +47,10 @@ def shape_match(x: torch.Tensor, rest: torch.Tensor, piece: torch.Tensor) -> tor
     Mueller et al. 2005; FIGNet keeps objects rigid this way in its rollouts).
     Points on no piece (-1), or on one of under 3 points, kept."""
     w = ((piece[:, :, None] == piece[:, None]) & (piece >= 0)[:, :, None]).double()      # (S, N, N)
-    r, y = rest.double(), x.double()
-    s = w.sum(-1)
-    ok = (s >= 3) & (piece >= 0)
-    ms, md = (w @ r) / s.clamp_min(1)[..., None], (w @ y) / s.clamp_min(1)[..., None]
-    H = torch.einsum("snm,smx,smy->snxy", w, r, y) - s[..., None, None] * ms[..., :, None] * md[..., None, :]
-    U, _, Vh = torch.linalg.svd(torch.where(ok[..., None, None], H, torch.eye(3, dtype=H.dtype, device=H.device)))
-    V, Ut = Vh.transpose(-1, -2), U.transpose(-1, -2)
-    flip = torch.ones_like(H[..., 0])
-    flip[..., 2] = torch.linalg.det(V @ Ut).sign()
-    placed = ((V @ torch.diag_embed(flip) @ Ut) @ (r - ms)[..., None])[..., 0] + md
-    return torch.where(ok[..., None], placed.to(x.dtype), x)
+    r = rest.double()
+    R, ms, md, s = kabsch(w, r[:, None], x.double()[:, None])
+    placed = (R @ (r - ms)[..., None])[..., 0] + md
+    return torch.where((s >= 3)[..., None], placed.to(x.dtype), x)
 
 
 class Stepper(nn.Module):

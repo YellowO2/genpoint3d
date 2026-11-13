@@ -1,7 +1,6 @@
 """Turn one cached clip into a normalised, subsampled training sample."""
 
 import dataclasses
-import math
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from genpoint3d.CachedClip import CachedClip
-from genpoint3d.tools.feature_lookup import sample_at
+from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.NormStats import NormStats
 from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH_SPREAD, RADIUS, REACH, SCENE_SCALE,
                                          TRAJ_SCALE_DISP)
@@ -93,14 +92,7 @@ class ClipDataset(Dataset):
         if id_card is not None and clip.context is not None:
             # Read again in each point's query frame with the exact lookup
             # (`tools/feature_lookup.py`), before the subsampling.
-            fixed = id_card.clone()
-            for t in query_t.unique().tolist():
-                m = query_t == t
-                ft = clip.context[t].float()
-                g = math.isqrt(ft.shape[0])
-                fixed[m] = sample_at(ft.T.reshape(1, -1, g, g), clip.query_uv[m][None].float(),
-                                     clip.hw)[0].to(id_card.dtype)
-            id_card = fixed
+            id_card = id_cards(clip.context, query_t, clip.query_uv, clip.hw).to(id_card.dtype)
         if self.query_before:
             keep = query_t < self.query_before
             traj, anchor, vis, query_t, offset = traj[:, keep], anchor[keep], vis[:, keep], query_t[keep], offset[:, keep]
@@ -209,14 +201,10 @@ def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float) -> CachedC
             continue
         d = (torch.cdist(uv[t, cand], uv[t, live]).min(1).values if live.any()
              else torch.full((len(cand),), float("inf")))
-        while len(born) < cap:
-            j = int(d.argmax())
-            if d[j] <= far:
-                break
+        for j in farthest_first(uv[t, cand], d, far, cap - len(born)):
             k = int(cand[j])
             tracked[k], start[k] = True, t
             born.append(k)
-            d = torch.minimum(d, (uv[t, cand] - uv[t, k]).norm(dim=-1))
     # The budget the new points left, filled with more points as given.
     fill = perm[~tracked[perm]][: num_points - int(tracked.sum())]
     tracked[fill] = True
@@ -229,6 +217,20 @@ def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float) -> CachedC
     anchor[b] = clip.traj[start[b], n[b]].to(anchor.dtype)
     query_uv[b] = uv[start[b], n[b]].to(query_uv.dtype)
     return _points(dataclasses.replace(clip, anchor=anchor, query_uv=query_uv, query_t=start), keep)
+
+
+def farthest_first(px: torch.Tensor, d: torch.Tensor, far: float, most: int) -> list[int]:
+    """Up to `most` of the candidates at pixels `px` (C, 2), the farthest
+    first: each farther than `far` both by `d` (C,), its distance to what is
+    there already, and from the ones picked before it."""
+    picked = []
+    while len(picked) < most:
+        j = int(d.argmax())
+        if d[j] <= far:
+            break
+        picked.append(j)
+        d = torch.minimum(d, (px - px[j]).norm(dim=-1))
+    return picked
 
 
 def _points(clip: CachedClip, keep: torch.Tensor) -> CachedClip:

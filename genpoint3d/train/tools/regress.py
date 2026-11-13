@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from genpoint3d.train.tools.kabsch import kabsch, robust_kabsch
 from genpoint3d.train.tools.visibility import visibility_error
 
 
@@ -169,38 +170,17 @@ def _rigid_fit(pos, q, anchor, groups, member, seen, start, end, mates, robust=0
     w0 = aff[:, None] * take(seen[:, start:end])                                    # (B, L, N, K)
     dst = take(pos[:, start:end])                                                   # (B, L, N, K, 3)
     src = pos[torch.arange(B, device=pos.device)[:, None, None], q[:, :, None], idx][:, None]   # (B, 1, N, K, 3)
-    R, ms, md, s, w = *_fit(w0, src, dst), w0
-    for _ in range(robust):
-        # Mates far from where the fit puts them, against the typical one, count less.
-        left = _left(R, ms, md, src, dst)
-        typical = (w * left).sum(-1, keepdim=True) / s.clamp_min(1e-6)[..., None] + 1e-6
-        w = w0 / (1 + (left / typical).pow(2))
-        R, ms, md, s = _fit(w, src, dst)
-    return R, ms, md, s
+    return robust_kabsch(w0, src, dst, robust, _fit)
 
 
 def _fit(w, src, dst):
-    """The weighted Kabsch fit carrying `src` onto `dst` (B, L, N, K, 3, src
-    broadcast): its turn R (B, L, N, 3, 3), the centres ms and md, and the
-    weight s behind it; a shift alone with less than 3."""
-    s = w.sum(-1)
-    mean = lambda x: (w[..., None] * x).sum(-2) / s.clamp_min(1e-6)[..., None]
-    ms, md = mean(src.expand_as(dst)), mean(dst)
-    H = torch.einsum("blnk,blnkx,blnky->blnxy", w, src - ms[..., None, :], dst - md[..., None, :])
-    U, _, Vh = torch.linalg.svd(H)
-    V, Ut = Vh.transpose(-1, -2), U.transpose(-1, -2)
-    flip = torch.ones(*H.shape[:-1], device=w.device)
-    flip[..., 2] = torch.linalg.det(V @ Ut).sign()
+    """`kabsch` over each point's mates (B, L, N, K), a shift alone with less
+    than 3 weight."""
+    R, ms, md, s = kabsch(w, src, dst)
     # The turn carries no gradient (an SVD's is unstable where mates lie nearly
     # in a line); the weights reach the fit through its centres.
-    R = torch.where((s >= 3)[..., None, None], V @ torch.diag_embed(flip) @ Ut, torch.eye(3, device=w.device)).detach()
+    R = torch.where((s >= 3)[..., None, None], R, torch.eye(3, device=w.device)).detach()
     return R, ms, md, s
-
-
-def _left(R, ms, md, src, dst):
-    """(B, L, N, K) how far each mate sits from where the fit puts it."""
-    a = src - ms[..., None, :]
-    return ((R[..., None, :, :] @ a[..., None])[..., 0] + md[..., None, :] - dst).norm(dim=-1)
 
 
 # A piece's fit counts as supported with this much weight behind it (3 mates,

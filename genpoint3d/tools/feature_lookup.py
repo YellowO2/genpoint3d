@@ -1,5 +1,7 @@
 """Read a feature grid at pixel positions, the way the cache does."""
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -30,3 +32,15 @@ def sample_at(feat: torch.Tensor, uv: torch.Tensor, hw: tuple[int, int]) -> torc
     out = F.grid_sample(feat, norm[:, :, None], padding_mode="border",
                         align_corners=False)                         # (T, dim, N, 1)
     return out[..., 0].transpose(1, 2)
+
+
+def id_cards(context: torch.Tensor, query_t: torch.Tensor, uv: torch.Tensor, hw: tuple[int, int]) -> torch.Tensor:
+    """(N, dim) float32 each point's look: the patch tokens `context` (T, g*g,
+    dim) read at its pixel `uv` (N, 2) in its query frame `query_t` (N,)."""
+    out = torch.zeros(len(uv), context.shape[-1], device=uv.device)
+    for t in query_t.unique().tolist():
+        m = query_t == t
+        ft = context[t].float()
+        g = math.isqrt(ft.shape[0])
+        out[m] = sample_at(ft.T.reshape(1, -1, g, g), uv[m][None].float(), hw)[0]
+    return out

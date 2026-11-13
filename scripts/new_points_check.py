@@ -14,15 +14,15 @@ Run:  python scripts/new_points_check.py --ckpt outputs/RUN/best.pt --cache DIR 
 """
 
 import argparse
-import math
 
 import torch
 from torch.utils.data import DataLoader
 
-from genpoint3d.tools.feature_lookup import sample_at
+from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project
+from genpoint3d.train.tools.kabsch import robust_kabsch
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import Sweeps
 
@@ -45,14 +45,12 @@ def _requeried(model, b: dict, fine: dict, keep, at: int) -> dict:
     new_anchor = pos[:, at]
     uv, _ = project(new_anchor[:, None], fine["fine_proj"][:, at:at + 1].float())
     H, W = b["hw"][0].tolist()
-    ctx = b["context"][0, at].float()
-    g = math.isqrt(ctx.shape[0])
-    card = sample_at(ctx.T.reshape(1, -1, g, g), uv[:, 0] * uv.new_tensor([W, H]), (H, W))
     out = _part(b, keep)
+    out["query_t"] = torch.full_like(out["query_t"], at)
     out["traj"] = ((pos - new_anchor[:, None]) / model.traj_scale).to(b["traj"].dtype)
     out["anchor"] = new_anchor.to(b["anchor"].dtype)
-    out["query_t"] = torch.full_like(out["query_t"], at)
-    out["id_card"] = card.to(b["id_card"].dtype)
+    card = id_cards(b["context"][0], out["query_t"][0], uv[0, 0] * uv.new_tensor([W, H]), (H, W))
+    out["id_card"] = card[None].to(b["id_card"].dtype)
     out["norm_offset"] = new_anchor[:, None].to(b["norm_offset"].dtype)
     return out
 
@@ -61,29 +59,10 @@ def _robust_place(src, dst, w0, own, refits: int = 3):
     """(1, T, n, 3) each of n points carried by the turn and shift that best
     carry its mates from `src` (1, n, M, 3) to `dst` (1, T, M, 3), weighted by
     `w0` (1, T, n, M), refit with far mates counting less, applied to `own`
-    (1, n, 3); and (1, T, n) where at least 3 mates' weight backs it."""
-    src = src[:, None]                                                       # (1, 1, n, M, 3)
-    dst = dst[:, :, None]                                                    # (1, T, 1, M, 3)
-    w = w0
-
-    def fit(w):
-        s = w.sum(-1)
-        mean = lambda x: (w[..., None] * x).sum(-2) / s.clamp_min(1e-6)[..., None]
-        ms, md = mean(src.expand(*w.shape, 3)), mean(dst.expand(*w.shape, 3))
-        H = torch.einsum("btnm,btnmx,btnmy->btnxy", w, src - ms[..., None, :], dst - md[..., None, :])
-        U, _, Vh = torch.linalg.svd(H.double())
-        V, Ut = Vh.transpose(-1, -2), U.transpose(-1, -2)
-        flip = torch.ones(*H.shape[:-1], device=w.device, dtype=torch.float64)
-        flip[..., 2] = torch.linalg.det(V @ Ut).sign()
-        return (V @ torch.diag_embed(flip) @ Ut).float(), ms, md, s
-
-    R, ms, md, s = fit(w)
-    for _ in range(refits):
-        left = ((R[..., None, :, :] @ (src - ms[..., None, :])[..., None])[..., 0] + md[..., None, :] - dst).norm(dim=-1)
-        typical = (w * left).sum(-1, keepdim=True) / s.clamp_min(1e-6)[..., None] + 1e-6
-        w = w0 / (1 + (left / typical).pow(2))
-        R, ms, md, s = fit(w)
-    return (R @ (own[:, None] - ms)[..., None])[..., 0] + md, w0.sum(-1) >= 3
+    (1, n, 3); and (1, T, n) where at least 3 mates' weight backs it. In
+    float64."""
+    R, ms, md, _ = robust_kabsch(w0.double(), src[:, None].double(), dst[:, :, None].double(), refits)
+    return ((R @ (own[:, None].double() - ms)[..., None])[..., 0] + md).float(), w0.sum(-1) >= 3
 
 
 @torch.no_grad()

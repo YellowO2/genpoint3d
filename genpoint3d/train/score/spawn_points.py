@@ -6,8 +6,9 @@ frames' gaps are surface coming into view."""
 
 import torch
 
-from genpoint3d.tools.feature_lookup import sample_at
+from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.tools.traj_scale import RADIUS
+from genpoint3d.train.data.ClipDataset import farthest_first
 from genpoint3d.train.tools.camera import project
 
 
@@ -52,26 +53,17 @@ def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tens
         d = (torch.cdist(cell_px[cand], px(cover, t)).min(1).values if len(cover)
              else torch.full((len(cand),), float("inf"), device=pos.device))
         own = torch.nonzero(believed[t])[:, 0]
-        while len(born) < cap and len(own):
-            j = int(d.argmax())
-            if d[j] <= far:
-                break
+        for j in farthest_first(cell_px[cand], d, far, cap - len(born) if len(own) else 0):
             p = xyz[t, cand[j]]
             i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])
             born.append((t, int(cand[j]), p, i))
-            d = torch.minimum(d, (cell_px[cand] - cell_px[cand[j]]).norm(dim=-1))
     if not born:
         return b
     M = len(born)
     start = torch.tensor([t for t, *_ in born], device=pos.device)
     cell = torch.tensor([c for _, c, *_ in born], device=pos.device)
     anchor = torch.stack([p for *_, p, _ in born])[None]                                # (1, M, 3)
-    card = torch.zeros(M, b["id_card"].shape[-1], device=pos.device)
-    for t in start.unique().tolist():
-        m = start == t
-        ft = b["context"][0, t].float()
-        g = int(ft.shape[0] ** 0.5)
-        card[m] = sample_at(ft.T.reshape(1, -1, g, g), cell_px[cell[m]][None], (H, W))[0]
+    card = id_cards(b["context"][0], start, cell_px[cell], (H, W))
     out = dict(b)
     add = lambda k, x, dim: torch.cat([b[k], x.to(b[k].dtype)], dim)
     out["traj"] = add("traj", torch.zeros(1, T, M, 3, device=pos.device), 2)
