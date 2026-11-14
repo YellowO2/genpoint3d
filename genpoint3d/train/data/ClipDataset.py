@@ -167,7 +167,8 @@ class ClipDataset(Dataset):
     @staticmethod
     def frames_dir(path: str | None, clips: list, res: int) -> Path:
         """The frames cache for `clips`, checked before training: every clip
-        has its frames at `res` and its depth at one cell per 4 px."""
+        has its frames at `res` and its depth at one cell per 4 px (a cache
+        with no clips in the run, as with --overfit, has nothing to check)."""
         if not path:
             raise SystemExit("pass --frames-cache, a directory from scripts/cache_frames.py")
         d = Path(path)
@@ -177,7 +178,7 @@ class ClipDataset(Dataset):
                 raise SystemExit(f"{len(missing)} of {len(clips)} clips have no {kind} in {d} "
                                  f"({' '.join(missing[:5])}{' ...' if len(missing) > 5 else ''})"
                                  " -- run scripts/cache_frames.py")
-            got = np.load(d / f"{clips[0].stem}{suffix}", mmap_mode="r").shape[1:3]
+            got = np.load(d / f"{clips[0].stem}{suffix}", mmap_mode="r").shape[1:3] if clips else (size, size)
             if got != (size, size):
                 raise SystemExit(f"{kind} in {d} are {got[0]}x{got[1]}, --fine-res {res} needs {size}x{size}")
         return d
