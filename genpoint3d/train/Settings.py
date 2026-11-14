@@ -49,8 +49,9 @@ class Settings(argparse.Namespace):
         p.add_argument("--accum", type=int, default=1, help="micro-batches per optimiser step")
         p.add_argument("--points", type=int, default=1000, help="points drawn per clip")
         p.add_argument("--spawn", type=int, default=500, metavar="M",
-                       help="up to M of each training clip's points start where new surface comes into view, frame "
-                            "by frame, the clip's other tracks standing in for them (0: none)")
+                       help="M of each clip's --points are helpers added by the spawning rule, frame by frame where "
+                            "no point seen covers the surface, the clip's other tracks standing in for them; the "
+                            "rest are asked, and only those are scored (0: all asked)")
         p.add_argument("--spawn-gap", type=float, default=SPAWN_GAP,
                        help="a new point starts only this far (a share of the frame's width) from every point "
                             "tracked and seen there, in training and when the run is scored")
@@ -141,6 +142,8 @@ class Settings(argparse.Namespace):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss, settings.centre_loss) < 0:
             p.error("loss weights are 0 or more")
+        if settings.spawn and settings.batch > 1:
+            p.error("--spawn fills each clip as far as its surface allows, so clips differ in points: needs --batch 1")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

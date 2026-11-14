@@ -22,6 +22,8 @@ class Predictor:
         model, j = self.model, self.judging
         b = to_device(batch, j.device)
         traj = b["traj"]
+        # A batch that does not say which points are asked has asked them all.
+        b.setdefault("asked", torch.ones(traj.shape[0], traj.shape[2], dtype=torch.bool, device=j.device))
         # One cutoff for every clip; without one, every frame keeps its image.
         cutoff = None
         if j.cutoff:
@@ -37,13 +39,11 @@ class Predictor:
         fine["down_known"] = truly & ~hide
         loss, out = self._track(b, fine, vm)
         if j.fill:
-            # Again with points added where none covers the frame; only the clip's own are scored.
-            more = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
+            # Again with points added where none covers the frame, as helpers.
+            b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, {**fine, "query_t": bb["query_t"]}, vm)[1]))
-            _, out = self._track(more, {**fine, "query_t": more["query_t"]}, vm)
-            N = traj.shape[2]
-            out = {k: None if v is None else v[:, :N] if k == "groups" else v[:, :, :N] if k in ("tracks", "logits") else v
-                   for k, v in out.items()}
+            _, out = self._track(b, {**fine, "query_t": b["query_t"]}, vm)
+        b, out = _asked_only(b, out)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],
                           down_scored=truly & hide)
@@ -53,8 +53,31 @@ class Predictor:
         cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
-            return regress_loss(self.model, b["traj"], b["anchor"], mask=b["visibility"], window=j.window,
+            # The loss, as every score, on the asked points only.
+            return regress_loss(self.model, b["traj"], b["anchor"], mask=b["visibility"] & b["asked"][:, None],
+                                window=j.window,
                                 overlap=j.overlap, schedule=j.schedule, **cond)
 
     def done(self) -> None:
         self.model.train()
+
+
+# Each per-point entry of a batch, by the dimension its points are along.
+POINT_DIM = {"traj": 2, "visibility": 2, "centre": 2, "norm_offset": 2, "anchor": 1, "query_t": 1, "id_card": 1,
+             "segment": 1, "centre_known": 1, "asked": 1}
+
+
+def _asked_only(b: dict, out: dict) -> tuple[dict, dict]:
+    """The batch and the tracking with only the asked points: the helpers the
+    clip was filled with are tracked beside them but never scored."""
+    asked = b["asked"]
+    if asked.all():
+        return b, out
+    if asked.shape[0] != 1:
+        raise ValueError("helper points are scored one clip at a time (--batch 1)")
+    keep = asked[0]
+    pick = lambda v, dim: v[:, :, keep] if dim == 2 else v[:, keep]
+    b = {k: pick(v, POINT_DIM[k]) if k in POINT_DIM and v.dim() > POINT_DIM[k] else v for k, v in b.items()}
+    out = {k: None if v is None else pick(v, 1 if k == "groups" else 2) if k in ("tracks", "logits", "groups") else v
+           for k, v in out.items()}
+    return b, out

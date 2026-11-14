@@ -1,8 +1,8 @@
 """New points where surface comes into view with no point on it.
 
-They are added as a tracker on real video adds them: training's spawning
-(`ClipDataset._spawned`) at test time, without the truth. One rule for every
-frame: a place on a surface that no point sits on gets one. As in training,
+They are added as a tracker on real video adds them, by the rule training
+spawns by (`fill_frames`), without the truth: a place on a surface that no
+point seen there sits on gets one. As in training,
 where the scene's points come as given and only new surface is capped, the
 first frame's points are limited by the gap and the clip's point budget, and
 new surface after it fills the rest of that budget, as training's points per
@@ -15,7 +15,7 @@ from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.tools.traj_scale import RADIUS
 from genpoint3d.train.tools.batch import whole_frames
 from genpoint3d.train.tools.camera import project
-from genpoint3d.train.tools.farthest_first import farthest_first
+from genpoint3d.train.tools.farthest_first import SURFACE_TOL, fill_frames
 
 
 def spawn_points(model, b: dict, fine: dict, view: torch.Tensor, points: int, gap: float, tracks_of) -> dict:
@@ -56,30 +56,37 @@ def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Ten
     h, w = fine["fine_xyz"].shape[-2:]
     v, u = torch.meshgrid(torch.arange(h, device=pos.device), torch.arange(w, device=pos.device), indexing="ij")
     cell_px = torch.stack([(u.flatten() + 0.125) / w * W, (v.flatten() + 0.125) / h * H], -1).float()
-    far = gap * W
-    born = []                                                       # (frame, cell, position, nearest own point)
-    seen = torch.nonzero(whole)[:, 0].tolist()
-    for t in (seen[:1] if first else seen[1:]):
+    carrier = {}                                                    # an added point: the own point nearest it then
+
+    def at(t0, cell):
+        """An added point's place in its first frame and its carrier."""
+        if (t0, cell) not in carrier:
+            own = torch.nonzero(exists[t0])[:, 0]
+            p = xyz[t0, cell]
+            carrier[t0, cell] = p, int(own[(pos[t0, own] - p).norm(dim=-1).argmin()])
+        return carrier[t0, cell]
+
+    def candidates(t, born):
+        cand = torch.nonzero(b["depth"][0, t].flatten() < RADIUS)[:, 0] if exists[t].any() else cell_px.new_zeros(0).long()
+        return cell_px[cand], cand
+
+    def covering(t, born):
         own = torch.nonzero(exists[t])[:, 0]
-        here = torch.cat([pos[t, own]] + [(p + pos[t, i] - pos[t0, i])[None] for t0, _, p, i in born])
-        shown = torch.cat([believed[t, own], believed[t, [i for *_, i in born]]])          # an added one as its carrier
+        carried = [(p + pos[t, i] - pos[t0, i], i) for t0, c in born for p, i in [at(t0, c)]]
+        here = torch.cat([pos[t, own]] + [x[None] for x, _ in carried])
+        shown = torch.cat([believed[t, own], believed[t, [i for _, i in carried]]])     # an added one as its carrier
         depth = b["depth"][0, t].flatten().float()
-        cand = torch.nonzero(depth < RADIUS)[:, 0]
-        if not len(cand) or not len(own):
-            continue
         uv, z = project(here[None, None], proj[None, t:t + 1])
         uv, z = uv[0, 0], z[0, 0]
         # On the surface its own pixel shows (the depth there, as a z-buffer would test),
         # not hidden behind it; a slope's depth changes across a gap, so test it there.
-        at = ((uv[:, 1] * h).long().clamp(0, h - 1) * w + (uv[:, 0] * w).long().clamp(0, w - 1))
-        on = ((z - depth[at]).abs() < 0.03 * depth[at]) & shown
-        d = (torch.cdist(cell_px[cand], uv[on] * uv.new_tensor([W, H])).min(1).values if on.any()
-             else torch.full((len(cand),), float("inf"), device=pos.device))
-        picked = farthest_first(cell_px[cand], d, far, cap - len(born))
-        for j in picked:
-            p = xyz[t, cand[j]]
-            i = int(own[(pos[t, own] - p).norm(dim=-1).argmin()])
-            born.append((t, int(cand[j]), p, i))
+        px = (uv[:, 1] * h).long().clamp(0, h - 1) * w + (uv[:, 0] * w).long().clamp(0, w - 1)
+        on = ((z - depth[px]).abs() < SURFACE_TOL * depth[px]) & shown
+        return uv[on] * uv.new_tensor([W, H])
+
+    seen = torch.nonzero(whole)[:, 0].tolist()
+    born = [(t0, c, *at(t0, c)) for t0, c in fill_frames(seen[:1] if first else seen[1:], cap, gap * W,
+                                                         candidates, covering)]
     if not born:
         return b
     M = len(born)
@@ -101,4 +108,6 @@ def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Ten
         out["centre_known"] = add("centre_known", torch.zeros(1, M, dtype=torch.bool, device=pos.device), 1)
     if "norm_offset" in b:
         out["norm_offset"] = add("norm_offset", anchor[:, None], 2)
+    if "asked" in b:
+        out["asked"] = add("asked", torch.zeros(1, M, dtype=torch.bool, device=pos.device), 1)
     return out

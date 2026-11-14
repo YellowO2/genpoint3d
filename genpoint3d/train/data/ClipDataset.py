@@ -14,7 +14,7 @@ from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH
                                          TRAJ_SCALE_DISP)
 from genpoint3d.train.tools.batch import _cell_xyz, random_view, whole_frames
 from genpoint3d.train.tools.camera import image_projection
-from genpoint3d.train.tools.farthest_first import SPAWN_GAP, farthest_first
+from genpoint3d.train.tools.farthest_first import SPAWN_GAP, fill_frames
 from genpoint3d.train.tools.frame_spread import frame_spread
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
@@ -34,8 +34,8 @@ class ClipDataset(Dataset):
     With `view` (min_context, max_gap), each draw first loses part of its
     frames as training does (`random_view`, served as "view"), and only points
     it can hand over are served: none starts in a frame not seen whole. With
-    `spawn`, up to that many of the points start where new surface comes into
-    view (`_spawned`).
+    `spawn`, that many of the points are helpers added by the spawning rule,
+    the rest asked (`_spawned`); "asked" says which.
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
@@ -61,10 +61,17 @@ class ClipDataset(Dataset):
         if self.view is not None:
             view = random_view(clip.traj.shape[0], *self.view)
             whole = whole_frames(view)
+        if self.query_before:
+            # Forecast from C: frames from C on are not seen, so nothing is asked or added there.
+            whole = whole & (torch.arange(clip.traj.shape[0]) < self.query_before)
+        n_all = clip.traj.shape[1]
+        asked = torch.ones(n_all, dtype=torch.bool)
         if self.spawn:
-            clip = _spawned(clip, self.num_points, self.spawn, self.spawn_gap, whole)
+            order = torch.randperm(n_all) if self.resample else torch.arange(n_all)
+            clip, asked = _spawned(clip, self.num_points, self.spawn, self.spawn_gap, whole, order)
         elif self.view is not None:
             clip = _points(clip, torch.nonzero(whole[_query_frames(clip)])[:, 0])
+            asked = asked[: clip.traj.shape[1]]
 
         frames = depth = torch.zeros(0)
         if frames_dir is not None:
@@ -110,7 +117,7 @@ class ClipDataset(Dataset):
         if self.query_before:
             keep = query_t < self.query_before
             traj, anchor, vis, query_t, offset = traj[:, keep], anchor[keep], vis[:, keep], query_t[keep], offset[:, keep]
-            segment, centre, centre_known = segment[keep], centre[:, keep], centre_known[keep]
+            segment, centre, centre_known, asked = segment[keep], centre[:, keep], centre_known[keep], asked[keep]
             if id_card is not None:
                 id_card = id_card[keep]
         n_pts = traj.shape[1]
@@ -119,7 +126,7 @@ class ClipDataset(Dataset):
                    else torch.arange(self.num_points))
             traj, anchor, vis, query_t = traj[:, idx], anchor[idx], vis[:, idx], query_t[idx]
             offset = offset[:, idx]
-            segment, centre, centre_known = segment[idx], centre[:, idx], centre_known[idx]
+            segment, centre, centre_known, asked = segment[idx], centre[:, idx], centre_known[idx], asked[idx]
             if id_card is not None:
                 id_card = id_card[idx]
 
@@ -128,6 +135,8 @@ class ClipDataset(Dataset):
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t, "segment": segment,
+            # (N,) the points asked about; the others are helpers the clip was filled with, never scored.
+            "asked": asked,
             # (T, 2, 2) the quarters of each frame seen, with `view`.
             "view": view,
             # (T, N, 3) its object's centre of mass, as `traj`; (N,) where it is known.
@@ -190,63 +199,59 @@ def _query_frames(clip: CachedClip) -> torch.Tensor:
     return torch.zeros(clip.traj.shape[1], dtype=torch.long) if clip.query_t is None else clip.query_t.long()
 
 
-def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float, whole: torch.Tensor) -> CachedClip:
-    """`num_points` of the clip's points, up to `cap` of them started where new
-    surface comes into view, as a tracker on real video would add them: frame
-    by frame, in the frames seen whole (`whole` (T,)), a point of the clip
-    that comes into view there (hidden in the last frame seen whole before:
-    surface turning towards the camera, out from behind something, into the
-    frame) farther than `gap` (a share of the frame's width) from every point
-    already tracked and seen there starts in that frame, the farthest first,
-    its track's place there its query. The rest are drawn as given, at random,
-    from the points whose own query frame is seen whole. The clip's own tracks
-    stand in for the new points, so their truth is known."""
+def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float, whole: torch.Tensor,
+             order: torch.Tensor) -> tuple[CachedClip, torch.Tensor]:
+    """The clip with `num_points - cap` of its points asked, the first in
+    `order` whose own query frame is seen whole (`whole` (T,)), and the rest
+    up to `num_points` added by the spawning rule (`fill_frames`), as a
+    tracker on real video adds them: in each frame seen whole, a point of the
+    clip seen there, farther than `gap` (a share of the frame's width) from
+    every point already there and seen, starts in that frame, the farthest
+    first, its track's place there its query. The clip's own tracks stand in
+    for the new points, so their truth is known. Also (N,) which points are
+    asked: the others are helpers, trained on but never scored."""
     T, N = clip.visibility.shape
     q = _query_frames(clip)
-    can = whole[q]                                                                      # (N,) handed over as given
-    if int(can.sum()) <= num_points - cap:
-        return _points(clip, torch.nonzero(can)[:, 0])
+    order = order[whole[q][order]]
+    asked = order[: num_points - cap]
     vis = clip.visibility.bool()
     P = torch.cat([clip.traj.float(), torch.ones(T, N, 1)], -1)
     pix = torch.einsum("tij,tnj->tni", clip.intrinsics.float(),
                        torch.einsum("tij,tnj->tni", clip.extrinsics.float()[:, :3, :], P))
     uv = pix[..., :2] / pix[..., 2:].clamp_min(1e-6)                                   # (T, N, 2) pixels
-    perm = torch.randperm(N)
-    perm = perm[can[perm]]
-    tracked = torch.zeros(N, dtype=torch.bool)
-    tracked[perm[: num_points - cap]] = True
-    start = q.clone()
-    born = []
-    far = gap * clip.hw[1]
-    last = 0                                                                            # the last frame seen whole
-    for t in range(1, T):
-        if len(born) >= cap:
-            break
-        if not whole[t]:
-            continue
-        live = tracked & vis[t] & (start <= t)
-        cand = torch.nonzero(~tracked & vis[t] & ~vis[last])[:, 0]
-        last = t
-        if not len(cand):
-            continue
-        d = (torch.cdist(uv[t, cand], uv[t, live]).min(1).values if live.any()
-             else torch.full((len(cand),), float("inf")))
-        for j in farthest_first(uv[t, cand], d, far, cap - len(born)):
-            k = int(cand[j])
-            tracked[k], start[k] = True, t
-            born.append(k)
-    # The budget the new points left, filled with more points as given.
-    fill = perm[~tracked[perm]][: num_points - int(tracked.sum())]
-    tracked[fill] = True
-    keep = torch.nonzero(tracked)[:, 0]
-    if not born:
-        return _points(clip, keep)
-    b = torch.tensor(born)
-    n = torch.arange(N)
-    anchor, query_uv = clip.anchor.clone(), clip.query_uv.clone()
-    anchor[b] = clip.traj[start[b], n[b]].to(anchor.dtype)
-    query_uv[b] = uv[start[b], n[b]].to(query_uv.dtype)
-    return _points(dataclasses.replace(clip, anchor=anchor, query_uv=query_uv, query_t=start), keep)
+    there = torch.zeros(T, N, dtype=torch.bool)                                         # (T, N) given by frame t
+    there[:, asked] = q[asked][None] <= torch.arange(T)[:, None]
+
+    def taken(born):
+        t = torch.zeros(N, dtype=torch.bool)
+        t[asked] = True
+        t[[k for _, k in born]] = True
+        return t
+
+    def candidates(t, born):
+        c = torch.nonzero(vis[t] & ~taken(born))[:, 0]
+        return uv[t, c], c
+
+    def covering(t, born):
+        on = there[t] & vis[t]
+        on[[k for t0, k in born if t0 <= t and vis[t, k]]] = True
+        return uv[t, on]
+
+    born = fill_frames(torch.nonzero(whole)[:, 0].tolist(), num_points - len(asked), gap * clip.hw[1],
+                       candidates, covering)
+    keep, _ = torch.sort(torch.cat([asked, torch.tensor([k for _, k in born], dtype=torch.long)]))
+    is_asked = torch.zeros(N, dtype=torch.bool)
+    is_asked[asked] = True
+    if born:
+        b = torch.tensor([k for _, k in born])
+        start = q.clone()
+        start[b] = torch.tensor([t for t, _ in born])
+        n = torch.arange(N)
+        anchor, query_uv = clip.anchor.clone(), clip.query_uv.clone()
+        anchor[b] = clip.traj[start[b], n[b]].to(anchor.dtype)
+        query_uv[b] = uv[start[b], n[b]].to(query_uv.dtype)
+        clip = dataclasses.replace(clip, anchor=anchor, query_uv=query_uv, query_t=start)
+    return _points(clip, keep), is_asked[keep]
 
 
 def _points(clip: CachedClip, keep: torch.Tensor) -> CachedClip:
