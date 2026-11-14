@@ -1,0 +1,40 @@
+#!/bin/bash
+# Where the forecast is lost (scripts/rigid_check.py --cutoff): our clips' held-out tenth
+# (kubric_obj48_centre, which says each object's centre of mass), forecast from 3 and from 12,
+# the forecast frames split by whether the object is still in free flight or has met something.
+#
+#   qsub -v CKPT=outputs/RUN/best.pt scripts/forecast_check.pbs
+#
+#PBS -N forecast_check
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=01:30:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/forecast_check.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+module load cuda/12.2.2
+source $ROOT/venvs/fyp/bin/activate
+CKPT=${CKPT:?}
+# The held-out clips as a directory of links: the split every run makes of this cache.
+VAL=$ROOT/forecast_check/val
+mkdir -p $VAL
+python - <<PY
+from pathlib import Path
+from genpoint3d.train.data.split_clips import SEED, VAL_FRAC, split_clips
+for c in split_clips(["$ROOT/cache/kubric_obj48_centre"], VAL_FRAC, SEED).val:
+    link = Path("$VAL") / c.name
+    if not link.exists():
+        link.symlink_to(c)
+PY
+for cutoff in 3 12; do
+  echo "########## $CKPT, forecast from $cutoff"
+  python scripts/rigid_check.py --ckpt $CKPT --cache $VAL --frames-cache $ROOT/cache/kubric_obj48_centre_frames384 \
+    --points 500 --fill 1000 --cutoff $cutoff --query-before $cutoff 2>&1 | grep -v "Warn\|warn" || true
+done
+echo "=== FORECAST CHECK DONE ==="

@@ -31,6 +31,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
+from genpoint3d.tools.traj_scale import GRAVITY, KUBRIC_FPS
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
@@ -38,6 +39,10 @@ from genpoint3d.train.tools.camera import project, unproject
 from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS
 from genpoint3d.train.tools.regress import Sweeps, object_places
+
+
+# Metres an object's true centre may part from a thrown body's path and still count as in free flight.
+FLIGHT_TOL = 0.05
 
 
 @torch.no_grad()
@@ -77,6 +82,7 @@ def main() -> int:
     # shape), by a pose fitted in that frame, or by a pose carried on from other frames.
     ways = ("no fit", "fitted pose", "carried pose")
     way_counts = {w: 0 for w in ways}
+    flight_counts = {}
     names += () if args.fill else ("true groups", "true seen", "all true")
     for batch in loader:
         b = to_device(batch, device)
@@ -146,6 +152,21 @@ def main() -> int:
         seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)
         for label, lo, hi in bins:
             counts[label] += int((~vis & moving & (seen_mates >= lo) & (seen_mates < hi)).sum())
+        # With a cutoff, where the clip says each point's object's centre of mass: is the object
+        # still in free flight? Its true centre carried on from the last two seen frames as a
+        # thrown body goes (speed plus gravity), against where it truly is: free until they part
+        # by FLIGHT_TOL, in contact (the floor, another object, or at rest on one) from then on.
+        flight = None
+        if args.cutoff >= 2 and "centre" in b and b["centre_known"].any():
+            C = args.cutoff
+            c = to_metres(b["centre"], b)                                                      # (B, T, N, 3)
+            g = GRAVITY / KUBRIC_FPS ** 2 * b["down"].float()[:, None, None]                   # (B, 1, 1, 3) per frame^2
+            k = (torch.arange(T, device=device) - (C - 1)).float()[None, :, None, None]
+            speed = c[:, C - 1:C] - c[:, C - 2:C - 1] + 0.5 * g                                # at C-1
+            thrown = c[:, C - 1:C] + speed * k + 0.5 * g * k * k
+            apart = ((thrown - c).norm(dim=-1) > FLIGHT_TOL) & (k[..., 0] > 0)
+            flight = ~(apart.cummax(1).values) & b["centre_known"][:, None]                    # (B, T, N)
+            known = b["centre_known"][:, None].expand_as(vis)
         apd = lambda m, sel: tapvid3d_metrics(m, gt, sel, b["intrinsics_256"], b["extrinsics"], scaling="none",
                                               per_clip=True)["average_pts_within_thresh"].cpu()
         for name, pts in fits.items():
@@ -163,6 +184,12 @@ def main() -> int:
                     apd(m, ~vis & moving & (seen_mates >= lo) & (seen_mates < hi)))
             for k, w in enumerate(ways):
                 rows.setdefault(("way", w, name), []).append(apd(m, ~vis & moving & ~ahead & (way == k)))
+            if flight is not None:
+                for label, sel in (("free flight", flight), ("in contact", known & ~flight)):
+                    for part, when in (("1-4", soon), ("5-12", later), ("13+", ahead & (steps >= 12))):
+                        rows.setdefault(("flight", label, part, name), []).append(apd(m, when & moving & sel))
+                        if name == "guess":
+                            flight_counts[label, part] = flight_counts.get((label, part), 0) + int((when & moving & sel).sum())
         for k, w in enumerate(ways):
             way_counts[w] += int((~vis & moving & ~ahead & (way == k)).sum())
         err = (to_metres(fits["object"], b) - gt).norm(dim=-1)                                   # (B, T, N) metres
@@ -204,6 +231,13 @@ def main() -> int:
     print(f"  {'placed by':<12} {'share':>6}" + "".join(f"{n:>14}" for n in names))
     for w in ways:
         print(f"  {w:<12} {way_counts[w] / total:>6.3f}" + "".join(f"{clip_mean(rows['way', w, n]):>14.4f}" for n in names))
+    if flight_counts:
+        total = max(sum(flight_counts.values()), 1)
+        print("\nForecast moving point-frames by whether their object is still in free flight, and frames into the forecast:")
+        print(f"  {'object':<12} {'frames':<6} {'share':>6}" + "".join(f"{n:>14}" for n in names))
+        for (label, part), count in flight_counts.items():
+            print(f"  {label:<12} {part:<6} {count / total:>6.3f}"
+                  + "".join(f"{clip_mean(rows['flight', label, part, n]):>14.4f}" for n in names))
     ks = sorted(key[1] for key in rows if key[0] == "hiding")
     if ks:
         print("\nThe object's pose, error (cm, median) around the frame a point hides in (0), seen before it:")
