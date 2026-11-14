@@ -1,6 +1,7 @@
 """Keep the training losses across steps, and log them every 100 steps."""
 
 import logging
+import math
 import time
 
 from genpoint3d.train.Interval import Interval
@@ -30,8 +31,16 @@ class RunningLoss:
         self.vis_sum += losses.visibility
 
     def step(self, step: int, lr: float, norm: float) -> None:
-        """The optimiser has stepped; every 100 steps, say how it went.
-        `norm` is the gradient's norm before the clip."""
+        """The optimiser has stepped; every 100 steps, say how it went, and at
+        steps 1 and 10 how long a step takes, so a hang or a slow step shows in
+        minutes. `norm` is the gradient's norm before the clip. A loss or
+        gradient that is not finite stops the run: the weights it reaches are
+        lost."""
+        if not math.isfinite(self.micro_loss) or not math.isfinite(norm):
+            raise RuntimeError(f"step {step}: the loss ({self.micro_loss}) or the gradient's norm ({norm}) "
+                               "is not finite; stopping before the weights are")
+        if step in (1, 10):
+            log.info(f"  step {step:>6}  {(time.time() - self.t0) / step:.1f} s a step so far")
         self.norm_sum += norm
         self.clipped += bool(self.clip) and norm > self.clip
         self.running += self.micro_loss
