@@ -275,10 +275,11 @@ class Sweeps:
         self.spans = _windows(T, window, overlap)
         B, N = anchor.shape[:2]
         self.whole = torch.zeros(B, T, N, 3, device=anchor.device)
-        # What the head last said about each frame; 0 before it has.
+        # What the head last said about each point in each frame, in a round the point was in; 0 before.
         self.vis = torch.zeros(B, T, N, device=anchor.device)
-        # The frames some round has looked at: the others hold only a guess carried on (`_reach`).
-        self.visited = torch.zeros(T, dtype=torch.bool, device=anchor.device)
+        # Each point's frames some round with it in looked at: the others hold only a guess carried
+        # on (`_reach`), or a placeholder's, for a point not yet in the window.
+        self.looked = torch.zeros(B, T, N, dtype=torch.bool, device=anchor.device)
         self.groups = None
         self.arrow = torch.zeros(B, T, N, 3, device=anchor.device) if model.centre else None
         self.seen = _handed_over(cond)
@@ -294,9 +295,10 @@ class Sweeps:
 
     def belief(self) -> torch.Tensor:
         """(B, T, N) how sure the model is that each point is seen in each
-        frame, what the rigid fit counts: its visibility head's last word, 0 in
-        a frame no round has looked at yet (a guess carried on is no sighting)."""
-        return torch.sigmoid(self.vis) * self.visited[None, :, None]
+        frame, what the rigid fit counts: its visibility head's last word, 0
+        where no round with the point in has looked yet (a guess carried on is
+        no sighting)."""
+        return torch.sigmoid(self.vis) * self.looked
 
     def __iter__(self):
         model, anchor = self.model, self.anchor
@@ -331,8 +333,8 @@ class Sweeps:
                         self.groups = torch.where(alive[..., None], emb.detach(), kept)
                         self.known = self.known | alive
                     if logits is not None:
-                        self.vis[:, start:end] = logits.detach()
-                    self.visited[start:end] = True
+                        self.vis[:, start:end] = torch.where(alive[:, None], logits.detach(), self.vis[:, start:end])
+                    self.looked[:, start:end] |= alive[:, None]
                     if arrow is not None:
                         self.arrow[:, start:end] = arrow.detach().float()
                     own = g.detach() + _corrected(step, at, self.rays)
