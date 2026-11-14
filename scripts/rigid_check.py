@@ -36,6 +36,7 @@ from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project, unproject
 from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS
 from genpoint3d.train.tools.regress import Sweeps, object_places
 
 
@@ -71,7 +72,11 @@ def main() -> int:
     rows = {}
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
-    names = ("guess", "object", "true depth", "true image", "true both", "errors dealt")
+    names = ("guess", "object", "true depth", "true image", "true both", "seen true", "errors dealt")
+    # How the fit places a point-frame: not at all (the point is in no object, or never joined its
+    # shape), by a pose fitted in that frame, or by a pose carried on from other frames.
+    ways = ("no fit", "fitted pose", "carried pose")
+    way_counts = {w: 0 for w in ways}
     names += () if args.fill else ("true groups", "true seen", "all true")
     for batch in loader:
         b = to_device(batch, device)
@@ -116,8 +121,15 @@ def main() -> int:
             for t in range(T):
                 on = torch.nonzero(vis[bi, t])[:, 0]
                 dealt[bi, t, on] = true_pos[bi, t, on] + err[bi, t, on[torch.randperm(len(on), device=on.device)]]
+        # The truth only where a point is truly seen: hidden point-frames keep the model's guess,
+        # so nothing unplaced is handed its truth (as "true both" does).
+        seen_all = torch.zeros(pos.shape[:3], dtype=torch.bool, device=device)
+        seen_all[:, :, :N] = vis
+        seen_true = torch.where(seen_all[..., None], true_pos, pos)
+        raw, support = object_places(pos, eq, sweeps.groups, member, belief, robust, fresh, tips, fall)
+        way = torch.where((raw == pos).all(-1), 0, torch.where(support >= MIN_POSE_POINTS, 1, 2))[:, :, :N]
         for name, at in (("true depth", unproject(uv_p, z_t, proj)), ("true image", unproject(uv_t, z_p, proj)),
-                         ("true both", true_pos), ("errors dealt", dealt)):
+                         ("true both", true_pos), ("seen true", seen_true), ("errors dealt", dealt)):
             fits[name] = place(at)
         if not args.fill:
             # The true pieces as group vectors (one axis each, far apart), then the true visibility, then all true.
@@ -149,6 +161,10 @@ def main() -> int:
             for label, lo, hi in bins:
                 rows.setdefault(("mates", label, name), []).append(
                     apd(m, ~vis & moving & (seen_mates >= lo) & (seen_mates < hi)))
+            for k, w in enumerate(ways):
+                rows.setdefault(("way", w, name), []).append(apd(m, ~vis & moving & ~ahead & (way == k)))
+        for k, w in enumerate(ways):
+            way_counts[w] += int((~vis & moving & ~ahead & (way == k)).sum())
         err = (to_metres(fits["object"], b) - gt).norm(dim=-1)                                   # (B, T, N) metres
         # A fifth of the truly seen points kept out of the fits, then placed like hidden ones.
         held = (torch.rand(vis.shape, device=device) < 0.2) & vis
@@ -183,6 +199,11 @@ def main() -> int:
     for label, _, _ in bins:
         print(f"  {label:<10} {counts[label] / total:>6.3f}"
               + "".join(f"{clip_mean(rows['mates', label, n]):>14.4f}" for n in names))
+    total = max(sum(way_counts.values()), 1)
+    print("\nHidden moving point-frames by how the fit places them:")
+    print(f"  {'placed by':<12} {'share':>6}" + "".join(f"{n:>14}" for n in names))
+    for w in ways:
+        print(f"  {w:<12} {way_counts[w] / total:>6.3f}" + "".join(f"{clip_mean(rows['way', w, n]):>14.4f}" for n in names))
     ks = sorted(key[1] for key in rows if key[0] == "hiding")
     if ks:
         print("\nThe object's pose, error (cm, median) around the frame a point hides in (0), seen before it:")
