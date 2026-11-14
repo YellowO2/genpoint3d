@@ -52,8 +52,8 @@ class RunningLoss:
         self.centre_sum += self.micro_centre
         self.micro_loss = self.micro_centre = 0.0
         if step % 100 == 0:
-            log.info(f"  step {step:>6}  loss {self.running / 100:.5f}"
-                     + (f" (centre {self.centre_sum / 100:.5f})" if self.centre_learn else "")
+            centre = f" (centre {self.centre_sum / 100:.5f})" if self.centre_learn else ""
+            log.info(f"  step {step:>6}  loss {self.running / 100:.5f}{centre}"
                      f"  lr {lr:.2e}"
                      f"  grad {self.norm_sum / 100:.2f} (clipped {self.clipped}%)"
                      f"  {(time.time() - self.t0) / step:.3f}s/it")
