@@ -35,6 +35,6 @@ PY
 for cutoff in 3 12; do
   echo "########## $CKPT, forecast from $cutoff"
   python scripts/rigid_check.py --ckpt $CKPT --cache $VAL --frames-cache $ROOT/cache/kubric_obj48_centre_frames384 \
-    --points 500 --fill 1000 --cutoff $cutoff --query-before $cutoff 2>&1 | grep -v "Warn\|warn" || true
+    --points 500 --fill ${FILL:-1000} --cutoff $cutoff --query-before $cutoff 2>&1 | grep -v "Warn\|warn" || true
 done
 echo "=== FORECAST CHECK DONE ==="
