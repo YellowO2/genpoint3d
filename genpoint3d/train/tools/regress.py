@@ -384,10 +384,13 @@ class Sweeps:
         position (None without the head)."""
         return None if self.arrow is None else self.model.lookup_pos(guess + self.arrow, self.anchor)
 
-    def proposal(self, guess: torch.Tensor, groups: torch.Tensor, start: int, end: int) -> torch.Tensor:
-        """`object_proposal` for frames `start` to `end` from the clip's guess
-        `guess` (B, T, N, 3) and the group vectors `groups`."""
+    def proposal(self, g: torch.Tensor, groups: torch.Tensor, start: int, end: int) -> torch.Tensor:
+        """`object_proposal` for frames `start` to `end` from the window's
+        current guess `g` (B, L, N, 3) in the clip's guess, and the group
+        vectors `groups`: the offsets are from `g` itself, so a window's later
+        rounds are handed the fit of the guess they correct."""
         m = self.model
+        guess = torch.cat([self.whole[:, :start], g, self.whole[:, end:]], 1)
         return object_proposal(m.lookup_pos(guess, self.anchor), self.cond["query_t"], groups, self.seen & self.known,
                                self.belief(), start, end, robust=m.fit_robust, fresh=m.fit_fresh,
                                tips=self.tips(guess), fall=self.fall())
@@ -410,7 +413,7 @@ class Sweeps:
                     rigid = None
                     if model.rigid_proposal and self.groups is not None:
                         with torch.no_grad():
-                            rigid = self.proposal(self.whole, self.groups, start, end)
+                            rigid = self.proposal(g.detach(), self.groups, start, end)
                     step, logits, emb, down, arrow = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
@@ -554,8 +557,7 @@ def regress_loss(
         if group_weight:
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, *groups(r.start, r.end), r.alive)
         if fit_weight and r.groups is not None:
-            fit = run.proposal(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), r.groups,
-                               r.start, r.end)
+            fit = run.proposal(g.detach(), r.groups, r.start, r.end)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if centre_weight:
