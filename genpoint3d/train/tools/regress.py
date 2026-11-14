@@ -221,8 +221,9 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
     their own frame too, where the shape is theirs): the pose that gives a
     point its place never holds the point itself (one that did would only
     confirm the place it gave, and the shape would drift with its own errors). So the
-    shape grows in passes: the object's first points (given at its first
-    frame) fit every frame; the points given in a frame that got a pose then
+    shape grows in passes: the object's first points (those given by the first
+    frame that has MIN_POSE_POINTS of them, as they are there) fit every frame;
+    the points given in a frame that got a pose then
     join through that pose; and so on, each pass placing every joined point
     again through the last pass's poses, until no point joins or moves. With
     `fresh` (degrees), a point counts 1 / (1 + turn / fresh)^2 as much, its
@@ -251,9 +252,13 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
         on, mine = weight > 0, which.clamp_min(0)
         b, n, t = torch.arange(B, device=dev)[:, None], torch.arange(N, device=dev)[None], torch.arange(T, device=dev)
         per_point = lambda x: x.gather(2, mine.reshape(B, 1, N, *([1] * (x.dim() - 3))).expand(B, T, N, *x.shape[3:]))
+        # Each object starts at the first frame by which MIN_POSE_POINTS of its points are given (an
+        # object entering the view a point at a time has no pose before); a point given before then
+        # counts as given there, where it is tracked: `q` from here on.
+        first = torch.where(on, q[:, None], T).kthvalue(min(MIN_POSE_POINTS, N), -1).values    # (B, K)
+        q = torch.where(which >= 0, torch.maximum(q, first.gather(1, mine)), q)
         qc = q.clamp(max=T - 1)                                                            # a point asked after T: never given
         at_query = lambda x: x[b, qc, n]                                                   # (B, T, N, ...) -> (B, N, ...)
-        first = torch.where(on, q[:, None], T).min(-1).values                             # (B, K) each object's first frame
         start = (which >= 0) & (q == first.gather(1, mine)) & (q < T)                      # its first points
         # The first points back their own frame too: the shape is where they are there, so that
         # pose is the shape's own place, not a confirmation (a forecast from 3 frames gets 3 poses).
