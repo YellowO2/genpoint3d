@@ -1,8 +1,4 @@
-"""Stop a run whose target paths are far from unit size.
-
-Checked once before training. It matters for the flow (diffusion) method,
-which mixes the paths with noise of size 1; for the no-noise method it is
-only a sanity check.
+"""Stop a run whose target paths are far from unit size for the diffusion method. Checked once before training.
 """
 
 import logging

@@ -149,7 +149,7 @@ def main() -> int:
             if "centre" in b:
                 # And the arrows true too: each point's tip at its object's true centre of mass.
                 known = b["centre_known"][:, None, :, None]
-                true_tips = torch.where(known, model.lookup_pos(b["centre"].float(), anchor), tips)
+                true_tips = torch.where(known, model.lookup_pos(b["centre"].float(), anchor), true_pos if tips is None else tips)
                 fits["true centre"] = to_guess(object_places(true_pos, eq, truth, member, shown, robust, fresh, true_tips, fall)[0])
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         gt = to_metres(b["traj"], b)
