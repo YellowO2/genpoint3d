@@ -144,7 +144,7 @@ def main() -> int:
             soon, later = ahead & (steps < 4), ahead & (steps >= 4) & (steps < 12)
             for kind, mask in (("hidden", ~vis & ~ahead), ("seen", vis & ~ahead), ("forecast", ahead),
                                ("fc 1-4", soon), ("fc 5-12", later), ("fc 13+", ahead & (steps >= 12))):
-                for which, sel in (("all", mask), ("moving", mask & moving)):
+                for which, sel in (("all", mask), ("moving", mask & moving), ("still", mask & ~moving)):
                     rows.setdefault((kind, which, name), []).append(apd(m, sel))
             for label, lo, hi in bins:
                 rows.setdefault(("mates", label, name), []).append(
@@ -175,7 +175,7 @@ def main() -> int:
     print("\nAPD (no rescale), the model's own guess and where the object's pose puts each point:")
     print(f"  {'point-frames':<16}" + "".join(f"{n:>14}" for n in names))
     for kind in ("hidden", "seen") + (("forecast", "fc 1-4", "fc 5-12", "fc 13+") if args.cutoff else ()):
-        for which in ("all", "moving"):
+        for which in ("all", "moving") + (("still",) if args.cutoff else ()):
             print(f"  {kind + ' ' + which:<16}" + "".join(f"{clip_mean(rows[kind, which, n]):>14.4f}" for n in names))
     total = max(sum(counts.values()), 1)
     print("\nHidden moving point-frames by how many points of their true piece are seen there:")
