@@ -27,7 +27,7 @@ from torch import nn
 
 from genpoint3d.tools.traj_scale import GRAVITY_REF
 from genpoint3d.train.tools.batch import whole_frames
-from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, robust_kabsch, turn_matrix, turn_vector
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, misfit, robust_kabsch, turn_matrix, turn_vector
 from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.visibility import visibility_error
 
@@ -149,7 +149,8 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
 
 
 def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: torch.Tensor,
-             fall: Optional[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+             fall: Optional[torch.Tensor], noise: torch.Tensor,
+             radius: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Each object's pose in every frame, (B, T, K, 3, 3) and (B, T, K, 3), and
     (B, T, K) whether it has one: as fitted where it is fitted (`good`), and
     carried on elsewhere, from the nearest fitted frame before (after, for
@@ -158,7 +159,12 @@ def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: t
     3, gravity per frame squared, where the fitted frames show the object
     falling free), and it keeps turning about its centre at its spin. Speed
     and spin come from that frame and the fitted one next to it; with no
-    other, the pose holds. A pose places shape point s at R s + shift."""
+    other, the pose holds. A move the two poses cannot tell from their own
+    noise (`noise` (B, T, K), how far the fit's points sit from where each
+    pose puts them; a turn counted at `radius` (B, K), the shape's size) is
+    no move: a still object would otherwise drift on at its noise's speed
+    (on the fall test, its still points' forecast 0.88 against holding's
+    0.95). A pose places shape point s at R s + shift."""
     B, T, K = good.shape
     dev = R.device
     t = torch.arange(T, device=dev)[None, :, None]
@@ -188,7 +194,10 @@ def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: t
         free = three & ((second * g).sum(-1) > 0.5 * (g * g).sum(-1))
         acc = torch.where(free[..., None], g, acc)
     speed = (Cr - Cp) / dt + acc * (tr - (tr + tp) / 2)[..., None]                   # at the frame carried from
-    speed, spin = speed * two[..., None], spin * two[..., None]
+    bar = at(noise, ref) + at(noise, partner)                                          # (B, T, K)
+    moves = two & ((Cr - Cp).norm(dim=-1) > bar)
+    turns = two & ((spin * dt).norm(dim=-1) * radius[:, None] > bar)
+    speed, spin = speed * moves[..., None], spin * turns[..., None]
     k = (t - ref).float()[..., None]
     Rt = turn_matrix(spin * k) @ Rr
     Ct = Cr + speed * k + 0.5 * acc * k * k
@@ -257,7 +266,8 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
             if fresh and turn is not None:
                 cos = (((turn * at_query(turn)[:, None]).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
                 w = w / (1 + torch.rad2deg(torch.acos(cos)) / fresh).pow(2)
-            Rk, msk, mdk, _ = robust_kabsch(weight[:, None] * w[:, :, None], shape[:, None, None], pos[:, :, None], robust)
+            wk = weight[:, None] * w[:, :, None]                                            # (B, T, K, N)
+            Rk, msk, mdk, _ = robust_kabsch(wk, shape[:, None, None], pos[:, :, None], robust)
             Rk = Rk.detach()
             # (B, T, K) the object's joined points seen in each frame, each by its belief, not by its likeness.
             count = (on[:, None] & (backs & joined[:, None])[:, :, None]).float().mul(seen[:, :, None]).sum(-1)
@@ -275,7 +285,8 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
                 break
         shift = mdk - (Rk @ msk[..., None])[..., 0]                                        # (B, T, K, 3)
         body = weight * joined[:, None]                                                     # (B, K, N)
-        centre = torch.einsum("bkn,bnc->bkc", body, shape) / body.sum(-1, keepdim=True).clamp_min(1e-6)
+        middle = torch.einsum("bkn,bnc->bkc", body, shape) / body.sum(-1, keepdim=True).clamp_min(1e-6)
+        centre = middle
         if tips is not None:
             # Each tip in the shape, through its frame's pose, where the frame is fitted and the point seen.
             inside = (R.transpose(-1, -2) @ (tips.float() - per_point(shift))[..., None])[..., 0]   # (B, T, N, 3)
@@ -283,7 +294,12 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
             total = w.sum((1, 3))[..., None]
             said = torch.einsum("btkn,btnc->bkc", w, inside) / total.clamp_min(1e-6)
             centre = torch.where(total > 0, said, centre)
-        Rc, shiftc, has = _carried(Rk, shift, ok, centre, fall)
+        # How far the fit's points sit from where each pose puts them, and the shape's size.
+        off = misfit(Rk, msk, mdk, shape[:, None, None], pos[:, :, None]).detach()          # (B, T, K, N)
+        noise = ((wk * off * off).sum(-1) / wk.sum(-1).clamp_min(1e-6)).sqrt()
+        spread = (shape[:, None] - middle[:, :, None]).pow(2).sum(-1)                      # (B, K, N)
+        radius = ((body * spread).sum(-1) / body.sum(-1).clamp_min(1e-6)).sqrt()
+        Rc, shiftc, has = _carried(Rk, shift, ok, centre, fall, noise, radius)
         placed = joined[:, None] & per_point(has)
         out = torch.where(placed[..., None], (per_point(Rc) @ shape[:, None, :, :, None])[..., 0] + per_point(shiftc), pos)
         return out, per_point(count) * placed
