@@ -197,6 +197,16 @@ def main() -> int:
                         rows.setdefault(("flight", label, part, name), []).append(apd(m, when & moving & sel))
                         if name == "guess":
                             flight_counts[label, part] = flight_counts.get((label, part), 0) + int((when & moving & sel).sum())
+        if flight is not None:
+            # What a thrown body's own rules could reach from the truth, in the forecast frames: the
+            # object as it truly was at the last seen frame, moved with its true centre without
+            # turning; along the thrown path without turning; along the thrown path, turned as it truly turns.
+            last = gt[:, C - 1:C]
+            for name, m in (("true centre, no turn", last + c - c[:, C - 1:C]), ("thrown, no turn", last + thrown - c[:, C - 1:C]),
+                            ("thrown, true turn", gt + thrown - c)):
+                for label, sel in (("free flight", flight), ("in contact", known & ~flight)):
+                    for part, when in (("1-4", soon), ("5-12", later)):
+                        rows.setdefault(("flight ref", label, part, name), []).append(apd(m, when & moving & sel))
         for k, w in enumerate(ways):
             way_counts[w] += int((~vis & moving & ~ahead & (way == k)).sum())
         err = (to_metres(fits["object"], b) - gt).norm(dim=-1)                                   # (B, T, N) metres
@@ -246,6 +256,13 @@ def main() -> int:
         for (label, part), count in flight_counts.items():
             print(f"  {label:<12} {part:<6} {count / total:>6.3f}"
                   + "".join(f"{clip_mean(rows['flight', label, part, n]):>14.4f}" for n in names))
+    if any(k[0] == "flight ref" for k in rows):
+        refs = ("true centre, no turn", "thrown, no turn", "thrown, true turn")
+        print("\nThe same forecast point-frames from the truth at the last seen frame:")
+        print(f"  {'object':<12} {'frames':<6}" + "".join(f"{n:>22}" for n in refs))
+        for label in ("free flight", "in contact"):
+            for part in ("1-4", "5-12"):
+                print(f"  {label:<12} {part:<6}" + "".join(f"{clip_mean(rows['flight ref', label, part, n]):>22.4f}" for n in refs))
     ks = sorted(key[1] for key in rows if key[0] == "hiding")
     if ks:
         print("\nThe object's pose, error (cm, median) around the frame a point hides in (0), seen before it:")
