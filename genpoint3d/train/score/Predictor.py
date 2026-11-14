@@ -37,12 +37,11 @@ class Predictor:
         self.served += traj.shape[0]
         truly = fine["down_known"]
         fine["down_known"] = truly & ~hide
-        loss, out = self._track(b, fine, vm)
         if j.fill:
-            # Again with points added where none covers the frame, as helpers.
+            # With points added where none covers the frame, as helpers.
             b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap, j.spawn_share,
-                             lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, {**fine, "query_t": bb["query_t"]}, vm)[1]))
-            _, out = self._track(b, {**fine, "query_t": b["query_t"]}, vm)
+                             lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, fine, vm)[1]))
+        loss, out = self._track(b, fine, vm)
         b, out = _asked_only(b, out)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],
@@ -50,7 +49,9 @@ class Predictor:
 
     def _track(self, b: dict, fine: dict, vm: torch.Tensor):
         j = self.judging
-        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
+        # The batch's own query frames: it may hold points added since `fine` was made.
+        cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
+                    **{**fine, "query_t": b["query_t"]})
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             # The loss, as every score, on the asked points only.

@@ -19,11 +19,12 @@ def spawn_points(model, b: dict, fine: dict, view: torch.Tensor, points: int, ga
                  tracks_of) -> dict:
     """`b` with points added toward `points`, `share` of them kept for new
     surface (a run trained with --spawn M of --points P keeps M / P), in two
-    rounds, each tracked before the next (`tracks_of(clip)` gives a clip's
-    tracks and visibility logits): the first frame filled to the rest, then new
-    surface after it."""
+    rounds: the first frame filled to the rest, then, with those tracked
+    (`tracks_of(clip)` gives a clip's tracks and visibility logits), new surface
+    after it. The first round needs no tracking: in the first frame every point
+    there sits at its query, seen."""
     reserve = round(points * share)
-    b = _spawned(model, b, fine, *tracks_of(b), view, gap, points, reserve, True)
+    b = _spawned(model, b, fine, torch.zeros_like(b["traj"]), None, view, gap, points, reserve, True)
     return _spawned(model, b, fine, *tracks_of(b), view, gap, points, reserve, False)
 
 
