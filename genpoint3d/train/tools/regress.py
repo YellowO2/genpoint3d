@@ -131,6 +131,7 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
         while free.any():
             seed = int(torch.nonzero(free)[0])
             take = free & (a[b, seed] > 0.5)
+            take[seed] = True                                           # always: the loop must end
             free &= ~take
             # Under 3 points cannot hold a pose: those keep their own guesses and take no room.
             if take.sum() >= 3:

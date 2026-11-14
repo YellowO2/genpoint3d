@@ -81,8 +81,9 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
     m.train()
     losses = learn(m, batch(), s, Hardware(torch.device("cpu"), False))
     dead = [n for n, p in m.named_parameters() if p.grad is None or p.grad.abs().sum() == 0]
+    bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
     print(f"{sched}: loss {losses.method:.4f} vis {losses.visibility:.4f}, "
-          f"params without gradient: {dead}")
+          f"params without gradient: {dead}, with a non-finite one: {len(bad)} {bad[:3]} (want 0)")
     j = ScoreSettings(device=torch.device("cpu"), window=8, overlap=4, schedule=sched, cutoff=6)
     b = batch()
     pred = Predictor(m, j)(b)

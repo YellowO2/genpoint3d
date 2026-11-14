@@ -34,7 +34,9 @@ def robust_kabsch(w0: torch.Tensor, src: torch.Tensor, dst: torch.Tensor, refits
     R, ms, md, s = fit(w0, src, dst)
     w = w0
     for _ in range(refits):
-        left = misfit(R, ms, md, src, dst)
+        # The refit's weights are constants, as reweighted least squares takes them: a point the
+        # fit puts exactly in place sits at distance 0, where a distance's gradient is NaN.
+        left = misfit(R, ms, md, src, dst).detach()
         typical = (w * left).sum(-1, keepdim=True) / s.clamp_min(1e-6)[..., None] + 1e-6
         w = w0 / (1 + (left / typical).pow(2))
         R, ms, md, s = fit(w, src, dst)
