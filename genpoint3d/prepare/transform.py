@@ -118,4 +118,6 @@ def transform(
         num_context_frames=num_context_frames,
         norm=norm,
         segment=None if sample.segment is None else torch.from_numpy(sample.segment).long(),
+        centre=None if sample.centre_3d is None else _to_frame0(torch.from_numpy(sample.centre_3d).float(),
+                                                                extrinsics_world),
     )

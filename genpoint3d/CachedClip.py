@@ -30,6 +30,7 @@ class CachedClip:
     query_t: Optional[torch.Tensor] = None   # (N,) each point's query frame; None is frame 0
     up: Optional[torch.Tensor] = None        # (3,) which way is up, in the frame-0 camera
     segment: Optional[torch.Tensor] = None   # (N,) each point's object, 0 the background; None if unknown
+    centre: Optional[torch.Tensor] = None    # (T, N, 3) its object's centre of mass, NaN off objects; None if unknown
 
     # --- cameras ---
     intrinsics: Optional[torch.Tensor] = None   # (T, 3, 3) pixel units
@@ -55,6 +56,7 @@ class CachedClip:
             "query_t": self.query_t,
             "up": self.up,
             "segment": self.segment,
+            "centre_metric": self.centre,
             "hw": self.hw,
             "intrinsics": self.intrinsics,
             "extrinsics": self.extrinsics,
@@ -85,6 +87,7 @@ class CachedClip:
             query_t=d.get("query_t"),
             up=d.get("up"),
             segment=d.get("segment"),
+            centre=d.get("centre_metric"),
             hw=d["hw"],
             intrinsics=d.get("intrinsics"),
             extrinsics=d.get("extrinsics"),

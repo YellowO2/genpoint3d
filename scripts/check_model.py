@@ -41,6 +41,7 @@ def batch():
         "intrinsics": K, "intrinsics_256": K, "extrinsics": E, "hw": torch.tensor([[R, R]]),
         "norm_mean": torch.zeros(B, 3), "norm_scale": torch.ones(B), "norm_traj_scale": torch.full((B,), 0.1),
         "norm_offset": anchor[:, None].clone(),
+        "centre": torch.randn(B, T, N, 3) * 0.1, "centre_known": torch.tensor([[True, True, True, False, True, False]]),
     }
 
 
@@ -68,7 +69,7 @@ def model(**kw):
 
 
 full = dict(visibility=True, group_feedback=4, rigid_proposal=True, feedback_scale=10.0,
-            fit_robust=3, fit_fresh=30.0, patch=4)
+            fit_robust=3, fit_fresh=30.0, patch=4, centre=True)
 for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
     m = model(**kw)
     with torch.no_grad():             # off the zero inits, so every reader is live
@@ -77,7 +78,7 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
     s = types.SimpleNamespace(min_context=2, max_gap=4, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
                               group_loss=1.0 if kw else 0.0, group_labels="object", vis_loss=1.0 if kw else 0.0,
                               accum=1, window=8, overlap=4, schedule=sched, down_hidden=1.0, down_loss=1.0,
-                              fit_loss=1.0 if kw else 0.0)
+                              fit_loss=1.0 if kw else 0.0, centre_loss=1.0 if kw else 0.0)
     m.train()
     losses = learn(m, batch(), s, Hardware(torch.device("cpu"), False))
     dead = [n for n, p in m.named_parameters() if p.grad is None or p.grad.abs().sum() == 0]

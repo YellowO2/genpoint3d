@@ -108,6 +108,9 @@ class Settings(argparse.Namespace):
         p.add_argument("--fit-loss", type=float, default=1.0,
                        help="the rigid fit's own positions from each round's group vectors against the truth, "
                             "training the groups through the fit (0: off)")
+        p.add_argument("--centre-loss", type=float, default=1.0,
+                       help="each point's arrow to its object's centre of mass, its tip against the truth where the "
+                            "clip says (0: no arrow)")
         p.add_argument("--down-loss", type=float, default=1.0,
                        help="which way is down, said for clips not told it: its angle off the truth")
         p.add_argument("--group-labels", default="motion", choices=["object", "motion"],
@@ -133,7 +136,7 @@ class Settings(argparse.Namespace):
             p.error("--rigid-proposal is built from the group vectors: needs --group-feedback E")
         if bool(settings.group_feedback) != (settings.group_loss > 0):
             p.error("--group-feedback E and --group-loss W go together")
-        if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss) < 0:
+        if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss, settings.centre_loss) < 0:
             p.error("loss weights are 0 or more")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")

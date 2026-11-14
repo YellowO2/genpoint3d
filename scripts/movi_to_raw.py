@@ -65,7 +65,7 @@ for ex in tfds.as_numpy(ds):
     # The 256 px clips are every other pixel of the 512 px render: each pixel's
     # values were rendered a quarter pixel in from its corner, not at its centre.
     tr = point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, args.tracks, rng,
-                      centre=0.25)
+                      centre=0.25, centres=list(inst["positions"]))
 
     # Each point projects back onto its own query pixel at its query frame.
     n = np.arange(len(tr["queries"]))
@@ -79,6 +79,7 @@ for ex in tfds.as_numpy(ds):
         "coords": tr["coords"], "occluded": tr["occluded"], "traj_3d": tr["traj_3d"],
         "intrinsics": np.repeat(intrinsics[None], T, 0), "matrix_world": matrix_world,
         "depth_range": np.array([lo, hi], np.float32), "queries": tr["queries"], "segment": tr["segment"],
+        "centre_3d": tr["centre_3d"],
     })
     moving = (np.linalg.norm(tr["traj_3d"] - tr["traj_3d"][:, :1], axis=-1).max(1) > 0.01).mean()
     print(f"{name}: {len(n)} points, query reprojection error median {np.median(err):.3f} px max {err.max():.3f}, "

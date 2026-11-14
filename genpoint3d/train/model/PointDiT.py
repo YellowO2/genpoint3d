@@ -7,7 +7,8 @@
     blocks        attention along each point's frames, between the points of a
                   frame, and to the DINOv3 patches nearest its guess, x depth
     heads         a correction to each frame's position, and optionally
-                  visibility and a group vector per point
+                  visibility, a group vector per point and an arrow to its
+                  object's centre of mass
 """
 
 import torch
@@ -44,6 +45,7 @@ class PointDiT(nn.Module):
         fit_robust: int = 0,
         fit_fresh: float = 0.0,
         patch: int = 0,
+        centre: bool = False,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -123,6 +125,11 @@ class PointDiT(nn.Module):
         self.fit_robust, self.fit_fresh = fit_robust, fit_fresh
         if rigid_proposal:
             self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
+        # Each frame, an arrow from the point's guess to its object's centre of mass,
+        # in the guess's units: what the point knows of the whole object from its part.
+        self.centre = centre
+        if centre:
+            self.centre_out = zero_init(nn.Linear(dim, 3, bias=False))
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -155,7 +162,7 @@ class PointDiT(nn.Module):
         frames: tuple[int, int] | None = None,
         x_before: torch.Tensor | None = None,
         rigid: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
         """
         x            (B, T, N, 3)    the guess, displacement / traj_scale
         k            (B,)            the round clock in [0, 1]
@@ -184,8 +191,9 @@ class PointDiT(nn.Module):
                                      (`regress.object_proposal`)
 
         returns a correction to each frame's position (B, T, N, 3), the visibility logits (B, T, N),
-        the group vectors (B, N, E) (those two None without their heads), and which way is
-        down (B, 3), a unit vector.
+        the group vectors (B, N, E), which way is down (B, 3), a unit vector, and each frame's
+        arrow from the guess to the point's object's centre of mass (B, T, N, 3) (None without
+        its head, as are the logits and the group vectors).
         """
         B, T, N, _ = x.shape
         dev, dt = x.device, x.dtype
@@ -334,7 +342,8 @@ class PointDiT(nn.Module):
         here = (alive if alive is not None else torch.ones(B, N, dtype=torch.bool, device=dev)).float()
         pooled = (h.float().mean(1) * here[..., None]).sum(1) / here.sum(1, keepdim=True).clamp_min(1)
         down_said = F.normalize(self.down_out(pooled).float(), dim=-1)
-        return self.place(h), logits, groups, down_said
+        arrow = self.centre_out(h) if self.centre else None
+        return self.place(h), logits, groups, down_said, arrow
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):

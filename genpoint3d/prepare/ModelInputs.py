@@ -32,6 +32,7 @@ class ModelInputs:
     num_context_frames: int   # T_C -- frames with visual conditioning
     norm: NormStats
     segment: torch.Tensor | None = None   # (N,) each point's object, 0 the background; None if unknown
+    centre: torch.Tensor | None = None    # (T, N, 3) metres, its object's centre of mass, NaN off objects; None if unknown
 
     @property
     def traj_metric(self) -> torch.Tensor:

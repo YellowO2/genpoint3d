@@ -9,7 +9,9 @@ Inputs, T frames of H x W: depth (T, H, W) distance from the camera; seg
 3) each pixel's place in its object's box, in [-0.5, 0.5]; normals (T, H, W,
 3) in [-1, 1]; boxes (K, T, 8, 3) each visible object's box corners in the
 world; quats (K, T, 4) its rotation, wxyz; intrinsics (3, 3) normalised, with
-Kubric's signs; matrix_world (T, 4, 4) camera to world, Blender's axes.
+Kubric's signs; matrix_world (T, 4, 4) camera to world, Blender's axes;
+optionally centres (K, T, 3) each visible object's centre of mass in the
+world (Kubric's object position: the physics body's).
 """
 
 import itertools
@@ -41,11 +43,13 @@ def num_to_sample(counts, total, max_frac=0.1):
 
 
 def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, n_tracks, rng,
-                 centre=0.5):
+                 centre=0.5, centres=None):
   """dict of coords (N, T, 2) pixels, occluded (N, T), traj_3d (N, T, 3)
-  world, queries (N, 3) t, y, x, segment (N,) each point's object. `centre`
-  is where in its pixel a pixel's values were rendered: 0.5 for a render at
-  its own size, 0.25 for MOVi-F's 256 px, every other pixel of its 512 px."""
+  world, queries (N, 3) t, y, x, segment (N,) each point's object, and with
+  `centres`, centre_3d (N, T, 3) its object's centre of mass in the world
+  (NaN on the background). `centre` is where in its pixel a pixel's values
+  were rendered: 0.5 for a render at its own size, 0.25 for MOVi-F's 256 px,
+  every other pixel of its 512 px."""
   T, H, W = depth.shape
   cam_pos = matrix_world[:, :3, 3]
 
@@ -101,7 +105,7 @@ def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matr
   per_seg[~moves] = num_to_sample(counts[~moves], n_tracks - per_seg.sum())
   trust = trusted_normals()
 
-  all_uv, all_occ, all_xyz, all_query, all_seg = [], [], [], [], []
+  all_uv, all_occ, all_xyz, all_query, all_seg, all_centre = [], [], [], [], [], []
   for i in range(len(boxes) + 1):
     candidates = grid[grid_seg == i]
     if per_seg[i] == 0 or len(candidates) == 0:
@@ -144,7 +148,13 @@ def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matr
     all_xyz.append(world)
     all_query.append(q)
     all_seg.append(np.full(len(q), i, np.int32))
+    if centres is not None:
+      at = np.full((T, 3), np.nan) if i == 0 else np.asarray(centres[i - 1], np.float64)
+      all_centre.append(np.repeat(at[None], len(q), 0))
 
-  return {"coords": np.concatenate(all_uv).astype(np.float32), "occluded": np.concatenate(all_occ),
-          "traj_3d": np.concatenate(all_xyz).astype(np.float32),
-          "queries": np.concatenate(all_query).astype(np.int32), "segment": np.concatenate(all_seg)}
+  out = {"coords": np.concatenate(all_uv).astype(np.float32), "occluded": np.concatenate(all_occ),
+         "traj_3d": np.concatenate(all_xyz).astype(np.float32),
+         "queries": np.concatenate(all_query).astype(np.int32), "segment": np.concatenate(all_seg)}
+  if centres is not None:
+    out["centre_3d"] = np.concatenate(all_centre).astype(np.float32)
+  return out

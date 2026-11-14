@@ -22,6 +22,8 @@ class RunningLoss:
         self.since_val, self.since_val_n = 0.0, 0
         self.micro_loss = 0.0
         self.vis_sum = 0.0
+        self.centre_learn = settings.centre_loss > 0
+        self.centre_sum = self.micro_centre = 0.0
         self.clip = settings.clip
         self.norm_sum, self.clipped = 0.0, 0
 
@@ -29,6 +31,7 @@ class RunningLoss:
         """One micro-batch's losses."""
         self.micro_loss += losses.method
         self.vis_sum += losses.visibility
+        self.micro_centre += losses.centre
 
     def step(self, step: int, lr: float, norm: float) -> None:
         """The optimiser has stepped; every 100 steps, say how it went, and at
@@ -46,13 +49,15 @@ class RunningLoss:
         self.running += self.micro_loss
         self.since_val += self.micro_loss
         self.since_val_n += 1
-        self.micro_loss = 0.0
+        self.centre_sum += self.micro_centre
+        self.micro_loss = self.micro_centre = 0.0
         if step % 100 == 0:
             log.info(f"  step {step:>6}  loss {self.running / 100:.5f}"
+                     + (f" (centre {self.centre_sum / 100:.5f})" if self.centre_learn else "")
                      f"  lr {lr:.2e}"
                      f"  grad {self.norm_sum / 100:.2f} (clipped {self.clipped}%)"
                      f"  {(time.time() - self.t0) / step:.3f}s/it")
-            self.running = 0.0
+            self.running = self.centre_sum = 0.0
             self.norm_sum, self.clipped = 0.0, 0
 
     def interval(self, step: int) -> Interval:

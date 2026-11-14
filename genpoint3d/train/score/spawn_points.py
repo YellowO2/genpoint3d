@@ -95,6 +95,9 @@ def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Ten
     out["id_card"] = add("id_card", card[None], 1)
     if "segment" in b:
         out["segment"] = add("segment", torch.full((1, M), -1, device=pos.device), 1)
+    if "centre" in b:
+        out["centre"] = add("centre", torch.zeros(1, T, M, 3, device=pos.device), 2)
+        out["centre_known"] = add("centre_known", torch.zeros(1, M, dtype=torch.bool, device=pos.device), 1)
     if "norm_offset" in b:
         out["norm_offset"] = add("norm_offset", anchor[:, None], 2)
     return out

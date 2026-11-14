@@ -18,6 +18,8 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - A long run once the design settles is also the fix for turned points: TAPIP3D's matcher, the same frame-0 template, drifts 0.6% of the distance moved trained long, 7-8% at our budget (TAPIP3D trains on about 28x our samples, with augmentation).
 - Whole-frame comparison, removed in a cleanup: needed eventually?
 - More data: PointOdyssey or SynthVerse.
+- A video prior (V-JEPA 2) beside DINOv3 for the object heads (centre of mass, mass), if DINOv3 features cannot predict them well; DINOv3 stays for where points are.
+- Mass as a learned object property: Kubric's mass is the unscaled mesh volume (same at any scale), so our generator must set density by material times the scaled volume and re-render first.
 - The full scene-points design (docs/tasks/scene-points-2026-10-31.md).
 - Spatial attention in every block or once at the end; virtual points; model size (dim 256, depth 6, 4 heads is what trained, never chosen).
 

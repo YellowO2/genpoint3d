@@ -15,4 +15,5 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     rigid_proposal=bool(a("rigid_proposal", 0)),
                     fit_robust=a("fit_robust", 0),
                     fit_fresh=a("fit_fresh", 0.0),
-                    patch=a("patch", 0))
+                    patch=a("patch", 0),
+                    centre=a("centre_loss", 0.0) > 0)

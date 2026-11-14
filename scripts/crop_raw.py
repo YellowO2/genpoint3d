@@ -36,7 +36,7 @@ for clip in sorted(d for d in src.iterdir() if (d / f"{d.name}.npy").exists()):
         continue
     out = dst / clip.name
     (out / "frames").mkdir(parents=True, exist_ok=True)
-    cut = {k: (v[:, :F] if k in ("coords", "occluded", "traj_3d") else
+    cut = {k: (v[:, :F] if k in ("coords", "occluded", "traj_3d", "centre_3d") else
                v[:F] if k in ("intrinsics", "matrix_world") else v) for k, v in d.items()}
     np.save(out / f"{clip.name}.npy", cut)
     for t in range(F):

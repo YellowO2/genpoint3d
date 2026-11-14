@@ -87,6 +87,11 @@ class ClipDataset(Dataset):
         # Each point's object; -1 where the cache does not say.
         segment = (clip.segment.long() if clip.segment is not None
                    else torch.full((traj.shape[1],), -1, dtype=torch.long))
+        # Its object's centre of mass, a target like `traj`, on the points whose cache says (`centre_known`).
+        centre_known = (torch.isfinite(clip.centre).all(-1).all(0) if clip.centre is not None
+                        else torch.zeros(traj.shape[1], dtype=torch.bool))
+        centre = ((n.apply(clip.centre.float().nan_to_num()) - offset) / self.traj_scale * centre_known[:, None]
+                  if clip.centre is not None else torch.zeros_like(traj))
         # Each point's query frame; a cache from before it had them all at 0.
         query_t = (torch.zeros(traj.shape[1], dtype=torch.long) if clip.query_t is None
                    else clip.query_t.long())
@@ -97,7 +102,7 @@ class ClipDataset(Dataset):
         if self.query_before:
             keep = query_t < self.query_before
             traj, anchor, vis, query_t, offset = traj[:, keep], anchor[keep], vis[:, keep], query_t[keep], offset[:, keep]
-            segment = segment[keep]
+            segment, centre, centre_known = segment[keep], centre[:, keep], centre_known[keep]
             if id_card is not None:
                 id_card = id_card[keep]
         n_pts = traj.shape[1]
@@ -106,7 +111,7 @@ class ClipDataset(Dataset):
                    else torch.arange(self.num_points))
             traj, anchor, vis, query_t = traj[:, idx], anchor[idx], vis[:, idx], query_t[idx]
             offset = offset[:, idx]
-            segment = segment[idx]
+            segment, centre, centre_known = segment[idx], centre[:, idx], centre_known[idx]
             if id_card is not None:
                 id_card = id_card[idx]
 
@@ -115,6 +120,8 @@ class ClipDataset(Dataset):
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
         return {
             "traj": traj, "anchor": anchor, "visibility": vis, "query_t": query_t, "segment": segment,
+            # (T, N, 3) its object's centre of mass, as `traj`; (N,) where it is known.
+            "centre": centre, "centre_known": centre_known,
             # () gravity in the clip's unit per frame squared over a typical clip's;
             # (3,) which way is down in the frame-0 camera, where `down_known`.
             "gravity": gravity, "down": down, "down_known": torch.tensor(known),
@@ -227,6 +234,8 @@ def _points(clip: CachedClip, keep: torch.Tensor) -> CachedClip:
     for k in ("query_t", "id_card", "segment"):
         if getattr(clip, k) is not None:
             per_point[k] = getattr(clip, k)[keep]
+    if clip.centre is not None:
+        per_point["centre"] = clip.centre[:, keep]
     return dataclasses.replace(clip, **per_point)
 
 

@@ -241,13 +241,15 @@ class _Round:
     groups: Optional[torch.Tensor]  # (B, N, E) group vectors, with their graph
     alive: torch.Tensor             # (B, N)
     down: torch.Tensor              # (B, 3) which way is down, with its graph
+    arrow: Optional[torch.Tensor]   # (B, L, N, 3) to each point's object's centre of mass, with the head
 
 
 class Sweeps:
     """Every round of every window of every sweep, in order, as `_Round`s.
-    `whole`, `vis`, `groups` and `down` then hold the clip's guess, each
-    frame's last visibility logits, each point's last group vector and which
-    way is down."""
+    `whole`, `vis`, `groups`, `down` and `arrow` then hold the clip's guess,
+    each frame's last visibility logits, each point's last group vector,
+    which way is down and each frame's last arrow to the point's object's
+    centre of mass (None without the head)."""
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, schedule: str,
                  window: int, overlap: int, cond: dict) -> None:
@@ -260,6 +262,7 @@ class Sweeps:
         # What the head last said about each frame; 0 before it has.
         self.vis = torch.zeros(B, T, N, device=anchor.device)
         self.groups = None
+        self.arrow = torch.zeros(B, T, N, 3, device=anchor.device) if model.centre else None
         self.seen = _handed_over(cond)
         self.rays = _rays(cond, anchor)
         # Points that have said a group vector: the others have none yet.
@@ -292,7 +295,7 @@ class Sweeps:
                             rigid = object_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], self.groups,
                                                     self.seen & self.known, torch.sigmoid(self.vis), start, end,
                                                     robust=model.fit_robust, fresh=model.fit_fresh)
-                    step, logits, emb, down = model(
+                    step, logits, emb, down, arrow = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
                         rigid=rigid, **{**self.cond, "down": self.down, "down_known": self.down_known})
@@ -305,9 +308,11 @@ class Sweeps:
                         self.known = self.known | alive
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
+                    if arrow is not None:
+                        self.arrow[:, start:end] = arrow.detach().float()
                     own = g.detach() + _corrected(step, at, self.rays)
                     g = torch.where(alive[:, None, :, None], own, g.detach())
-                    yield _Round(i, start, end, g, logits, emb, alive, down)
+                    yield _Round(i, start, end, g, logits, emb, alive, down, arrow)
                 self.whole = torch.cat([self.whole[:, :start], g.detach(), self.whole[:, end:]], dim=1)
                 self.first = torch.where(alive, self.first.clamp(max=start), self.first)
                 if not back:
@@ -387,6 +392,9 @@ def regress_loss(
     down_scored: Optional[torch.Tensor] = None,
     down_weight: float = 0.0,
     fit_weight: float = 0.0,
+    centre_true: Optional[torch.Tensor] = None,
+    centre_known: Optional[torch.Tensor] = None,
+    centre_weight: float = 0.0,
     window: int = 0,
     overlap: int = 0,
     schedule: str = "",
@@ -401,17 +409,20 @@ def regress_loss(
     which way is down (the angle, radians) against `down_true` (B, 3) on the
     clips `down_scored` (B,), those not told it, the places the objects' poses
     give from the group vectors the round said (`object_proposal`, the guess
-    fixed) against the truth, so the groups learn what the fit needs, and the
-    visibility head's against
-    `visible`. With `backward`, each round's loss times it is back-propagated
-    at once (one round in memory) and the loss comes back detached. The dict
+    fixed) against the truth, so the groups learn what the fit needs, the tip
+    of each point's arrow (from the guess, fixed) against its object's centre
+    of mass `centre_true` (B, T, N, 3) on the points `centre_known` (B, N),
+    and the visibility head's against `visible`. With `backward`, each round's
+    loss times it is back-propagated at once (one round in memory) and the
+    loss comes back detached. The dict
     also holds the tracks and visibility logits, as `refine` gives them, each
-    point's last group vector and which way is down."""
+    point's last group vector, which way is down, each frame's last arrow,
+    and the arrows' loss alone (in the total)."""
     run = Sweeps(model, anchor, x1.shape[1], schedule, window, overlap, cond)
     w = [gamma ** (run.R - 1 - i) for i in range(run.R)]
     w = [v / sum(w) for v in w]
     share = 1 / len(run.spans)
-    total = vis_total = x1.new_zeros(())
+    total = vis_total = centre_total = x1.new_zeros(())
     for r in run:
         g, x1_w = r.g, x1[:, r.start:r.end]
         keep = r.alive[:, None].expand(-1, g.shape[1], -1)
@@ -431,6 +442,12 @@ def regress_loss(
                                   torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust, fresh=model.fit_fresh)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
+        if centre_weight:
+            known = centre_known[:, None] & keep
+            centre = w[r.i] * centre_weight * _error(g.detach() + r.arrow.float(), centre_true[:, r.start:r.end], known,
+                                                     None)
+            centre_total = centre_total + share * centre.detach()
+            loss = loss + centre
         if down_weight and down_scored.any():
             off = _angle(r.down, down_true.float())
             loss = loss + w[r.i] * down_weight * (off * down_scored).sum() / down_scored.sum()
@@ -447,7 +464,8 @@ def regress_loss(
     if backward is None:
         total = total + vis_weight * vis_total
     return total, {"loss": total.detach(), "visibility": vis_total.detach(), "tracks": run.whole,
-                   "logits": run.vis if model.visibility else None, "groups": run.groups, "down": run.down}
+                   "logits": run.vis if model.visibility else None, "groups": run.groups, "down": run.down,
+                   "arrows": run.arrow, "centre": centre_total}
 
 
 @torch.no_grad()

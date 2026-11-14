@@ -41,6 +41,8 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     # What the model says of them is scored; its motion state everywhere.
     extra.update(down_true=fine["down"], down_scored=truly & ~fine["down_known"], down_weight=settings.down_loss,
                  fit_weight=settings.fit_loss)
+    if settings.centre_loss:
+        extra.update(centre_true=b["centre"], centre_known=b["centre_known"], centre_weight=settings.centre_loss)
     if settings.vis_loss:
         # Where each point truly is in the image, against the quarters seen.
         uv, _ = project(model.lookup_pos(traj.float(), anchor.float()), fine["fine_proj"].float())
@@ -56,4 +58,5 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
                                    patch_xyz=b["patch_xyz"], **fine)
         # What the backward passes left on the map, the rest of the way into the CNN.
         model.fine.replay(b["frames"], fine["fine_map"])
-    return Losses(method=loss.item() / settings.accum, visibility=parts["visibility"].item() / settings.accum)
+    return Losses(method=loss.item() / settings.accum, visibility=parts["visibility"].item() / settings.accum,
+                  centre=parts["centre"].item() / settings.accum)

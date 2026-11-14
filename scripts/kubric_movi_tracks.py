@@ -415,6 +415,7 @@ normals = data_stack["normal"].astype(np.float32) / 65535. * 2. - 1.
 
 boxes = []
 quats = []
+centres = []  # each object's centre of mass: its position, the physics body's
 for a in visible_foreground_assets:
   per_frame = []
   for f in frames:
@@ -422,10 +423,12 @@ for a in visible_foreground_assets:
       per_frame.append(a.bbox_3d)
   boxes.append(np.stack(per_frame))
   quats.append(a.get_values_over_time("quaternion"))
+  centres.append(a.get_values_over_time("position"))
 
 
 # The tracks themselves: scripts/kubric_tracks.py, shared with the MOVi-F converter.
-tracks = point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, FLAGS.tracks, rng)
+tracks = point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, FLAGS.tracks, rng,
+                      centres=centres)
 coords, occluded, traj_3d, queries, segment = (tracks[k] for k in ("coords", "occluded", "traj_3d", "queries",
                                                                    "segment"))
 
@@ -457,6 +460,7 @@ np.save(output_dir / f"{name}.npy", {
     "depth_range": depth_range,
     "queries": queries,               # (N, 3) t, y, x of each point's query
     "segment": segment,               # (N,) [genpoint3d] its object: 0 the background, k the k-th visible one
+    "centre_3d": tracks["centre_3d"],  # (N, T, 3) [genpoint3d] its object's centre of mass, world; NaN on the background
 })
 
 kb.done()
