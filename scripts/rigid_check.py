@@ -201,9 +201,29 @@ def main() -> int:
             # What a thrown body's own rules could reach from the truth, in the forecast frames: the
             # object as it truly was at the last seen frame, moved with its true centre without
             # turning; along the thrown path without turning; along the thrown path, turned as it truly turns.
-            last = gt[:, C - 1:C]
+            # And turned on as it turned over the last two seen frames (what the carry-forward does),
+            # or with that turn changing as it changed over the last three.
+            last, arm, same = gt[:, C - 1:C], gt - c, rigid_groups(b).float()
+
+            def turn(a, to):
+                """(B, N, 3, 3) each point's object's turn from arms `a` to arms `to` (B, N, 3)."""
+                U, _, Vh = torch.linalg.svd(torch.einsum("bij,bjx,bjy->bixy", same, to, a))
+                flip = torch.ones_like(a)
+                flip[..., 2] = torch.linalg.det(U @ Vh)
+                return U @ torch.diag_embed(flip) @ Vh
+
+            def carried(change):
+                D, at, out = turn(arm[:, C - 2], arm[:, C - 1]), arm[:, C - 1], [arm[:, :C]]
+                E = D @ turn(arm[:, C - 3], arm[:, C - 2]).mT if change else None
+                for _ in range(C, T):
+                    D = E @ D if change else D
+                    at = (D @ at[..., None])[..., 0]
+                    out.append(at[:, None])
+                return thrown + torch.cat(out, 1)
+
             for name, m in (("true centre, no turn", last + c - c[:, C - 1:C]), ("thrown, no turn", last + thrown - c[:, C - 1:C]),
-                            ("thrown, true turn", gt + thrown - c)):
+                            ("thrown, true turn", gt + thrown - c), ("thrown, turn carried", carried(False)),
+                            *((("thrown, turn's change", carried(True)),) if C >= 3 else ())):
                 for label, sel in (("free flight", flight), ("in contact", known & ~flight)):
                     for part, when in (("1-4", soon), ("5-12", later)):
                         rows.setdefault(("flight ref", label, part, name), []).append(apd(m, when & moving & sel))
@@ -257,7 +277,8 @@ def main() -> int:
             print(f"  {label:<12} {part:<6} {count / total:>6.3f}"
                   + "".join(f"{clip_mean(rows['flight', label, part, n]):>14.4f}" for n in names))
     if any(k[0] == "flight ref" for k in rows):
-        refs = ("true centre, no turn", "thrown, no turn", "thrown, true turn")
+        refs = [n for n in ("true centre, no turn", "thrown, no turn", "thrown, true turn", "thrown, turn carried", "thrown, turn's change")
+                if ("flight ref", "free flight", "1-4", n) in rows]
         print("\nThe same forecast point-frames from the truth at the last seen frame:")
         print(f"  {'object':<12} {'frames':<6}" + "".join(f"{n:>22}" for n in refs))
         for label in ("free flight", "in contact"):
