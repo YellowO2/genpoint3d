@@ -36,9 +36,9 @@ class Predictor:
         truly = fine["down_known"]
         fine["down_known"] = truly & ~hide
         loss, out = self._track(b, fine, vm)
-        if j.spawn:
+        if j.fill:
             # Again with points added where none covers the frame; only the clip's own are scored.
-            more = spawn_points(model, b, fine, vm, j.spawn, j.spawn_gap,
+            more = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, {**fine, "query_t": bb["query_t"]}, vm)[1]))
             _, out = self._track(more, {**fine, "query_t": more["query_t"]}, vm)
             N = traj.shape[2]

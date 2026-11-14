@@ -29,7 +29,7 @@ def main() -> int:
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--clip", type=int, default=0)
     p.add_argument("--points", type=int, default=1000)
-    p.add_argument("--spawn", type=int, default=1000, help="points the clip is filled up to")
+    p.add_argument("--fill", type=int, default=1000, help="points the clip is filled up to")
     p.add_argument("--mates", type=int, default=40, help="mates written per hidden point and frame, the heaviest")
     p.add_argument("--out", required=True)
     args = p.parse_args()
@@ -52,12 +52,12 @@ def main() -> int:
         return sweeps
 
     sweeps = track(b)
-    every = spawn_points(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.spawn else b
+    every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.fill else b
     sweeps = track(every)
     anchor, eq = every["anchor"].float(), every["query_t"]
     guess = sweeps.whole.float()
     pos = model.lookup_pos(guess, anchor)
-    belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
+    belief, member = sweeps.belief(), sweeps.seen & sweeps.known
     fit = (object_places(pos, eq, sweeps.groups, member, belief, model.fit_robust, model.fit_fresh)[0]
            - anchor[:, None]) / model.traj_scale
     metres = lambda x: to_metres(x, every)[0]

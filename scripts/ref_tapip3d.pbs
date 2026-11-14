@@ -27,7 +27,7 @@ module load cuda/12.2.2
 # The same val clips our own runs are scored on, picked by our own split code.
 source $ROOT/venvs/fyp/bin/activate
 python $OURS/scripts/split_dir.py --cache $ROOT/cache/kubric --split val --n "$N" \
-  --val-frac 0.1 --seed 0 --out $ROOT/ref_eval/val$N
+  --out $ROOT/ref_eval/val$N
 deactivate
 
 source $ROOT/venvs/tapip3d/bin/activate

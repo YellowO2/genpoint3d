@@ -5,18 +5,19 @@ cache but gives no way to ask "how does it do on clips it was TRAINED on". That
 question is the bias/variance check: a model that cannot score well on data it
 has already seen is underfitting, and no amount of extra data will help it.
 
-The split is reproduced exactly as `genpoint3d/train/data/split_clips.py` does it -- same generator,
-same seed, same val_frac -- so the clips here are the ones that run really did
-train or validate on.
+The split is the run's own (`split_clips`, with the val_frac and seed
+in its run.json under `--run`, the defaults every run uses otherwise), so the
+clips here are the ones that run really did train or validate on.
 
   python scripts/split_dir.py --cache ~/scratch/cache/kubric \
-      --split train --n 50 --out /tmp/fit_train
+      --split train --n 50 --run outputs/RUN --out /tmp/fit_train
 """
 
 import argparse
+import json
 from pathlib import Path
 
-import torch
+from genpoint3d.train.data.split_clips import SEED, VAL_FRAC, split_clips
 
 
 def main() -> int:
@@ -24,19 +25,16 @@ def main() -> int:
     p.add_argument("--cache", required=True)
     p.add_argument("--split", choices=("train", "val"), required=True)
     p.add_argument("--n", type=int, default=50, help="0 means every clip")
-    p.add_argument("--val-frac", type=float, default=0.1)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--run", default=None, help="the run's directory, whose run.json gives its split")
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
-    clips = sorted(Path(args.cache).glob("*.pt"))
-    if not clips:
-        raise SystemExit(f"no cached clips in {args.cache}")
-
-    g = torch.Generator().manual_seed(args.seed)
-    perm = torch.randperm(len(clips), generator=g).tolist()
-    n_val = max(1, int(len(clips) * args.val_frac))
-    chosen = [clips[i] for i in (perm[n_val:] if args.split == "train" else perm[:n_val])]
+    val_frac, seed = VAL_FRAC, SEED
+    if args.run:
+        a = json.loads((Path(args.run) / "run.json").read_text())["args"]
+        val_frac, seed = a["val_frac"], a["seed"]
+    split = split_clips([args.cache], val_frac, seed)
+    chosen = split.train if args.split == "train" else split.val
     if args.n:
         chosen = chosen[: args.n]
 
@@ -48,7 +46,7 @@ def main() -> int:
         (out / c.name).symlink_to(c.resolve())
 
     print(f"{len(chosen)} {args.split} clips -> {out}"
-          f" (of {len(clips)} cached, val_frac {args.val_frac}, seed {args.seed})")
+          f" (of {len(split.train) + len(split.val)} cached, val_frac {val_frac}, seed {seed})")
     return 0
 
 

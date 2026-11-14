@@ -17,7 +17,7 @@ from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.track_scores import track_scores
 from genpoint3d.train.score.visibility_scores import visibility_scores
-from genpoint3d.train.tools.batch import black_out, fine_inputs, to_device
+from genpoint3d.train.tools.batch import black_out, fine_inputs, random_view, to_device
 from genpoint3d.train.tools.regress import refine
 
 torch.manual_seed(0)
@@ -42,6 +42,7 @@ def batch():
         "norm_mean": torch.zeros(B, 3), "norm_scale": torch.ones(B), "norm_traj_scale": torch.full((B,), 0.1),
         "norm_offset": anchor[:, None].clone(),
         "centre": torch.randn(B, T, N, 3) * 0.1, "centre_known": torch.tensor([[True, True, True, False, True, False]]),
+        "view": random_view(T, 2, 4)[None],
     }
 
 
@@ -75,7 +76,7 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
     with torch.no_grad():             # off the zero inits, so every reader is live
         for p in m.parameters():
             p.add_(torch.randn_like(p) * 0.05)
-    s = types.SimpleNamespace(min_context=2, max_gap=4, hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
+    s = types.SimpleNamespace(hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
                               group_loss=1.0 if kw else 0.0, group_labels="object", vis_loss=1.0 if kw else 0.0,
                               accum=1, window=8, overlap=4, schedule=sched, down_hidden=1.0, down_loss=1.0,
                               fit_loss=1.0 if kw else 0.0, centre_loss=1.0 if kw else 0.0)
@@ -95,7 +96,7 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
           f"forecast change when frames >= 6 change: {leak:.2e} (want 0)")
     scores = {**track_scores(pred, j), **visibility_scores(pred)}
     print(f"  {len(scores)} scores: {' '.join(sorted(scores))}")
-    js = ScoreSettings(device=torch.device("cpu"), window=8, overlap=4, schedule=sched, cutoff=6, spawn=N + 8, spawn_gap=0.02)
+    js = ScoreSettings(device=torch.device("cpu"), window=8, overlap=4, schedule=sched, cutoff=6, fill=N + 8, spawn_gap=0.02)
     spawn = Predictor(m, js)(b)
     print(f"  with points added: tracks {tuple(spawn.tracks.shape)} (want {tuple(pred.tracks.shape)}), "
           f"{len({**track_scores(spawn, js), **visibility_scores(spawn)})} scores")

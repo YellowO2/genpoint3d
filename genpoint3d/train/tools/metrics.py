@@ -19,6 +19,10 @@ PIXEL_TO_FIXED_METRIC_THRESH = {1: 0.01, 2: 0.04, 4: 0.16, 8: 0.64, 16: 2.56}
 HIDDEN_KEYS = ("apd_hidden", "apd_hidden_lastseen", "apd_moving_hidden", "apd_moving_hidden_lastseen")
 
 
+# A point that gets more than this many of the metric's pixels from its query
+# position while seen counts as moving (`motion_px`): the moving-point scores.
+MOVING_PX = 4.0
+
 def at_query(pts: torch.Tensor, query_t: torch.Tensor) -> torch.Tensor:
     """(B, T, N, 3) -> (B, 1, N, 3): each point at its query frame `query_t` (B, N)."""
     return pts.gather(1, query_t[:, None, :, None].expand(-1, 1, -1, pts.shape[-1]))
@@ -70,6 +74,14 @@ def _scale_factor(pred: torch.Tensor, gt: torch.Tensor, valid: torch.Tensor,
     return (num / den.clamp(min=1e-12))[:, None, None, None]
 
 
+def metres_per_px(cam: torch.Tensor, intrinsics: torch.Tensor) -> torch.Tensor:
+    """(B, T, N) metres one of the metric's pixels spans at each point, `cam`
+    (B, T, N, 3) in the camera that sees it: its depth over the focal length
+    (the geometric mean of fx and fy, `intrinsics` (B, T, 3, 3))."""
+    focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
+    return (cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
+
+
 @torch.no_grad()
 def motion_px(gt: torch.Tensor, visible: torch.Tensor, intrinsics: torch.Tensor,
               extrinsics: Optional[torch.Tensor] = None,
@@ -77,8 +89,7 @@ def motion_px(gt: torch.Tensor, visible: torch.Tensor, intrinsics: torch.Tensor,
     """(B, N) how far each point ever gets from its query position (frame 0
     without `query_t`) while visible, in the metric's pixels."""
     gt_cam = _to_camera_t(gt, extrinsics) if extrinsics is not None else gt
-    focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
-    mult = (gt_cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
+    mult = metres_per_px(gt_cam, intrinsics)
     start = gt[:, :1] if query_t is None else at_query(gt, query_t)
     disp = (gt - start).norm(dim=-1) / mult                       # (B, T, N)
     return disp.masked_fill(~visible, 0).amax(dim=1)
@@ -114,9 +125,7 @@ def tapvid3d_metrics(
 
     # Depth for the threshold: the z of each point in the camera that sees it.
     gt_cam = _to_camera_t(gt, extrinsics) if extrinsics is not None else gt
-    depth = gt_cam[..., 2].abs()                                  # (B, T, N)
-    focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()  # (B, T)
-    multiplier = depth / focal[..., None].clamp(min=1e-12)
+    multiplier = metres_per_px(gt_cam, intrinsics)                # (B, T, N)
 
     if space == "2d":
         pred_cam = _to_camera_t(pred, extrinsics) if extrinsics is not None else pred
@@ -174,9 +183,7 @@ def error_and_motion(pred: torch.Tensor, gt: torch.Tensor, visible: torch.Tensor
     """For every visible (point, frame) but its query frame, flat: the error
     and how far the point has moved from its query position, in the metric's
     pixels."""
-    gt_cam = _to_camera_t(gt, extrinsics)
-    focal = (intrinsics[..., 0, 0] * intrinsics[..., 1, 1]).sqrt()
-    mult = (gt_cam[..., 2].abs() / focal[..., None].clamp(min=1e-12)).clamp(min=1e-12)
+    mult = metres_per_px(_to_camera_t(gt, extrinsics), intrinsics)
     err = (pred - gt).norm(dim=-1) / mult
     disp = (gt - at_query(gt, query_t)).norm(dim=-1) / mult
     keep = visible.bool() & (torch.arange(gt.shape[1], device=gt.device)[None, :, None] != query_t[:, None])

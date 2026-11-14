@@ -3,6 +3,7 @@
 import torch
 
 from genpoint3d.train.score.Prediction import Prediction
+from genpoint3d.train.tools.batch import whole_frames
 from genpoint3d.train.tools.visibility import visible_target
 
 
@@ -21,7 +22,7 @@ def visibility_scores(prediction: Prediction) -> dict:
     if logits is None:
         return {}
     vis = prediction.batch["visibility"]
-    observed = prediction.visual_mask.flatten(2).all(-1)[:, :, None]      # whole frames: scoring's masks
+    observed = whole_frames(prediction.visual_mask)[:, :, None]      # whole frames: scoring's masks
     target = visible_target(vis, observed)
     right = ((logits > 0) == target).float()
     return {"vis_acc": right.flatten(1).mean(1),

@@ -12,6 +12,7 @@ from genpoint3d.train.data.ClipDataset import ClipDataset
 from genpoint3d.train.model.PointDiT import PointDiT
 from genpoint3d.train.model.build_model import build_model
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.tools.farthest_first import SPAWN_GAP
 
 
 @dataclass
@@ -39,9 +40,15 @@ class Run:
         if not clips:
             raise SystemExit("no cached clips to score")
         return ClipDataset(clips, points or self.settings.points, resample=False, frames=Path(frames),
-                           query_before=query_before, spawn=spawn)
+                           query_before=query_before, spawn=spawn, spawn_gap=self.spawn_gap)
+
+    @property
+    def spawn_gap(self) -> float:
+        """The gap the run's points were spawned with (a run from before spawning: the default)."""
+        return vars(self.settings).get("spawn_gap", SPAWN_GAP)
 
     def judging(self, device: torch.device, cutoff: int = 0, **kw) -> ScoreSettings:
-        """Scoring with the run's own refinement, from `cutoff` (0: every frame has its image)."""
+        """Scoring with the run's own refinement and spawning gap, from `cutoff` (0: every frame has its image)."""
         s = self.settings
-        return ScoreSettings(device=device, amp=device.type == "cuda", window=s.window, overlap=s.overlap, schedule=s.schedule, cutoff=cutoff, **kw)
+        return ScoreSettings(device=device, amp=device.type == "cuda", window=s.window, overlap=s.overlap, schedule=s.schedule,
+                             cutoff=cutoff, spawn_gap=self.spawn_gap, **kw)

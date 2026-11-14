@@ -72,11 +72,10 @@ SPLITS=${SPLITS:-train val}
 # three axis jobs are meant to run at the same time.
 WORK=$ROOT/fit_check/${PBS_JOBNAME:-job}
 
-# val_frac and seed must match the run's run.json, or these are not the clips
-# it actually trained on.
+# The run's own split, from its run.json: the clips it actually trained on.
 for SPLIT in $SPLITS; do
   python scripts/split_dir.py --cache "$CACHE" --split $SPLIT --n "$N" \
-    --val-frac 0.1 --seed 0 --out "$WORK/$SPLIT"
+    --run "$(dirname "$CKPT")" --out "$WORK/$SPLIT"
 done
 
 for SPLIT in $SPLITS; do

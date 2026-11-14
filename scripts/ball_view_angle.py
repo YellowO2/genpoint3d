@@ -33,14 +33,14 @@ p.add_argument("--ckpt", required=True)
 p.add_argument("--cache", required=True)
 p.add_argument("--frames-cache", required=True)
 p.add_argument("--raw", required=True, help="the rendered clips, with the ball's centre")
-p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to where surface has none (0: none added)")
+p.add_argument("--fill", type=int, default=0, help="points each clip is filled up to where surface has none (0: none added)")
 args = p.parse_args()
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 run = Run.load(args.ckpt, dev)
 ds = run.dataset(args.cache, args.frames_cache, points=1000)
 clips = ds.clips
-predictor = Predictor(run.model, run.judging(dev, spawn=args.spawn))
+predictor = Predictor(run.model, run.judging(dev, fill=args.fill))
 names = ("facing", "oblique", "edge", "returned", "hidden")
 errs = {n: [] for n in names}
 with torch.no_grad():

@@ -6,6 +6,11 @@ from genpoint3d.tools.traj_scale import RADIUS
 from genpoint3d.train.tools.camera import image_projection, unproject
 from genpoint3d.train.tools.metrics import _to_camera_t
 
+# The near points a loss pairs each point with (the group loss, the rigid loss).
+NEIGHBOURS = 20
+# Metres a pair's distance may stray from its first frame's and still count as on one rigid piece.
+RIGID_TOL = 0.02
+
 
 def to_device(batch: dict, device) -> dict:
     """Move a batch, the fp16-cached features widened to fp32: autocast does
@@ -16,31 +21,36 @@ def to_device(batch: dict, device) -> dict:
     return b
 
 
-def random_visual_mask(b: dict, min_context: int, max_gap: int) -> torch.Tensor:
-    """(B, T, 2, 2) which quarters of each training frame are seen. Each clip
-    loses, over a span of frames, a random quarter, half, three quarters or
-    the whole frame, sizes mixed alike. The span is, for half the clips, every
-    frame from a cutoff uniform in [min_context, T] (T: none), for the other
-    half 2 to `max_gap` frames from min_context on, seen again after (0:
-    cutoffs only). Drawn on the CPU, so a seed gives the same masks anywhere."""
-    B, T = b["traj"].shape[:2]
+def random_view(T: int, min_context: int, max_gap: int) -> torch.Tensor:
+    """(T, 2, 2) which quarters of one training clip's frames are seen. The
+    clip loses, over a span of frames, a random quarter, half, three quarters
+    or the whole frame, sizes mixed alike. The span is, for half the clips,
+    every frame from a cutoff uniform in [min_context, T] (T: none), for the
+    other half 2 to `max_gap` frames from min_context on, seen again after (0:
+    cutoffs only). Drawn with the clip (`ClipDataset`), before its points, so
+    none is started in a frame it never sees."""
     if not 1 <= min_context < T - 1:
         raise ValueError(f"--min-context {min_context} must be in [1, {T - 2}]: "
                          "frame 0 always keeps its image")
-    t = torch.arange(T)[None]
-    cut = torch.randint(min_context, T + 1, (B, 1))
-    length = torch.randint(2, min(max(max_gap, 2), T - min_context - 1) + 1, (B, 1))
+    t = torch.arange(T)
+    cut = int(torch.randint(min_context, T + 1, ()))
+    length = int(torch.randint(2, min(max(max_gap, 2), T - min_context - 1) + 1, ()))
     # Ends before the last frame, so the clip is seen again after it.
-    start = min_context + (torch.rand(B, 1) * (T - length - min_context)).long()
-    gap = (torch.rand(B, 1) < 0.5) & (max_gap > 0)
-    lost = torch.where(gap, (t >= start) & (t < start + length), t >= cut)             # (B, T)
+    start = min_context + int(torch.rand(()) * (T - length - min_context))
+    gap = bool(torch.rand(()) < 0.5) and max_gap > 0
+    lost = (t >= start) & (t < start + length) if gap else t >= cut                 # (T,)
     # The quarters lost: one, a half, all but one, or all, turned a random
     # multiple of 90 degrees so that any quarter or half can be the one.
     shapes = torch.tensor([[[1, 0], [0, 0]], [[1, 1], [0, 0]], [[1, 1], [1, 0]], [[1, 1], [1, 1]]], dtype=torch.bool)
-    sizes = torch.randint(4, (B,))
-    grid = torch.stack([torch.rot90(shapes[k], int(r)) for k, r in zip(sizes, torch.randint(4, (B,)))])
-    view = ~(lost[:, :, None, None] & grid[:, None])
-    return view.to(b["traj"].device)
+    grid = torch.rot90(shapes[int(torch.randint(4, ()))], int(torch.randint(4, ())))
+    return ~(lost[:, None, None] & grid)
+
+
+def whole_frames(view: torch.Tensor) -> torch.Tensor:
+    """(..., T) which frames of `view` (..., T, 2, 2) are seen whole: the only
+    ones a point can be handed over in (its id card, the frame's DINOv3, would
+    see a hidden part of any other)."""
+    return view.flatten(-2).all(-1)
 
 
 def visual_mask(b: dict, cutoff: torch.Tensor | None) -> torch.Tensor:
@@ -75,7 +85,9 @@ def seen_at(view: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
 def apd_weight(b: dict, traj: torch.Tensor) -> torch.Tensor:
     """(B, T, N) weights that measure the error in APD threshold units, as
     TAPIP3D's `scale_loss_by_depth`: focal / depth, from each point's query
-    frame (held to at least 10 cm), times the clip's scale, mean 1 over the batch."""
+    frame (held to at least 10 cm), times the clip's scale, mean 1 over the batch.
+    Not `metrics.metres_per_px` frame by frame: one weight a track, as TAPIP3D
+    trains, so a point's loss does not swing as it nears the camera."""
     q = b["query_t"]
     gt_cam = _to_camera_t(to_metres(traj, b), b["extrinsics"])         # (B, T, N, 3)
     depth = gt_cam[..., 2].gather(1, q[:, None]).clamp_min(0.1)        # (B, 1, N) at each query
@@ -103,28 +115,40 @@ def to_metres(pts: torch.Tensor, b: dict) -> torch.Tensor:
     return scene * scale + b["norm_mean"][:, None, None, :]
 
 
-def group_pairs(b: dict, by_object: bool = True, tol: float = 0.02, frames: tuple[int, int] | None = None,
-                k: int = 20, far: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
+def nearest(p: torch.Tensor, k: int, among: torch.Tensor | None = None) -> torch.Tensor:
+    """(B, N, k) each point's `k` nearest points by `p` (B, N, 3), nearest
+    first, never itself, only from `among` (B, N) when given (the rest count
+    as infinitely far; with too few, the far ones fill the list)."""
+    N = p.shape[1]
+    d = torch.cdist(p, p).masked_fill(torch.eye(N, dtype=torch.bool, device=p.device), float("inf"))
+    if among is not None:
+        d = d.masked_fill(~among[:, None], float("inf"))
+    return d.topk(min(k, N - 1), dim=-1, largest=False).indices
+
+
+def group_pairs(b: dict, by_object: bool = True, frames: tuple[int, int] | None = None,
+                k: int = NEIGHBOURS, far: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
     """The pairs the group vectors are trained on, as `rigid_groups` labels
     them but only for each point's `k` nearest points in the first of
-    `frames` (the truth's: where pieces meet, the pairs that are hard) and
-    `far` points drawn at random (mostly other pieces): (B, N, k + far) their
-    indices and (B, N, k + far) bool which are on its piece."""
+    `frames` (the truth's: where pieces meet, the pairs that are hard) among
+    the points queried before they end (the window has the others only once
+    a sweep has given them a past), and `far` points drawn at random (mostly
+    other pieces): (B, N, k + far) their indices and (B, N, k + far) bool
+    which are on its piece."""
     p = to_metres(b["traj"], b)
     if frames is not None:
         p = p[:, frames[0]:frames[1]]
     B, T, N, _ = p.shape
     self_ = torch.arange(N, device=p.device)[None, :, None]
-    k = min(k, N - 1)
-    near = torch.cdist(p[:, 0], p[:, 0]).masked_fill(torch.eye(N, dtype=torch.bool, device=p.device), float("inf"))
-    idx = near.topk(k, dim=-1, largest=False).indices
+    among = None if frames is None else b["query_t"] < frames[1]
+    idx = nearest(p[:, 0], k, among)
     if far:
         rand = torch.randint(0, N - 1, (B, N, far), device=p.device)
         idx = torch.cat([idx, rand + (rand >= self_).long()], -1)        # never the point itself
     m = idx.shape[-1]
     mate = p.gather(2, idx.reshape(B, 1, N * m, 1).expand(B, T, N * m, 3)).reshape(B, T, N, m, 3)
     d = (mate - p[:, :, :, None]).norm(dim=-1)
-    same = (d - d[:, :1]).abs().amax(dim=1) < tol
+    same = (d - d[:, :1]).abs().amax(dim=1) < RIGID_TOL
     if by_object and "segment" in b:
         seg = b["segment"]
         labelled = (seg >= 0).all(-1)
@@ -132,7 +156,7 @@ def group_pairs(b: dict, by_object: bool = True, tol: float = 0.02, frames: tupl
     return idx, same
 
 
-def rigid_pairs(b: dict, k: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
+def rigid_pairs(b: dict, k: int = NEIGHBOURS) -> tuple[torch.Tensor, torch.Tensor]:
     """Each point's partners for the rigidity loss: up to `k` of its nearest
     points in frame 0 (the truth's) on the same moving rigid piece
     (`rigid_buddies`): (B, N, k) their indices and (B, N, k) bool which are
@@ -153,12 +177,11 @@ def components(same: torch.Tensor) -> torch.Tensor:
         label = new
 
 
-def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
-                 frames: tuple[int, int] | None = None) -> torch.Tensor:
+def rigid_groups(b: dict, by_object: bool = True, frames: tuple[int, int] | None = None) -> torch.Tensor:
     """(B, N, N) what the group vectors should put together: with `by_object`,
     in a clip that says which object each point is on (`segment`), the pairs on
     one object (Kubric's objects are rigid, the background one piece);
-    otherwise the pairs whose distance never strays more than `tol` metres from
+    otherwise the pairs whose distance never strays more than RIGID_TOL from
     the first frame's, moving or not, over `frames` (start, end), the frames a
     window sees and its rigid fit works over (the whole clip by default)."""
     p = to_metres(b["traj"], b)
@@ -166,7 +189,7 @@ def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
         p = p[:, frames[0]:frames[1]]
     B, T, N, _ = p.shape
     d = torch.cdist(p.flatten(0, 1), p.flatten(0, 1)).view(B, T, N, N)
-    groups = (d - d[:, :1]).abs().amax(dim=1) < tol
+    groups = (d - d[:, :1]).abs().amax(dim=1) < RIGID_TOL
     if by_object and "segment" in b:
         seg = b["segment"]
         labelled = (seg >= 0).all(-1)                                     # (B,)
@@ -174,21 +197,19 @@ def rigid_groups(b: dict, by_object: bool = True, tol: float = 0.02,
     return groups
 
 
-def rigid_buddies(p: torch.Tensor, k: int, tol: float = 0.02, moved: float = 0.05) -> tuple[torch.Tensor, torch.Tensor]:
+def rigid_buddies(p: torch.Tensor, k: int, moved: float = 0.05) -> tuple[torch.Tensor, torch.Tensor]:
     """From true positions (B, T, N, 3) in metres, each point's up to `k`
     nearest points in frame 0 whose distance to it never strays more than
-    `tol` from frame 0's, both moving more than `moved` at some frame: (B, N,
+    RIGID_TOL from frame 0's, both moving more than `moved` at some frame: (B, N,
     k) indices and (B, N, k) bool which count. Kubric objects are rigid, so
     this finds them without object ids; the moving part leaves the
     background out. Only the 2k nearest are checked, never every pair."""
     B, T, N, _ = p.shape
-    c = min(2 * k, N - 1)
-    near = torch.cdist(p[:, 0], p[:, 0])
-    near = near.masked_fill(torch.eye(N, dtype=torch.bool, device=p.device), float("inf"))
-    idx = near.topk(c, dim=-1, largest=False).indices                    # (B, N, c) nearest first
+    idx = nearest(p[:, 0], 2 * k)                                        # (B, N, c) nearest first
+    c = idx.shape[-1]
     mate = p.gather(2, idx.reshape(B, 1, N * c, 1).expand(B, T, N * c, 3)).reshape(B, T, N, c, 3)
     d = (mate - p[:, :, :, None]).norm(dim=-1)                          # (B, T, N, c)
-    rigid = (d - d[:, :1]).abs().amax(dim=1) < tol
+    rigid = (d - d[:, :1]).abs().amax(dim=1) < RIGID_TOL
     move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved             # (B, N)
     ok = rigid & move[:, :, None] & move.gather(1, idx.flatten(1)).view(B, N, c)
     # The k nearest that count: a stable sort keeps the nearest first among them.

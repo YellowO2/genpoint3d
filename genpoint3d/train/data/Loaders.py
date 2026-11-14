@@ -17,7 +17,8 @@ class Loaders:
         drawn = (dict(sampler=WeightedRandomSampler(clips.weights, len(clips.train)))
                  if clips.weights else dict(shuffle=True))
         self.train = DataLoader(
-            ClipDataset(clips.train, settings.points, spawn=settings.spawn, spawn_gap=settings.spawn_gap, **how_data),
+            ClipDataset(clips.train, settings.points, spawn=settings.spawn, spawn_gap=settings.spawn_gap,
+                        view=(settings.min_context, settings.max_gap), **how_data),
             batch_size=settings.batch, num_workers=settings.workers, **drawn,
             drop_last=True, persistent_workers=settings.workers > 0,
         )

@@ -2,6 +2,11 @@
 
 import torch
 
+# A new point starts only this far (a share of the frame's width) from every
+# point tracked and seen there, in training (`ClipDataset._spawned`) and at
+# test time (`spawn_points`).
+SPAWN_GAP = 0.05
+
 
 def farthest_first(px: torch.Tensor, d: torch.Tensor, far: float, most: int) -> list[int]:
     """Up to `most` of the candidates at pixels `px` (C, 2), the farthest

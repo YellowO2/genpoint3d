@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
-from genpoint3d.train.tools.metrics import _to_camera_t, motion_px
+from genpoint3d.train.tools.metrics import MOVING_PX, _to_camera_t, motion_px
 
 p = argparse.ArgumentParser()
 p.add_argument("--ckpt", required=True)
@@ -52,7 +52,7 @@ with torch.no_grad():
         focal = focal[..., None] if focal.dim() == 2 else focal[:, None, None]
         cam = _to_camera_t(gt, b["extrinsics"])
         err = ((pr - gt).norm(dim=-1) / (cam[..., 2].abs() / focal).clamp_min(1e-12))[0]   # (T, N) px
-        moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > 4)[0]          # (N,)
+        moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > MOVING_PX)[0]          # (N,)
         v = vis[0]
         was_hidden = (~v).int().cummax(dim=0).values.bool()
         was_hidden = torch.cat([torch.zeros_like(was_hidden[:1]), was_hidden[:-1]], 0)

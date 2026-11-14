@@ -20,6 +20,7 @@ from genpoint3d.train.model.FineFinder import FineFinder, _posenc
 from genpoint3d.train.model.tools.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
 )
+from genpoint3d.train.tools.batch import whole_frames
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.likeness import likeness
 
@@ -209,7 +210,7 @@ class PointDiT(nn.Module):
                 for t in (context, visual_mask, patch_xyz, fine_map, fine_proj, fine_xyz))
         # A frame is whole (all of it seen: DINOv3 too), partial (the matcher's
         # seen cells only) or blank.
-        whole, some = visual_mask.flatten(2).all(-1), visual_mask.flatten(2).any(-1)      # (B, T)
+        whole, some = whole_frames(visual_mask), visual_mask.flatten(2).any(-1)      # (B, T)
 
         # Positions in fp32: bf16 holds a coordinate near 1 to about 1/256.
         with torch.autocast(device_type=dev.type, enabled=False):

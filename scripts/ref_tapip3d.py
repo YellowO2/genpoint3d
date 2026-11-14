@@ -84,7 +84,7 @@ def main() -> int:
                    help="1 runs at the 384x512 the model was trained at")
     p.add_argument("--num-iters", type=int, default=6)
     p.add_argument("--support-grid", type=int, default=16)
-    p.add_argument("--min-motion-px", type=float, default=4.0)
+    p.add_argument("--min-motion-px", type=float, default=None, help="moving above this (default: MOVING_PX)")
     p.add_argument("--max-points", type=int, default=0,
                    help="track only the first M query points (0 = all)")
     p.add_argument("--chunk", type=int, default=0,
@@ -105,7 +105,9 @@ def main() -> int:
     from datasets.data_ops import _filter_one_depth
     from utils.inference_utils import inference, load_model, resize_depth_bilinear
 
-    from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
+    from genpoint3d.train.tools.metrics import MOVING_PX, THRESHOLDS, motion_px, tapvid3d_metrics
+    if args.min_motion_px is None:
+        args.min_motion_px = MOVING_PX
 
     dev = torch.device("cuda")
     model = load_model(args.ckpt).to(dev)

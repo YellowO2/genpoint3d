@@ -13,6 +13,7 @@ import torch
 
 from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.tools.traj_scale import RADIUS
+from genpoint3d.train.tools.batch import whole_frames
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.farthest_first import farthest_first
 
@@ -46,7 +47,7 @@ def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Ten
     pos = model.lookup_pos(tracks.float(), b["anchor"].float())[0]                     # (T, N, 3)
     proj = fine["fine_proj"][0].float()                                                 # (T, 3, 4)
     H, W = b["hw"][0].tolist()
-    whole = view[0].flatten(1).all(-1)                                                  # (T,)
+    whole = whole_frames(view[0])                                                       # (T,)
     q = b["query_t"][0]
     exists = (q[None] <= torch.arange(T, device=q.device)[:, None]) & whole[q][None]   # (T, N) given by then
     believed = (torch.sigmoid(logits[0].float()) > 0.5 if logits is not None           # (T, N)

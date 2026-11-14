@@ -50,7 +50,7 @@ def main() -> int:
     p.add_argument("--out", default=None, help="save predictions here, one .pt per clip")
     p.add_argument("--size", type=int, default=512,
                    help="long side fed to the model, rounded down to a multiple of 14")
-    p.add_argument("--min-motion-px", type=float, default=4.0)
+    p.add_argument("--min-motion-px", type=float, default=None, help="moving above this (default: MOVING_PX)")
     args = p.parse_args()
 
     ref = Path(args.ref_repo).expanduser().resolve()
@@ -63,7 +63,9 @@ def main() -> int:
     from arc.models.arc import Arc
 
     from genpoint3d.prepare.KubricSequenceDataset import KubricSequenceDataset
-    from genpoint3d.train.tools.metrics import THRESHOLDS, motion_px, tapvid3d_metrics
+    from genpoint3d.train.tools.metrics import MOVING_PX, THRESHOLDS, motion_px, tapvid3d_metrics
+    if args.min_motion_px is None:
+        args.min_motion_px = MOVING_PX
 
     dev = torch.device("cuda")
     model = Arc.from_pretrained(args.ckpt).to(dev).eval()

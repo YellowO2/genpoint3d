@@ -22,8 +22,8 @@ from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project
-from genpoint3d.train.tools.kabsch import robust_kabsch
-from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, robust_kabsch
+from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import Sweeps
 
 
@@ -59,10 +59,10 @@ def _robust_place(src, dst, w0, own, refits: int = 3):
     """(1, T, n, 3) each of n points carried by the turn and shift that best
     carry its mates from `src` (1, n, M, 3) to `dst` (1, T, M, 3), weighted by
     `w0` (1, T, n, M), refit with far mates counting less, applied to `own`
-    (1, n, 3); and (1, T, n) where at least 3 mates' weight backs it. In
+    (1, n, 3); and (1, T, n) where at least MIN_POSE_POINTS mates' weight backs it. In
     float64."""
     R, ms, md, _ = robust_kabsch(w0.double(), src[:, None].double(), dst[:, :, None].double(), refits)
-    return ((R @ (own[:, None].double() - ms)[..., None])[..., 0] + md).float(), w0.sum(-1) >= 3
+    return ((R @ (own[:, None].double() - ms)[..., None])[..., 0] + md).float(), w0.sum(-1) >= MIN_POSE_POINTS
 
 
 @torch.no_grad()
@@ -91,7 +91,7 @@ def main() -> int:
         fine = fine_inputs(model, b, amp)
         seen_at = b["visibility"].bool()[0, at]
         extra = torch.nonzero(seen_at[n:])[:, 0] + n
-        if len(extra) < 3:
+        if len(extra) < MIN_POSE_POINTS:
             continue
         old, new = _part(b, torch.arange(n, device=device)), _requeried(model, b, fine, extra, at)
         news.append(len(extra))
@@ -129,7 +129,7 @@ def main() -> int:
         by_both, ok_both = _robust_place(src_both, torch.cat([p_old, p_new], 2),
                                          torch.cat([w_old, w_new], -1), own_at)
         gt = to_metres(old["traj"], old)
-        moving = (motion_px(gt, vis_old, old["intrinsics_256"], old["extrinsics"], q) > 4)[:, None]
+        moving = (motion_px(gt, vis_old, old["intrinsics_256"], old["extrinsics"], q) > MOVING_PX)[:, None]
         late = (torch.arange(T, device=device) >= at)[None, :, None]
         hid = ~vis_old & moving & late
         to_x = lambda pos: (pos - old["anchor"].float()[:, None]) / model.traj_scale

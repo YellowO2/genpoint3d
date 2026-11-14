@@ -25,9 +25,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import RIGID_TOL, fine_inputs, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.likeness import SAME, likeness
-from genpoint3d.train.tools.metrics import _to_camera_t, motion_px
+from genpoint3d.train.tools.metrics import _to_camera_t, metres_per_px, motion_px
 from genpoint3d.train.tools.regress import Sweeps
 
 p = argparse.ArgumentParser()
@@ -58,10 +58,8 @@ with torch.no_grad():
         gt = to_metres(b["traj"].float(), b)
         d = (gt[:, :, :, None] - gt[:, :, None]).norm(dim=-1)
         drift = (d - d[:, :1]).abs().amax(dim=1)
-        rigid2, rigid05 = drift < 0.02, drift < 0.005
-        cam = _to_camera_t(gt, b["extrinsics"])
-        focal = (b["intrinsics_256"][..., 0, 0] * b["intrinsics_256"][..., 1, 1]).sqrt()
-        mult = (cam[..., 2].abs() / focal[..., None]).clamp_min(1e-6)                # (B, T, N) m per px
+        rigid2, rigid05 = drift < RIGID_TOL, drift < 0.005
+        mult = metres_per_px(_to_camera_t(gt, b["extrinsics"]), b["intrinsics_256"])  # (B, T, N)
         disp = gt - gt[:, :1]
         gap = ((disp[:, :, :, None] - disp[:, :, None]).norm(dim=-1) / mult[..., None]).amax(dim=1)   # px
         moved = motion_px(gt, b["visibility"].bool(), b["intrinsics_256"], b["extrinsics"], b["query_t"])

@@ -11,7 +11,7 @@ from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.tools.batch import rigid_groups, to_metres
 from genpoint3d.train.tools.likeness import SAME, likeness
-from genpoint3d.train.tools.metrics import at_query, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import MOVING_PX, at_query, motion_px, tapvid3d_metrics
 
 
 def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
@@ -67,7 +67,7 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
         deg = torch.rad2deg(torch.acos(cos.clamp(-1, 1)))
         out["down_deg"] = torch.where(prediction.down_scored, deg, torch.full_like(deg, float("nan")))
     if j.space == "3d" and not j.min_motion_px:
-        moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], q) > 4
+        moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], q) > MOVING_PX
         mv = vis & moving[:, None]
         out["apd_moving"] = _apd(pred_m, gt_m, mv, b, "none")
         out["apd_moving_static"] = _apd(static, gt_m, mv, b, "none")

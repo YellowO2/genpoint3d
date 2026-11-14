@@ -42,7 +42,7 @@ from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
-from genpoint3d.train.tools.metrics import _project, _to_camera_t, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import MOVING_PX, _project, _to_camera_t, motion_px, tapvid3d_metrics
 
 SIZE = 512          # drawn frame side, px
 TRAIL = 8           # predicted positions kept in the trail
@@ -244,10 +244,10 @@ def main() -> int:
         gt_m = to_metres(b["traj"], b)
         pr_m = gt_m if args.draw_truth_as_pred else to_metres(pred.tracks.float(), b)
         vis = b["visibility"].bool()
-        # The scorer's moving-point APD: points that move more than 4 px, no
+        # The scorer's moving-point APD: points that move more than MOVING_PX, no
         # rescale (`track_scores`).
         moving_px = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"])
-        mv = vis & (moving_px > 4)[:, None]
+        mv = vis & (moving_px > MOVING_PX)[:, None]
         apd_mv = tapvid3d_metrics(pr_m, gt_m, mv, b["intrinsics_256"], b["extrinsics"],
                                   scaling="none", per_clip=True)["average_pts_within_thresh"]
         apd = tapvid3d_metrics(pr_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"],
@@ -291,7 +291,7 @@ def main() -> int:
             codec = write_video(frames, out / f"{name}.mp4")
             at = np.linspace(0, len(frames) - 1, SHEET).round().astype(int)
             cv2.imwrite(str(out / f"{name}.png"), np.hstack([frames[t] for t in at]))
-            n_mv = int((moving_px[i] > 4).sum())
+            n_mv = int((moving_px[i] > MOVING_PX).sum())
             print(f"  {name}  APD moving {apd_mv[i].item():.3f} ({n_mv} moving points)"
                   f"  APD all {apd[i].item():.3f}  -> {out / name}.mp4 [{codec}]", flush=True)
         if k >= len(clips):

@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.CachedClip import CachedClip
+from genpoint3d.tools.traj_scale import GRAVITY, KUBRIC_FPS
 from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import to_metres
@@ -40,7 +41,7 @@ with torch.no_grad():
 moving = ((gt - gt[:1]).norm(dim=-1).amax(0) > 0.1) & (b["query_t"][0].cpu() == 0) & b["visibility"][0, 0].cpu().bool()
 h_gt = ((gt[:, moving] - gt[:1, moving]) @ up).mean(1).numpy()
 h_pr = ((pr[:, moving] - gt[:1, moving]) @ up).mean(1).numpy()
-fall = 0.5 * 9.81 * (np.arange(len(h_gt)) / 12.0) ** 2
+fall = 0.5 * GRAVITY * (np.arange(len(h_gt)) / KUBRIC_FPS) ** 2
 print(f"{args.ckpt} | {int(moving.sum())} points on the object | images up to frame {args.cutoff - 1}")
 print(f"  {'frame':>5} {'true height m':>14} {'forecast':>9} {'free fall':>10}")
 for t in range(len(h_gt)):

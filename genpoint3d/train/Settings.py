@@ -2,6 +2,9 @@
 
 import argparse
 
+from genpoint3d.train.data.split_clips import SEED, VAL_FRAC
+from genpoint3d.train.tools.farthest_first import SPAWN_GAP
+
 
 # Flags since removed, as a checkpoint may still hold them: each with the value
 # that left it off. A loss weight here only weighed its feature's loss.
@@ -44,14 +47,14 @@ class Settings(argparse.Namespace):
         p.add_argument("--steps", type=int, default=1000)
         p.add_argument("--batch", type=int, default=1)
         p.add_argument("--accum", type=int, default=1, help="micro-batches per optimiser step")
-        p.add_argument("--points", type=int, default=500, help="points drawn per clip")
-        p.add_argument("--spawn", type=int, default=0, metavar="M",
+        p.add_argument("--points", type=int, default=1000, help="points drawn per clip")
+        p.add_argument("--spawn", type=int, default=500, metavar="M",
                        help="up to M of each training clip's points start where new surface comes into view, frame "
                             "by frame, the clip's other tracks standing in for them (0: none)")
-        p.add_argument("--spawn-gap", type=float, default=0.05,
+        p.add_argument("--spawn-gap", type=float, default=SPAWN_GAP,
                        help="a new point starts only this far (a share of the frame's width) from every point "
-                            "tracked and seen there")
-        p.add_argument("--val-frac", type=float, default=0.1)
+                            "tracked and seen there, in training and when the run is scored")
+        p.add_argument("--val-frac", type=float, default=VAL_FRAC)
         p.add_argument("--val-every", type=int, default=500)
         p.add_argument("--resume", default=None, metavar="RESUME_PT",
                        help="go on from an earlier job of this run: its resume.pt (weights, optimiser, schedule, log)")
@@ -63,7 +66,7 @@ class Settings(argparse.Namespace):
                        help="train and validate on the first N clips")
         p.add_argument("--workers", type=int, default=4)
         p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="bf16 autocast")
-        p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--seed", type=int, default=SEED)
         # Model
         p.add_argument("--dim", type=int, default=256)
         p.add_argument("--depth", type=int, default=6)
@@ -75,7 +78,7 @@ class Settings(argparse.Namespace):
         p.add_argument("--patch", type=int, default=0, metavar="P",
                        help="attention between points only within patches of P points near each other (Point "
                             "Transformer V3's serialized attention); 0: every point reads every other")
-        p.add_argument("--fit-robust", type=int, default=0,
+        p.add_argument("--fit-robust", type=int, default=3,
                        help="refits of the rigid proposal, each mate counting less the further it sat from the last "
                             "fit, so a few wrong mates cannot drag it (0: one plain fit)")
         p.add_argument("--fit-fresh", type=float, default=30.0, metavar="DEG",

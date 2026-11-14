@@ -18,7 +18,7 @@ which way is down, where that is known).
 import torch
 from torch import nn
 
-from genpoint3d.train.tools.kabsch import kabsch
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, kabsch
 
 
 def _mlp(i: int, o: int, width: int = 128, norm: bool = True) -> nn.Sequential:
@@ -47,12 +47,12 @@ def _shape_match(x: torch.Tensor, rest: torch.Tensor, piece: torch.Tensor) -> to
     """(S, N, 3) `x` with each piece's points set where the turn and shift that
     best carry the piece's `rest` (S, N, 3) onto `x` put them (shape matching,
     Mueller et al. 2005; FIGNet keeps objects rigid this way in its rollouts).
-    Points on no piece (-1), or on one of under 3 points, kept."""
+    Points on no piece (-1), or on one of under MIN_POSE_POINTS points, kept."""
     w = ((piece[:, :, None] == piece[:, None]) & (piece >= 0)[:, :, None]).double()      # (S, N, N)
     r = rest.double()
     R, ms, md, s = kabsch(w, r[:, None], x.double()[:, None])
     placed = (R @ (r - ms)[..., None])[..., 0] + md
-    return torch.where((s >= 3)[..., None], placed.to(x.dtype), x)
+    return torch.where((s >= MIN_POSE_POINTS)[..., None], placed.to(x.dtype), x)
 
 
 class Stepper(nn.Module):

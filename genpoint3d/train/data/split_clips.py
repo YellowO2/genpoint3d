@@ -7,6 +7,17 @@ import torch
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.train.data.Clips import Clips
 
+# Every run's split unless told otherwise (`--val-frac`, `--seed`).
+VAL_FRAC, SEED = 0.1, 0
+
+
+def _split_one(clips: list, val_frac: float, seed: int) -> tuple[list, list]:
+    """`clips` (one cache's, sorted) apart into train and val, fixed by `seed`:
+    a run's split, wherever it is redone."""
+    perm = torch.randperm(len(clips), generator=torch.Generator().manual_seed(seed)).tolist()
+    n_val = max(1, int(len(clips) * val_frac))
+    return [clips[i] for i in perm[n_val:]], [clips[i] for i in perm[:n_val]]
+
 
 def split_clips(caches: list[str], val_frac: float, seed: int, mix: list[float] | None = None) -> Clips:
     """Each cache's clips split apart, fixed by `seed`, as paths (`ClipDataset`
@@ -26,10 +37,8 @@ def split_clips(caches: list[str], val_frac: float, seed: int, mix: list[float] 
         if feat_dim not in (None, probe.feat_dim):
             raise SystemExit(f"cache in {path} has {probe.feat_dim}-wide features, the first {feat_dim}")
         feat_dim = probe.feat_dim
-        perm = torch.randperm(len(clips), generator=torch.Generator().manual_seed(seed)).tolist()
-        n_val = max(1, int(len(clips) * val_frac))
-        mine = [clips[i] for i in perm[n_val:]]
+        mine, held = _split_one(clips, val_frac, seed)
         train += mine
         weights += [share / len(mine)] * len(mine)
-        val = [clips[i] for i in perm[:n_val]] if val is None else val
+        val = held if val is None else val
     return Clips(train=train, val=val, feat_dim=feat_dim, weights=weights)

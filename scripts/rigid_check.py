@@ -8,7 +8,7 @@ points and the ones that move more than 4 px.
 Beside it, the same with some of its inputs from the truth: the clip's points
 at their true depth, at their true place in the image, and both; the seen
 points' errors dealt out among them at random (their size kept, any pattern
-across points broken); and, without `--spawn`, the true pieces as groups, the
+across points broken); and, without `--fill`, the true pieces as groups, the
 true visibility, and all true. The hidden moving point-frames are split by
 how many points of their true piece are seen there.
 
@@ -17,8 +17,8 @@ points kept out of its fits (kept out as good as in it says leaving the fit
 costs nothing), its error lined up on the frame each point hides in, and by
 how far a point is from the centre of its piece's seen points.
 
-With `--spawn`, points are first added on new surface as at test time; they
-are mates but not scored and have no truth. `--train-spawn` draws the clip's
+With `--fill`, points are first added on new surface as at test time; they
+are mates but not scored and have no truth. `--spawn` draws the clip's
 own tracks as training does instead, so every point has its truth.
 
 Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
@@ -33,7 +33,7 @@ from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project, unproject
-from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import Sweeps, object_places
 
 
@@ -44,8 +44,8 @@ def main() -> int:
     p.add_argument("--cache", required=True)
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--points", type=int, default=256)
-    p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to first where surface has none")
-    p.add_argument("--train-spawn", type=int, default=0,
+    p.add_argument("--fill", type=int, default=0, help="points each clip is filled up to first where surface has none")
+    p.add_argument("--spawn", type=int, default=0,
                    help="up to this many of the clip's tracks started where they come into view, as training draws them")
     p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
     p.add_argument("--robust", type=int, default=None, help="the pose's refits (default: the run's)")
@@ -60,7 +60,7 @@ def main() -> int:
     robust = model.fit_robust if args.robust is None else args.robust
     fresh = model.fit_fresh if args.fresh is None else args.fresh
     ds = run.dataset(args.cache, args.frames_cache, points=args.points, query_before=args.query_before,
-                     spawn=args.train_spawn)
+                     spawn=args.spawn)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=4)
     amp = device.type == "cuda"
     print(f"{len(ds)} clips | step {run.step} of {args.ckpt} | refits {robust}, freshness {fresh}", flush=True)
@@ -69,7 +69,7 @@ def main() -> int:
     bins = (("none", 0, 1), ("1-9", 1, 10), ("10+", 10, 1 << 30))
     counts = {label: 0 for label, _, _ in bins}
     names = ("guess", "object", "true depth", "true image", "true both", "errors dealt")
-    names += () if args.spawn else ("true groups", "true seen", "all true")
+    names += () if args.fill else ("true groups", "true seen", "all true")
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -86,14 +86,14 @@ def main() -> int:
             return sweeps
 
         sweeps, every = track(b), b
-        if args.spawn:
-            every = spawn_points(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
+        if args.fill:
+            every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
             sweeps = track(every)
         # Fitted over every point, the added ones too; only the clip's own are scored.
         anchor, eq = every["anchor"].float(), every["query_t"]
         guess = sweeps.whole.float()
         pos = model.lookup_pos(guess, anchor)
-        belief, member = torch.sigmoid(sweeps.vis.float()), sweeps.seen & sweeps.known
+        belief, member = sweeps.belief(), sweeps.seen & sweeps.known
         to_guess = lambda places: (places - anchor[:, None]) / model.traj_scale
         place = lambda at, groups=sweeps.groups, seen=belief: to_guess(object_places(at, eq, groups, member, seen,
                                                                                      robust, fresh)[0])
@@ -114,7 +114,7 @@ def main() -> int:
         for name, at in (("true depth", unproject(uv_p, z_t, proj)), ("true image", unproject(uv_t, z_p, proj)),
                          ("true both", true_pos), ("errors dealt", dealt)):
             fits[name] = place(at)
-        if not args.spawn:
+        if not args.fill:
             # The true pieces as group vectors (one axis each, far apart), then the true visibility, then all true.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
             truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
@@ -123,7 +123,7 @@ def main() -> int:
             fits["all true"] = place(true_pos, truth, b["visibility"].float())
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         gt = to_metres(b["traj"], b)
-        moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > 4)[:, None]
+        moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > MOVING_PX)[:, None]
         # Each point-frame's seen points on its true piece, itself left out.
         mates = rigid_groups(b) & ~torch.eye(N, dtype=torch.bool, device=device)
         seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)

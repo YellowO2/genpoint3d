@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from genpoint3d.tools.traj_scale import GRAVITY_REF
 from genpoint3d.train.data.ClipDataset import ClipDataset
-from genpoint3d.train.data.split_clips import split_clips
+from genpoint3d.train.data.split_clips import SEED, VAL_FRAC, split_clips
 from genpoint3d.train.model.Stepper import Stepper, _shape_match
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
@@ -116,7 +116,7 @@ def main() -> int:
 
     device = torch.device("cuda")
     torch.manual_seed(0)
-    clips = split_clips(args.cache, 0.1, 0, args.mix)
+    clips = split_clips(args.cache, VAL_FRAC, SEED, args.mix)
     frames = {Path(c): Path(f) for c, f in zip(args.cache, args.frames_cache)}
     t0 = time.time()
     # As validation reads them: its first points, queried before the cutoff.

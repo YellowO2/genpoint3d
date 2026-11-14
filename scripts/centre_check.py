@@ -7,7 +7,7 @@ middle of all its points' guesses. Object-frames split by how much of the
 object's points is seen there; the middle of the seen points has nothing to
 go on where none is. Errors in cm, the median over object-frames.
 
-Tracked as at test time: with `--spawn`, points are first added on new
+Tracked as at test time: with `--fill`, points are first added on new
 surface (they track but are not scored: they have no truth).
 
 Run:  python scripts/centre_check.py --ckpt outputs/RUN/best.pt --cache cache/kubric_obj48_centre \
@@ -23,6 +23,7 @@ from genpoint3d.train.data.split_clips import split_clips
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS
 from genpoint3d.train.tools.regress import Sweeps
 
 
@@ -32,7 +33,7 @@ def main() -> int:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--cache", required=True, help="a cache with centres; its held-out split is scored")
     p.add_argument("--frames-cache", required=True)
-    p.add_argument("--spawn", type=int, default=1000, help="points each clip is filled up to first (0: none)")
+    p.add_argument("--fill", type=int, default=1000, help="points each clip is filled up to first (0: none)")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,7 +44,7 @@ def main() -> int:
     clips = split_clips([args.cache], s.val_frac, s.seed).val
     loader = DataLoader(run.dataset(clips, args.frames_cache), batch_size=1, shuffle=False, num_workers=4)
     amp = device.type == "cuda"
-    print(f"{len(clips)} held-out clips | step {run.step} of {args.ckpt} | spawn {args.spawn}", flush=True)
+    print(f"{len(clips)} held-out clips | step {run.step} of {args.ckpt} | filled to {args.fill}", flush=True)
 
     names = ("arrows", "seen (guess)", "seen (truth)", "all (guess)")
     bins = ("none seen", "under half", "half or more")
@@ -63,8 +64,8 @@ def main() -> int:
             return sweeps
 
         sweeps = track(b)
-        if args.spawn:
-            every = spawn_points(model, b, fine, view, args.spawn, s.spawn_gap,
+        if args.fill:
+            every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap,
                                  lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
             sweeps = track(every)
         guess = sweeps.whole[:, :, :N].float()
@@ -74,7 +75,7 @@ def main() -> int:
         vis, seg, known = b["visibility"][0].bool(), b["segment"][0], b["centre_known"][0]
         for k in seg[known].unique().tolist():
             mine = known & (seg == k)
-            if mine.sum() < 3:
+            if mine.sum() < MIN_POSE_POINTS:
                 continue
             moving = (centre[:, mine][:, 0] - centre[0, mine][0]).norm(dim=-1).max() > 0.01
             for t in range(T):

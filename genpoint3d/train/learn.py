@@ -5,7 +5,7 @@ import torch
 from genpoint3d.train.Hardware import Hardware
 from genpoint3d.train.Losses import Losses
 from genpoint3d.train.tools.batch import (
-    apd_weight, black_out, fine_inputs, group_pairs, hidden_weight, random_visual_mask, rigid_pairs,
+    apd_weight, black_out, fine_inputs, group_pairs, hidden_weight, rigid_pairs,
     seen_at, to_device,
 )
 from genpoint3d.train.tools.camera import project
@@ -20,8 +20,9 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     b = to_device(batch, hardware.device)
     traj, anchor, vis = b["traj"], b["anchor"], b["visibility"]
     # Each clip loses part or all of its frames from a random cutoff, or over
-    # a random gap and is seen again after; the CNN sees only what is left.
-    vm = random_visual_mask(b, settings.min_context, settings.max_gap)
+    # a random gap and is seen again after (drawn with the clip, `random_view`);
+    # the CNN sees only what is left.
+    vm = b["view"]
     b["frames"] = black_out(b["frames"], vm)
     mask, w = hidden_weight(vis, apd_weight(b, traj), settings.hidden_loss)
     extra = dict(vel_weight=settings.vel_loss)

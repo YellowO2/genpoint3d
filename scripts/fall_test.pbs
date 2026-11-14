@@ -24,7 +24,7 @@ source $ROOT/venvs/fyp/bin/activate
 
 V=$ROOT/fall_test/val
 python scripts/split_dir.py --cache $ROOT/${CACHE:-cache/kubric_movi48q1} --split val --n 1000 \
-  --val-frac 0.1 --seed 0 --out $V
+  --out $V
 for CKPT in ${CKPTS:?}; do
   echo "########## $CKPT"
   python scripts/evaluate.py --ckpt "$CKPT" --cache $V --frames-cache $ROOT/cache/kubric_movi48_frames384 \

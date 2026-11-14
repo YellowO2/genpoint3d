@@ -4,6 +4,9 @@ The fit is the turn and shift that best carry one set of points onto another."""
 
 import torch
 
+# A pose needs at least this many points behind it (three not in a line fix a turn).
+MIN_POSE_POINTS = 3
+
 
 def kabsch(w: torch.Tensor, src: torch.Tensor, dst: torch.Tensor) -> tuple:
     """The fit carrying `src` onto `dst` (..., K, 3, broadcast against the

@@ -25,7 +25,8 @@ from typing import Callable, Optional
 import torch
 from torch import nn
 
-from genpoint3d.train.tools.kabsch import robust_kabsch
+from genpoint3d.train.tools.batch import whole_frames
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, robust_kabsch
 from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.visibility import visibility_error
 
@@ -101,7 +102,7 @@ def _handed_over(cond: dict) -> torch.Tensor:
     q, view = cond["query_t"], cond.get("visual_mask")
     if view is None:
         return torch.ones_like(q, dtype=torch.bool)
-    return view.flatten(2).all(-1).gather(1, q)
+    return whole_frames(view).gather(1, q)
 
 
 def _window_points(q: torch.Tensor, seen: torch.Tensor, start: int, end: int, every: bool):
@@ -119,7 +120,7 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
     """The points `member` (B, N) put into objects without chains, so one
     wrong pair cannot merge two: the first point in none seeds one of itself
     and its own group-mates in none (likeness over a half), and so on; one of
-    under 3 points, which cannot hold a pose, is left out. (B, K, N) each
+    under MIN_POSE_POINTS points, which cannot hold a pose, is left out. (B, K, N) each
     object's points weighted by their likeness to its seed (0 for the others;
     the group vectors' gradient goes through it), and (B, N) each point's
     object, -1 for none."""
@@ -135,8 +136,8 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
             take = free & (a[b, seed] > SAME)
             take[seed] = True                                           # always: the loop must end
             free &= ~take
-            # Under 3 points cannot hold a pose: those keep their own guesses and take no room.
-            if take.sum() >= 3:
+            # Too few points cannot hold a pose: those keep their own guesses and take no room.
+            if take.sum() >= MIN_POSE_POINTS:
                 which[b, take] = len(rows[b])
                 rows[b].append(a[b, seed] * take)
     weight = torch.zeros(B, max(max(len(r) for r in rows), 1), N, device=groups.device)
@@ -149,7 +150,9 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
                   seen: torch.Tensor, robust: int = 0, fresh: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
     """(B, T, N, 3) each point where its object's pose puts it, and (B, T, N)
-    how many of its object's points are seen behind that pose. The objects
+    how many of its object's points are seen behind that pose, each counted
+    by the belief it is seen (`seen`): 2 points surely seen and 2 half seen
+    count 3. The objects
     are `objects`'; each is kept as one rigid shape in which a point's place
     is fixed when it is given (in its query frame, through the pose there). In
     each frame the pose that best carries the shape onto the object's points
@@ -159,8 +162,8 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
     frame. With `fresh` (degrees), a point counts 1 / (1 + turn / fresh)^2 as
     much, its turn being how far its object has turned since the point was
     given: a tracked point drifts as it turns from the look it was given by
-    (on the ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). Where fewer
-    than 3 points back a pose the last one holds; a point not yet given, or
+    (on the ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). Where under
+    MIN_POSE_POINTS seen points back a pose the last one holds; a point not yet given, or
     in no object, keeps its own guess. The turn and the shape carry no
     gradient (an SVD's is unstable where points lie nearly in a line); the
     group vectors reach the places through the weights' centres.
@@ -190,8 +193,9 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
                 cos = (((pick(R) * then).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
                 w = w / (1 + torch.rad2deg(torch.acos(cos)) / fresh).pow(2)
             Rn, msn, mdn, _ = robust_kabsch(weight * w[:, None], shape[:, None], pos[:, t, None], robust)
-            count = ((weight > 0) & given[:, None]).float().mul(seen[:, t, None]).sum(-1)    # (B, K) seen, unweighted
-            ok = count >= 3
+            # (B, K) the object's given points seen in frame t, each by its belief, not by its likeness.
+            count = ((weight > 0) & given[:, None]).float().mul(seen[:, t, None]).sum(-1)
+            ok = count >= MIN_POSE_POINTS
             R = torch.where(ok[..., None, None], Rn.detach(), R)
             ms, md = torch.where(ok[..., None], msn, ms), torch.where(ok[..., None], mdn, md)
             new = (q == t) & (which >= 0) & ~given
@@ -261,6 +265,8 @@ class Sweeps:
         self.whole = torch.zeros(B, T, N, 3, device=anchor.device)
         # What the head last said about each frame; 0 before it has.
         self.vis = torch.zeros(B, T, N, device=anchor.device)
+        # The frames some round has looked at: the others hold only a guess carried on (`_reach`).
+        self.visited = torch.zeros(T, dtype=torch.bool, device=anchor.device)
         self.groups = None
         self.arrow = torch.zeros(B, T, N, 3, device=anchor.device) if model.centre else None
         self.seen = _handed_over(cond)
@@ -273,6 +279,12 @@ class Sweeps:
         self.told = cond["down_known"]
         self.down = cond["down"].float()
         self.down_known = self.told
+
+    def belief(self) -> torch.Tensor:
+        """(B, T, N) how sure the model is that each point is seen in each
+        frame, what the rigid fit counts: its visibility head's last word, 0 in
+        a frame no round has looked at yet (a guess carried on is no sighting)."""
+        return torch.sigmoid(self.vis) * self.visited[None, :, None]
 
     def __iter__(self):
         model, anchor = self.model, self.anchor
@@ -293,7 +305,7 @@ class Sweeps:
                     if model.rigid_proposal and self.groups is not None:
                         with torch.no_grad():
                             rigid = object_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], self.groups,
-                                                    self.seen & self.known, torch.sigmoid(self.vis), start, end,
+                                                    self.seen & self.known, self.belief(), start, end,
                                                     robust=model.fit_robust, fresh=model.fit_fresh)
                     step, logits, emb, down, arrow = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
@@ -308,6 +320,7 @@ class Sweeps:
                         self.known = self.known | alive
                     if logits is not None:
                         self.vis[:, start:end] = logits.detach()
+                    self.visited[start:end] = True
                     if arrow is not None:
                         self.arrow[:, start:end] = arrow.detach().float()
                     own = g.detach() + _corrected(step, at, self.rays)
@@ -439,7 +452,7 @@ def regress_loss(
         if fit_weight and r.groups is not None:
             clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
             fit = object_proposal(clip, cond["query_t"], r.groups, run.seen & run.known,
-                                  torch.sigmoid(run.vis), r.start, r.end, robust=model.fit_robust, fresh=model.fit_fresh)
+                                  run.belief(), r.start, r.end, robust=model.fit_robust, fresh=model.fit_fresh)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if centre_weight:

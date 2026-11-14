@@ -15,13 +15,13 @@ from torch.utils.data import DataLoader
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.main import score
 from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
-from genpoint3d.train.tools.metrics import HIDDEN_KEYS, clip_mean, error_and_motion, motion_px, motion_table, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import HIDDEN_KEYS, MOVING_PX, clip_mean, error_and_motion, motion_px, motion_table, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 
 @torch.no_grad()
 def per_frame_apd(run: Run, loader, device) -> list[float]:
-    """APD by frame over the visible points that move more than 4 px from
+    """APD by frame over the visible points that move more than MOVING_PX from
     their query position, every frame given its image, with no rescale; and
     printed, every seen point's error against how far it has moved."""
     model, s = run.model, run.settings
@@ -38,7 +38,7 @@ def per_frame_apd(run: Run, loader, device) -> list[float]:
         e, d = error_and_motion(pred_m, gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"])
         errs.append(e)
         disps.append(d)
-        seen = vis.bool() & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > 4)[:, None]
+        seen = vis.bool() & (motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > MOVING_PX)[:, None]
         vals = vals or [[] for _ in range(traj.shape[1])]
         for t in range(traj.shape[1]):
             m = tapvid3d_metrics(pred_m[:, t:t + 1], gt_m[:, t:t + 1], seen[:, t:t + 1],
@@ -102,8 +102,8 @@ def main() -> int:
     p.add_argument("--eval-cutoff", type=int, default=0, metavar="C",
                    help="frames C on get no image, observed (_obs) and forecast (_fut) scored apart")
     p.add_argument("--per-frame", action="store_true", help="also APD by frame, every frame seen")
-    p.add_argument("--spawn", type=int, default=0, help="points each clip is filled up to where surface has none (0: none added)")
-    p.add_argument("--spawn-gap", type=float, default=0.05, help="a gap that wide (a share of the frame's width) gets one")
+    p.add_argument("--fill", type=int, default=0,
+                   help="points each clip is filled up to where surface has none, at the run's spawning gap (0: none added)")
     args = p.parse_args()
     if args.eval_cutoff == 1 or args.eval_cutoff < 0:
         p.error("--eval-cutoff is 0 (off) or at least 2")
@@ -118,7 +118,7 @@ def main() -> int:
     per_frame = per_frame_apd(run, loader, device) if args.per_frame else None
     judging = run.judging(device, cutoff=args.eval_cutoff, space=args.space, oracle_axis=args.oracle_axis,
                           scaling=args.scaling, min_motion_px=args.min_motion_px,
-                          spawn=args.spawn, spawn_gap=args.spawn_gap)
+                          fill=args.fill)
     m = score(run.model, loader, judging, split="test")
     print(f"\nscored in {(time.time() - t0) / 60:.1f} min\n", flush=True)
 

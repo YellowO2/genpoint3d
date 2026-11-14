@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
-from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
+from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
 
 
@@ -42,7 +42,7 @@ def main() -> int:
                              overlap=s.overlap, schedule=s.schedule, **cond)
         pred_m, gt_m = to_metres(pred.float(), b), to_metres(b["traj"], b)
         always = vis.all(1)                                                  # (B, N)
-        moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > 4
+        moving = motion_px(gt_m, vis, b["intrinsics_256"], b["extrinsics"], b["query_t"]) > MOVING_PX
         shares.append(always.float().mean().item())
         for name, pts in (("always seen", always), ("sometimes hidden", ~always)):
             for which, sel, scaling in (("all", pts, "median"), ("moving", pts & moving, "none")):
