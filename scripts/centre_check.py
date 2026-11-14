@@ -65,7 +65,7 @@ def main() -> int:
 
         sweeps = track(b)
         if args.fill:
-            every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap,
+            every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, run.spawn_share,
                                  lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
             sweeps = track(every)
         guess = sweeps.whole[:, :, :N].float()

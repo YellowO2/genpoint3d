@@ -1,13 +1,10 @@
 """New points where surface comes into view with no point on it.
 
 They are added as a tracker on real video adds them, by the rule training
-spawns by (`fill_frames`), without the truth: a place on a surface that no
-point seen there sits on gets one. As in training,
-where the scene's points come as given and only new surface is capped, the
-first frame's points are limited by the gap and the clip's point budget, and
-new surface after it fills the rest of that budget, as training's points per
-clip. The first frame's points are tracked before the later ones are added, so
-every point already there covers where it really goes (`spawn_points`)."""
+spawns by (`fill_frames`), without the truth: the first frame filled evenly,
+then a place on new surface that no point seen there sits on gets one. The
+first frame's points are tracked before the later ones are added, so every
+point already there covers where it really goes (`spawn_points`)."""
 
 import torch
 
@@ -15,26 +12,31 @@ from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.tools.traj_scale import RADIUS
 from genpoint3d.train.tools.batch import whole_frames
 from genpoint3d.train.tools.camera import project
-from genpoint3d.train.tools.farthest_first import SURFACE_TOL, fill_frames
+from genpoint3d.train.tools.farthest_first import SURFACE_TOL, fill_frames, first_frame_share
 
 
-def spawn_points(model, b: dict, fine: dict, view: torch.Tensor, points: int, gap: float, tracks_of) -> dict:
-    """`b` with points added until it has `points`, in two rounds, each
-    tracked before the next (`tracks_of(clip)` gives a clip's tracks and
-    visibility logits): the first frame's gaps, then new surface after it."""
-    b = _spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], True)
-    return _spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], False)
+def spawn_points(model, b: dict, fine: dict, view: torch.Tensor, points: int, gap: float, share: float,
+                 tracks_of) -> dict:
+    """`b` with points added toward `points`, `share` of them kept for new
+    surface (a run trained with --spawn M of --points P keeps M / P), in two
+    rounds, each tracked before the next (`tracks_of(clip)` gives a clip's
+    tracks and visibility logits): the first frame filled to the rest, then new
+    surface after it."""
+    reserve = round(points * share)
+    b = _spawned(model, b, fine, *tracks_of(b), view, gap, points, reserve, True)
+    return _spawned(model, b, fine, *tracks_of(b), view, gap, points, reserve, False)
 
 
 @torch.no_grad()
 def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None, view: torch.Tensor, gap: float,
-             cap: int, first: bool) -> dict:
-    """`b` (one clip) with up to `cap` points added after its own: in the
-    first frame seen whole if `first`, else in the frames seen whole after it,
-    frame by frame. They go where no point covers the CNN cells, the
-    farthest first, each starting at its cell in that frame, its look read
-    there. A point covers the cells within `gap` (a share of the frame's
-    width) of it in the image if it is believed seen there (as training's
+             points: int, reserve: int, first: bool) -> dict:
+    """`b` (one clip) with points added after its own by the spawning rule
+    (`fill_frames`): if `first`, the first frame seen whole filled up to
+    `points - reserve`; else the frames seen whole after it, frame by frame,
+    new surface farther than `gap` (a share of the frame's width) from every
+    point there up to `points`. They go on the CNN cells, the farthest first,
+    each starting at its cell in that frame, its look read there. A point
+    covers its place in the image if it is believed seen there (as training's
     spawning counts the points seen) and sits on the surface its own pixel
     shows (at the depth there): a hidden point's guess, wherever it lands,
     covers nothing. `tracks` is a first pass over `b`'s own points; a point added
@@ -85,7 +87,8 @@ def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Ten
         return uv[on] * uv.new_tensor([W, H])
 
     seen = torch.nonzero(whole)[:, 0].tolist()
-    born = [(t0, c, *at(t0, c)) for t0, c in fill_frames(seen[:1] if first else seen[1:], cap, gap * W,
+    born = [(t0, c, *at(t0, c)) for t0, c in fill_frames(seen[:1] if first else seen,
+                                                         *first_frame_share(points, reserve, N), gap * W,
                                                          candidates, covering)]
     if not born:
         return b

@@ -47,8 +47,15 @@ class Run:
         """The gap the run's points were spawned with (a run from before spawning: the default)."""
         return vars(self.settings).get("spawn_gap", SPAWN_GAP)
 
+    @property
+    def spawn_share(self) -> float:
+        """The share of a clip's points the run kept for new surface (--spawn of --points; before spawning, 0)."""
+        s = vars(self.settings)
+        return s.get("spawn", 0) / s["points"]
+
     def judging(self, device: torch.device, cutoff: int = 0, **kw) -> ScoreSettings:
-        """Scoring with the run's own refinement and spawning gap, from `cutoff` (0: every frame has its image)."""
+        """Scoring with the run's own refinement and spawning, from `cutoff` (0: every frame has its image)."""
         s = self.settings
         return ScoreSettings(device=device, amp=device.type == "cuda", window=s.window, overlap=s.overlap, schedule=s.schedule,
-                             cutoff=cutoff, spawn_gap=self.spawn_gap, **kw)
+                             cutoff=cutoff, spawn_gap=self.spawn_gap,
+                             spawn_share=self.spawn_share, **kw)

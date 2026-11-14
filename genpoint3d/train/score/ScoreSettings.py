@@ -21,3 +21,4 @@ class ScoreSettings:
     cutoff: int = 0               # frames from here on get no image; 0 = none
     fill: int = 0                 # points a clip is filled up to where surface has none; 0 = none added
     spawn_gap: float = SPAWN_GAP  # a gap that wide (a share of the frame's width) gets a point: the run's
+    spawn_share: float = 0.5      # the share of `fill` kept for new surface after the first frame: the run's

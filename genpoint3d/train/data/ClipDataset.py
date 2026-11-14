@@ -14,7 +14,7 @@ from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH
                                          TRAJ_SCALE_DISP)
 from genpoint3d.train.tools.batch import _cell_xyz, random_view, whole_frames
 from genpoint3d.train.tools.camera import image_projection
-from genpoint3d.train.tools.farthest_first import SPAWN_GAP, fill_frames
+from genpoint3d.train.tools.farthest_first import SPAWN_GAP, fill_frames, first_frame_share
 from genpoint3d.train.tools.frame_spread import frame_spread
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
@@ -203,12 +203,14 @@ def _query_frames(clip: CachedClip) -> torch.Tensor:
 def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float, whole: torch.Tensor,
              order: torch.Tensor) -> tuple[CachedClip, torch.Tensor]:
     """The clip with `num_points - cap` of its points asked, the first in
-    `order` whose own query frame is seen whole (`whole` (T,)), and the rest
-    up to `num_points` added by the spawning rule (`fill_frames`), as a
-    tracker on real video adds them: in each frame seen whole, a point of the
-    clip seen there, farther than `gap` (a share of the frame's width) from
-    every point already there and seen, starts in that frame, the farthest
-    first, its track's place there its query. The clip's own tracks stand in
+    `order` whose own query frame is seen whole (`whole` (T,)), and more
+    added by the spawning rule (`fill_frames`), as a tracker on real video
+    adds them: the first frame seen whole filled up to `num_points - cap`
+    points (already full with the asked ones, as the reserve is `cap`), then
+    in each later frame seen whole, a point of the clip seen there, farther
+    than `gap` (a share of the frame's width) from every point there and
+    seen, starts in that frame, the farthest first, up to `num_points`, its
+    track's place there its query. The clip's own tracks stand in
     for the new points, so their truth is known. Also (N,) which points are
     asked: the others are helpers, trained on but never scored."""
     T, N = clip.visibility.shape
@@ -238,8 +240,8 @@ def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float, whole: tor
         on[[k for t0, k in born if t0 <= t and vis[t, k]]] = True
         return uv[t, on]
 
-    born = fill_frames(torch.nonzero(whole)[:, 0].tolist(), num_points - len(asked), gap * clip.hw[1],
-                       candidates, covering)
+    born = fill_frames(torch.nonzero(whole)[:, 0].tolist(), *first_frame_share(num_points, cap, len(asked)),
+                       gap * clip.hw[1], candidates, covering)
     keep, _ = torch.sort(torch.cat([asked, torch.tensor([k for _, k in born], dtype=torch.long)]))
     is_asked = torch.zeros(N, dtype=torch.bool)
     is_asked[asked] = True

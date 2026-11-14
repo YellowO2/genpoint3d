@@ -40,7 +40,7 @@ class Predictor:
         loss, out = self._track(b, fine, vm)
         if j.fill:
             # Again with points added where none covers the frame, as helpers.
-            b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
+            b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap, j.spawn_share,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, {**fine, "query_t": bb["query_t"]}, vm)[1]))
             _, out = self._track(b, {**fine, "query_t": b["query_t"]}, vm)
         b, out = _asked_only(b, out)
