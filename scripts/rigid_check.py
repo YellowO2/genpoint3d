@@ -19,7 +19,9 @@ how far a point is from the centre of its piece's seen points.
 
 With `--fill`, points are first added on new surface as at test time; they
 are mates but not scored and have no truth. `--spawn` draws the clip's
-own tracks as training does instead, so every point has its truth.
+own tracks as training does instead, so every point has its truth. With
+`--cutoff C`, frames from C on have no image (a forecast) and are scored on
+their own: there every pose is carried on from the fitted frames.
 
 Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --frames-cache FRAMES
 """
@@ -50,6 +52,7 @@ def main() -> int:
     p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
     p.add_argument("--robust", type=int, default=None, help="the pose's refits (default: the run's)")
     p.add_argument("--fresh", type=float, default=None, help="the pose's freshness weighting, degrees (default: the run's)")
+    p.add_argument("--cutoff", type=int, default=0, help="frames from this one on without their image: a forecast (0: none)")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -74,7 +77,8 @@ def main() -> int:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
         T = b["traj"].shape[1]
-        fine, view = fine_inputs(model, b, amp), visual_mask(b, None)
+        cut = torch.full((vis.shape[0],), args.cutoff, device=device) if args.cutoff else None
+        fine, view = fine_inputs(model, b, amp), visual_mask(b, cut)
 
         def track(bb):
             cond = dict(context=bb["context"], visual_mask=view, id_card=bb["id_card"], patch_xyz=bb["patch_xyz"],
@@ -95,8 +99,9 @@ def main() -> int:
         pos = model.lookup_pos(guess, anchor)
         belief, member = sweeps.belief(), sweeps.seen & sweeps.known
         to_guess = lambda places: (places - anchor[:, None]) / model.traj_scale
+        tips, fall = sweeps.tips(guess), sweeps.fall()
         place = lambda at, groups=sweeps.groups, seen=belief: to_guess(object_places(at, eq, groups, member, seen,
-                                                                                     robust, fresh)[0])
+                                                                                     robust, fresh, tips, fall)[0])
         fits = {"guess": guess, "object": place(pos)}
         # The clip's own points at their true depth (their predicted place in the image kept), at
         # their true place in the image (their predicted depth kept), and both; and the seen points'
@@ -133,7 +138,8 @@ def main() -> int:
                                               per_clip=True)["average_pts_within_thresh"].cpu()
         for name, pts in fits.items():
             m = to_metres(pts, b)
-            for kind, mask in (("hidden", ~vis), ("seen", vis)):
+            ahead = (torch.arange(T, device=device) >= args.cutoff)[None, :, None] if args.cutoff else torch.zeros_like(vis)
+            for kind, mask in (("hidden", ~vis & ~ahead), ("seen", vis & ~ahead), ("forecast", ahead)):
                 for which, sel in (("all", mask), ("moving", mask & moving)):
                     rows.setdefault((kind, which, name), []).append(apd(m, sel))
             for label, lo, hi in bins:
@@ -164,7 +170,7 @@ def main() -> int:
 
     print("\nAPD (no rescale), the model's own guess and where the object's pose puts each point:")
     print(f"  {'point-frames':<16}" + "".join(f"{n:>14}" for n in names))
-    for kind in ("hidden", "seen"):
+    for kind in ("hidden", "seen") + (("forecast",) if args.cutoff else ()):
         for which in ("all", "moving"):
             print(f"  {kind + ' ' + which:<16}" + "".join(f"{clip_mean(rows[kind, which, n]):>14.4f}" for n in names))
     total = max(sum(counts.values()), 1)

@@ -25,8 +25,9 @@ from typing import Callable, Optional
 import torch
 from torch import nn
 
+from genpoint3d.tools.traj_scale import GRAVITY_REF
 from genpoint3d.train.tools.batch import whole_frames
-from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, robust_kabsch
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, robust_kabsch, turn_matrix, turn_vector
 from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.visibility import visibility_error
 
@@ -147,9 +148,56 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
     return weight, which
 
 
+def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: torch.Tensor,
+             fall: Optional[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Each object's pose in every frame, (B, T, K, 3, 3) and (B, T, K, 3), and
+    (B, T, K) whether it has one: as fitted where it is fitted (`good`), and
+    carried on elsewhere, from the nearest fitted frame before (after, for
+    frames before the first) as a thrown body moves: its centre of mass
+    (`centre` (B, K, 3), in the shape) keeps its speed, and gains `fall` (B,
+    3, gravity per frame squared, where the fitted frames show the object
+    falling free), and it keeps turning about its centre at its spin. Speed
+    and spin come from that frame and the fitted one next to it; with no
+    other, the pose holds. A pose places shape point s at R s + shift."""
+    B, T, K = good.shape
+    dev = R.device
+    t = torch.arange(T, device=dev)[None, :, None]
+    last = torch.where(good, t, -1).cummax(1).values                                 # (B, T, K) last fitted, -1 none
+    nxt = torch.where(good, t, T).flip(1).cummin(1).values.flip(1)                     # next fitted, T none
+    has = (last >= 0) | (nxt < T)
+    ref = torch.where(last >= 0, last, nxt).clamp(0, T - 1)
+    before = torch.cat([torch.full_like(last[:, :1], -1), last[:, :-1]], 1)           # last fitted strictly before
+    after = torch.cat([nxt[:, 1:], torch.full_like(nxt[:, :1], T)], 1)                # next fitted strictly after
+    at = lambda x, i: x.gather(1, i.clamp(0, T - 1).reshape(B, T, K, *([1] * (x.dim() - 3))).expand_as(x))
+    forward = last >= 0
+    partner = torch.where(forward, at(before, ref), at(after, ref))
+    third = torch.where(forward, at(before, partner), at(after, partner))
+    two, three = (partner >= 0) & (partner < T), (partner >= 0) & (partner < T) & (third >= 0) & (third < T)
+    C = (R @ centre[:, None, :, :, None])[..., 0] + shift                             # (B, T, K, 3) the centre
+    Cr, Cp, C3, Rr = at(C, ref), at(C, partner), at(C, third), at(R, ref)
+    tr, tp, t3 = ref.float(), partner.float(), third.float()
+    dt = torch.where(two, tr - tp, torch.ones_like(tr))[..., None]
+    spin = turn_vector(Rr @ at(R, partner).transpose(-1, -2)) / dt                   # per frame, forward in time
+    acc = torch.zeros_like(C)
+    if fall is not None:
+        # Falling free where the three fitted frames' second divided difference along down is
+        # nearer gravity than nothing: an object at rest or rolling on the floor gets none.
+        g = fall[:, None, None].expand_as(C)
+        gap = lambda a, b: torch.where(three, a - b, torch.ones_like(a))[..., None]
+        second = 2 * ((C3 - Cp) / gap(t3, tp) - (Cp - Cr) / gap(tp, tr)) / gap(t3, tr)
+        free = three & ((second * g).sum(-1) > 0.5 * (g * g).sum(-1))
+        acc = torch.where(free[..., None], g, acc)
+    speed = (Cr - Cp) / dt + acc * (tr - (tr + tp) / 2)[..., None]                   # at the frame carried from
+    speed, spin = speed * two[..., None], spin * two[..., None]
+    k = (t - ref).float()[..., None]
+    Rt = turn_matrix(spin * k) @ Rr
+    Ct = Cr + speed * k + 0.5 * acc * k * k
+    return Rt, Ct - (Rt @ centre[:, None, :, :, None])[..., 0], has
+
+
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
-                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0,
-                  passes: int = 12) -> tuple[torch.Tensor, torch.Tensor]:
+                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0, tips: Optional[torch.Tensor] = None,
+                  fall: Optional[torch.Tensor] = None, passes: int = 12) -> tuple[torch.Tensor, torch.Tensor]:
     """(B, T, N, 3) each point where its object's pose puts it, and (B, T, N)
     how many of its object's points are seen behind that pose, each counted
     by the belief it is seen (`seen`): 2 points surely seen and 2 half seen
@@ -172,13 +220,18 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
     last pass's poses, a frame with too few points holding the one before): a
     tracked point drifts as it turns from the look it was given by (on the
     ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). A frame where under
-    MIN_POSE_POINTS seen points back the pose, a point not yet given, or one
-    in no object keeps its own guess. The turn and the shape carry no gradient
-    (an SVD's is unstable where points lie nearly in a line); the group
-    vectors reach the places through the weights' centres.
+    MIN_POSE_POINTS seen points back the pose has its pose carried on from the
+    fitted frames (`_carried`): not yet tracked, hidden or in the future, it is
+    one situation. The object's centre of mass is where its points' arrows
+    point (`tips` (B, T, N, 3), each point's guess plus its arrow, in the
+    fitted frames), or without them the middle of its shape. A point in no
+    object keeps its own guess. The turn and the shape carry no gradient (an
+    SVD's is unstable where points lie nearly in a line); the group vectors
+    reach the places through the weights' centres.
 
     pos (B, T, N, 3) every guess; q (B, N) query frames; groups (B, N, E) the
-    group vectors, member (B, N) the points that count."""
+    group vectors, member (B, N) the points that count; fall (B, 3) gravity
+    per frame squared in pos's unit, None for none."""
     B, T, N, _ = pos.shape
     dev = pos.device
     with torch.autocast(device_type=dev.type, enabled=False):
@@ -190,7 +243,6 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
         per_point = lambda x: x.gather(2, mine.reshape(B, 1, N, *([1] * (x.dim() - 3))).expand(B, T, N, *x.shape[3:]))
         qc = q.clamp(max=T - 1)                                                            # a point asked after T: never given
         at_query = lambda x: x[b, qc, n]                                                   # (B, T, N, ...) -> (B, N, ...)
-        given = (t[None, :, None] >= q[:, None]) & (which >= 0)[:, None]                  # (B, T, N)
         backs = (t[None, :, None] > q[:, None]) & (which >= 0)[:, None]
         first = torch.where(on, q[:, None], T).min(-1).values                             # (B, K) each object's first frame
         start = (which >= 0) & (q == first.gather(1, mine)) & (q < T)                      # its first points
@@ -201,11 +253,12 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
             if fresh and turn is not None:
                 cos = (((turn * at_query(turn)[:, None]).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
                 w = w / (1 + torch.rad2deg(torch.acos(cos)) / fresh).pow(2)
-            R, ms, md, _ = robust_kabsch(weight[:, None] * w[:, :, None], shape[:, None, None], pos[:, :, None], robust)
+            Rk, msk, mdk, _ = robust_kabsch(weight[:, None] * w[:, :, None], shape[:, None, None], pos[:, :, None], robust)
+            Rk = Rk.detach()
             # (B, T, K) the object's joined points seen in each frame, each by its belief, not by its likeness.
             count = (on[:, None] & (backs & joined[:, None])[:, :, None]).float().mul(seen[:, :, None]).sum(-1)
             ok = count >= MIN_POSE_POINTS
-            R, ms, md, ok_n = per_point(R.detach()), per_point(ms), per_point(md), per_point(ok)  # (B, T, N, ...)
+            R, ms, md, ok_n = per_point(Rk), per_point(msk), per_point(mdk), per_point(ok)  # (B, T, N, ...)
             # Each frame's last frame with a pose, for the turn: a frame with too few points holds it.
             last = torch.where(ok_n, t[None, :, None], -1).cummax(1).values.clamp_min(0)
             turn = R.gather(1, last[..., None, None].expand_as(R))
@@ -216,20 +269,34 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
             shape, joined = placed, joined | joins
             if not grew and moved < 1e-4:
                 break
-        placed = given & joined[:, None] & ok_n
-        out = torch.where(placed[..., None], (R @ (shape[:, None] - ms)[..., None])[..., 0] + md, pos)
+        shift = mdk - (Rk @ msk[..., None])[..., 0]                                        # (B, T, K, 3)
+        body = weight * joined[:, None]                                                     # (B, K, N)
+        centre = torch.einsum("bkn,bnc->bkc", body, shape) / body.sum(-1, keepdim=True).clamp_min(1e-6)
+        if tips is not None:
+            # Each tip in the shape, through its frame's pose, where the frame is fitted and the point seen.
+            inside = (R.transpose(-1, -2) @ (tips.float() - per_point(shift))[..., None])[..., 0]   # (B, T, N, 3)
+            w = body[:, None] * (seen * ok_n)[:, :, None]                                   # (B, T, K, N)
+            total = w.sum((1, 3))[..., None]
+            said = torch.einsum("btkn,btnc->bkc", w, inside) / total.clamp_min(1e-6)
+            centre = torch.where(total > 0, said, centre)
+        Rc, shiftc, has = _carried(Rk, shift, ok, centre, fall)
+        placed = joined[:, None] & per_point(has)
+        out = torch.where(placed[..., None], (per_point(Rc) @ shape[:, None, :, :, None])[..., 0] + per_point(shiftc), pos)
         return out, per_point(count) * placed
 
 
 def object_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
-                    seen: torch.Tensor, start: int, end: int, robust: int = 0, fresh: float = 0.0) -> torch.Tensor:
+                    seen: torch.Tensor, start: int, end: int, robust: int = 0, fresh: float = 0.0,
+                    tips: Optional[torch.Tensor] = None, fall: Optional[torch.Tensor] = None) -> torch.Tensor:
     """(B, L, N, 4) for frames `start` to `end`: where its object's pose puts
     each point (`object_places`, fitted only up to `end`: later frames hold
     guesses no round has looked at, and no earlier pose or place uses them), as an
-    offset from its guess there (0 with nothing behind it), and how much backs
-    it, s / (s + 1) for s seen points of its object."""
-    places, support = object_places(pos[:, :end], q, groups, member, seen[:, :end], robust, fresh)
-    off = (places - pos[:, :end].float())[:, start:] * (support[:, start:, :, None] > 0)
+    offset from its guess there (0 for a point in no object), and how much backs
+    it, s / (s + 1) for s seen points of its object (under MIN_POSE_POINTS: the
+    pose carried on)."""
+    places, support = object_places(pos[:, :end], q, groups, member, seen[:, :end], robust, fresh,
+                                    None if tips is None else tips[:, :end], fall)
+    off = (places - pos[:, :end].float())[:, start:]
     s = support[:, start:, :, None]
     return torch.cat([off, s / (s + 1)], -1)
 
@@ -297,8 +364,29 @@ class Sweeps:
         """(B, T, N) how sure the model is that each point is seen in each
         frame, what the rigid fit counts: its visibility head's last word, 0
         where no round with the point in has looked yet (a guess carried on is
-        no sighting)."""
-        return torch.sigmoid(self.vis) * self.looked
+        no sighting) and in a frame without its image (a forecast frame: the
+        head says whether the point will be in view, not that it was seen)."""
+        view = self.cond.get("visual_mask")
+        shown = 1.0 if view is None else view.flatten(-2).any(-1)[..., None]               # (B, T, 1)
+        return torch.sigmoid(self.vis) * self.looked * shown
+
+    def fall(self) -> torch.Tensor:
+        """(B, 3) gravity per frame squared in the clip's unit, along which way
+        is down as told or last said (none before either)."""
+        return self.cond["gravity"].float()[:, None] * GRAVITY_REF * self.down
+
+    def tips(self, guess: torch.Tensor) -> Optional[torch.Tensor]:
+        """(B, T, N, 3) where each point's last arrow points from `guess`, as a
+        position (None without the head)."""
+        return None if self.arrow is None else self.model.lookup_pos(guess + self.arrow, self.anchor)
+
+    def proposal(self, guess: torch.Tensor, groups: torch.Tensor, start: int, end: int) -> torch.Tensor:
+        """`object_proposal` for frames `start` to `end` from the clip's guess
+        `guess` (B, T, N, 3) and the group vectors `groups`."""
+        m = self.model
+        return object_proposal(m.lookup_pos(guess, self.anchor), self.cond["query_t"], groups, self.seen & self.known,
+                               self.belief(), start, end, robust=m.fit_robust, fresh=m.fit_fresh,
+                               tips=self.tips(guess), fall=self.fall())
 
     def __iter__(self):
         model, anchor = self.model, self.anchor
@@ -318,9 +406,7 @@ class Sweeps:
                     rigid = None
                     if model.rigid_proposal and self.groups is not None:
                         with torch.no_grad():
-                            rigid = object_proposal(model.lookup_pos(self.whole, anchor), self.cond["query_t"], self.groups,
-                                                    self.seen & self.known, self.belief(), start, end,
-                                                    robust=model.fit_robust, fresh=model.fit_fresh)
+                            rigid = self.proposal(self.whole, self.groups, start, end)
                     step, logits, emb, down, arrow = model(
                         g.detach(), _clock(i, self.R, B, dev), anchor, alive=alive, vis_prev=vis,
                         group_prev=self.groups, group_known=self.known, frames=frames, x_before=before,
@@ -464,9 +550,8 @@ def regress_loss(
         if group_weight:
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, *groups(r.start, r.end), r.alive)
         if fit_weight and r.groups is not None:
-            clip = model.lookup_pos(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), anchor)
-            fit = object_proposal(clip, cond["query_t"], r.groups, run.seen & run.known,
-                                  run.belief(), r.start, r.end, robust=model.fit_robust, fresh=model.fit_fresh)
+            fit = run.proposal(torch.cat([run.whole[:, :r.start], g.detach(), run.whole[:, r.end:]], 1), r.groups,
+                               r.start, r.end)
             placed = g.detach() + fit[..., :3] / model.traj_scale
             loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if centre_weight:

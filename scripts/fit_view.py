@@ -58,7 +58,8 @@ def main() -> int:
     guess = sweeps.whole.float()
     pos = model.lookup_pos(guess, anchor)
     belief, member = sweeps.belief(), sweeps.seen & sweeps.known
-    fit = (object_places(pos, eq, sweeps.groups, member, belief, model.fit_robust, model.fit_fresh)[0]
+    fit = (object_places(pos, eq, sweeps.groups, member, belief, model.fit_robust, model.fit_fresh,
+                         sweeps.tips(guess), sweeps.fall())[0]
            - anchor[:, None]) / model.traj_scale
     metres = lambda x: to_metres(x, every)[0]
     # Each point's mates as the object's pose weighs them: likeness over a half, seen in the frame.

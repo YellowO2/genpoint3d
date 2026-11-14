@@ -1,4 +1,4 @@
-"""The weighted Kabsch fit, and its robust refit.
+"""The weighted Kabsch fit, its refit, and turns as vectors.
 
 The fit is the turn and shift that best carry one set of points onto another."""
 
@@ -23,6 +23,30 @@ def kabsch(w: torch.Tensor, src: torch.Tensor, dst: torch.Tensor) -> tuple:
     flip = torch.ones_like(H[..., 0])
     flip[..., 2] = torch.linalg.det(V @ Ut).sign()
     return V @ torch.diag_embed(flip) @ Ut, ms, md, s
+
+
+def turn_vector(R: torch.Tensor) -> torch.Tensor:
+    """(..., 3) the turn R (..., 3, 3) as its axis times its angle (radians),
+    for a turn under half a revolution."""
+    cos = ((R.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1)
+    angle = torch.acos(cos)
+    axis2 = torch.stack([R[..., 2, 1] - R[..., 1, 2], R[..., 0, 2] - R[..., 2, 0], R[..., 1, 0] - R[..., 0, 1]], -1)
+    # axis2 is the axis times 2 sin(angle); angle / (2 sin(angle)) goes to 1/2 at no turn.
+    scale = torch.where(angle > 1e-4, angle / (2 * torch.sin(angle)).clamp_min(1e-8), torch.full_like(angle, 0.5))
+    return axis2 * scale[..., None]
+
+
+def turn_matrix(v: torch.Tensor) -> torch.Tensor:
+    """(..., 3, 3) the turn about the axis of `v` (..., 3) by its length
+    (radians): Rodrigues' formula, `turn_vector`'s inverse."""
+    angle = v.norm(dim=-1, keepdim=True)
+    k = v / angle.clamp_min(1e-12)
+    x, y, z = k.unbind(-1)
+    zero = torch.zeros_like(x)
+    K = torch.stack([zero, -z, y, z, zero, -x, -y, x, zero], -1).view(*v.shape[:-1], 3, 3)
+    s, c = torch.sin(angle)[..., None], torch.cos(angle)[..., None]
+    eye = torch.eye(3, dtype=v.dtype, device=v.device).expand_as(K)
+    return eye + s * K + (1 - c) * (K @ K)
 
 
 def misfit(R: torch.Tensor, ms: torch.Tensor, md: torch.Tensor, src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
