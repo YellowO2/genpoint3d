@@ -26,6 +26,7 @@ import torch
 from torch import nn
 
 from genpoint3d.train.tools.kabsch import robust_kabsch
+from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.visibility import visibility_error
 
 
@@ -123,14 +124,15 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
     the group vectors' gradient goes through it), and (B, N) each point's
     object, -1 for none."""
     B, N, _ = groups.shape
-    a = 2 * torch.sigmoid(-_sq_dist(groups.float())) * (member[:, :, None] & member[:, None, :])
+    g = groups.float()
+    a = likeness(g[:, :, None], g[:, None]) * (member[:, :, None] & member[:, None, :])
     which = torch.full((B, N), -1, dtype=torch.long, device=groups.device)
     rows = [[] for _ in range(B)]
     for b in range(B):
         free = member[b].clone()
         while free.any():
             seed = int(torch.nonzero(free)[0])
-            take = free & (a[b, seed] > 0.5)
+            take = free & (a[b, seed] > SAME)
             take[seed] = True                                           # always: the loop must end
             free &= ~take
             # Under 3 points cannot hold a pose: those keep their own guesses and take no room.
@@ -214,11 +216,6 @@ def object_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, me
     off = (places - pos[:, :end].float())[:, start:] * (support[:, start:, :, None] > 0)
     s = support[:, start:, :, None]
     return torch.cat([off, s / (s + 1)], -1)
-
-
-def _sq_dist(v: torch.Tensor) -> torch.Tensor:
-    """(B, N, E) -> (B, N, N) squared distances."""
-    return (v[:, :, None] - v[:, None]).pow(2).sum(-1)
 
 
 def _schedule(schedule: str) -> list[tuple[str, int]]:
@@ -357,13 +354,13 @@ def _angle(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def _group_error(emb: torch.Tensor, idx: torch.Tensor, same: torch.Tensor, alive: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy of the affinity 2 sigmoid(-|v_i - v_j|^2) against whether
+    """Cross-entropy of the group vectors' `likeness` against whether
     each point and its listed partners `idx` (B, N, m) truly move as one
     (`same`), the two kinds averaged apart."""
     v = emb.float()
     B, N, m = idx.shape
     vj = v.gather(1, idx.reshape(B, N * m, 1).expand(B, N * m, v.shape[-1])).view(B, N, m, -1)
-    a = (2 * torch.sigmoid(-(v[:, :, None] - vj).pow(2).sum(-1))).clamp(1e-4, 1 - 1e-4)
+    a = likeness(v[:, :, None], vj).clamp(1e-4, 1 - 1e-4)
     off = alive[:, :, None] & alive.gather(1, idx.flatten(1)).view(B, N, m)
     pos, neg = same & off, ~same & off
     p = -(a.log() * pos).sum() / pos.sum().clamp_min(1)

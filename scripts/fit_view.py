@@ -17,7 +17,8 @@ from torch.utils.data import DataLoader, Subset
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
-from genpoint3d.train.tools.regress import Sweeps, _sq_dist, object_places
+from genpoint3d.train.tools.likeness import SAME, likeness
+from genpoint3d.train.tools.regress import Sweeps, object_places
 
 
 @torch.no_grad()
@@ -61,8 +62,9 @@ def main() -> int:
            - anchor[:, None]) / model.traj_scale
     metres = lambda x: to_metres(x, every)[0]
     # Each point's mates as the object's pose weighs them: likeness over a half, seen in the frame.
-    a = 2 * torch.sigmoid(-_sq_dist(sweeps.groups.float())) * (member[:, :, None] & member[:, None, :])
-    a = a * (a > 0.5)
+    g = sweeps.groups.float()
+    a = likeness(g[:, :, None], g[:, None]) * (member[:, :, None] & member[:, None, :])
+    a = a * (a > SAME)
     w = a[:, None] * belief[:, :, None, :]                                                     # (1, T, M, M)
     vis = b["visibility"][0].bool()
     true = to_metres(b["traj"].float(), b)[0]

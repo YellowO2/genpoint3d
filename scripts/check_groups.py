@@ -1,7 +1,7 @@
 """How well a --group-feedback run's groups match the truth, by
 how far points move.
 
-For every pair of points, the run's affinity 2 sigmoid(-|v_i - v_j|^2) (above
+For every pair of points, the run's group `likeness` (above
 0.5 counts as "same piece") against the truth at two tolerances: the pairs the
 training labels call rigid (distance never off by more than 2 cm) and those
 that are rigid to 5 mm. For each point, of the points the run puts with it,
@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.metrics import _to_camera_t, motion_px
 from genpoint3d.train.tools.regress import Sweeps
 
@@ -53,8 +54,7 @@ with torch.no_grad():
         for _ in sweeps:
             pass
         emb = sweeps.groups.float()  # each point's last
-        a = 2 * torch.sigmoid(-(emb[:, :, None] - emb[:, None]).pow(2).sum(-1))
-        same = a > 0.5
+        same = likeness(emb[:, :, None], emb[:, None]) > SAME
         gt = to_metres(b["traj"].float(), b)
         d = (gt[:, :, :, None] - gt[:, :, None]).norm(dim=-1)
         drift = (d - d[:, :1]).abs().amax(dim=1)

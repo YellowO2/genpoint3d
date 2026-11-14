@@ -20,6 +20,7 @@ from genpoint3d.train.model.tools.layers import (
     Block, CrossBlock, FourierEmbedding, RMSNorm, RoPE, zero_init,
 )
 from genpoint3d.train.tools.camera import project
+from genpoint3d.train.tools.likeness import likeness
 
 
 class PointDiT(nn.Module):
@@ -356,7 +357,7 @@ def _point_bias(v, known, live, scale, dtype) -> torch.Tensor:
     gone = ((~live).to(dtype) * -1e4)[:, None, None, :]                        # (R, 1, 1, N)
     if v is None:
         return gone
-    a = 2 * torch.sigmoid(-_sq_dist(v)) * (known[:, :, None] & known[:, None, :])
+    a = likeness(v[:, :, None], v[:, None]) * (known[:, :, None] & known[:, None, :])
     return (a[:, None] * scale[None, :, None, None]).to(dtype) + gone
 
 
@@ -406,9 +407,3 @@ def _in_patches(block, x, cond, theta, pos, v, known, live, scale, size: int, de
 def _cells(view: torch.Tensor, h: int, w: int) -> torch.Tensor:
     """(B, T, 2, 2) seen quarters -> (B, T, h, w) seen cells (h, w even)."""
     return view.repeat_interleave(h // 2, 2).repeat_interleave(w // 2, 3)
-
-
-def _sq_dist(v: torch.Tensor) -> torch.Tensor:
-    """(B, N, E) -> (B, N, N) squared distances, written out: cdist's square
-    root has no gradient where two vectors meet."""
-    return (v[:, :, None] - v[:, None]).pow(2).sum(-1)
