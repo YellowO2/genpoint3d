@@ -1,6 +1,6 @@
 #!/bin/bash
 # The tests every new checkpoint gets, in one job:
-#   standard   100 val clips of the old Kubric, 256 points, every frame seen (training's own
+#   standard   100 val clips of the old Kubric, 256 points asked, filled to 1,000, every frame seen (training's own
 #              validation covers forecasting from 12)
 #   fall test  our Kubric's val clips, forecast from 3: thrown objects fall, bounce and tumble
 #   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5
@@ -29,11 +29,11 @@ quiet() { grep -v "Warn\|warn" || true; }
 echo "########## $CKPT"
 echo "--- standard, every frame seen"
 python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 \
-  --points 256 --batch 1 --out $OUT/standard_c0.json 2>&1 | quiet \
+  --points 256 --fill 1000 --batch 1 --out $OUT/standard_c0.json 2>&1 | quiet \
   | grep -E "average_pts_within|apd_static|apd_moving |apd_hidden |apd_moving_hidden |average_jaccard|occlusion"
 echo "--- fall test, forecast from 3"
 python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fall_test/val --frames-cache $ROOT/cache/kubric_movi48_frames384 \
-  --points 500 --batch 1 --eval-cutoff 3 --out $OUT/fall_test.json 2>&1 | quiet \
+  --points 500 --fill 1000 --batch 1 --eval-cutoff 3 --out $OUT/fall_test.json 2>&1 | quiet \
   | grep -E "apd_moving_obs |apd_moving_fut |apd_moving_stop_fut |apd_moving_cv_fut |apd_fut "
 echo "--- drop test, images up to frame 4"
 python scripts/drop_curve.py --ckpt $CKPT --cache $ROOT/drop_kubric/cache --frames-cache $ROOT/drop_kubric/frames \
