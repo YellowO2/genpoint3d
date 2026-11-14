@@ -153,55 +153,75 @@ def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: t
              radius: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Each object's pose in every frame, (B, T, K, 3, 3) and (B, T, K, 3), and
     (B, T, K) whether it has one: as fitted where it is fitted (`good`), and
-    carried on elsewhere, from the nearest fitted frame before (after, for
-    frames before the first) as a thrown body moves: its centre of mass
-    (`centre` (B, K, 3), in the shape) keeps its speed, and gains `fall` (B,
-    3, gravity per frame squared, where the fitted frames show the object
-    falling free), and it keeps turning about its centre at its spin. Speed
-    and spin come from that frame and the fitted one next to it; with no
-    other, the pose holds. A move the two poses cannot tell from their own
-    noise (`noise` (B, T, K), each pose's uncertainty: how far the fit's points
-    sit from where it puts them, over the root of how many back it; a turn
-    counted at `radius` (B, K), the shape's size) is no move: a still object would otherwise drift on at its noise's speed
-    (on the fall test, its still points' forecast 0.88 against holding's
+    carried on elsewhere as a thrown body moves: its centre of mass (`centre`
+    (B, K, 3), in the shape) keeps its speed, and gains `fall` (B, 3, gravity
+    per frame squared, where the fitted frames show the object falling free),
+    and it keeps turning about its centre at its spin. A frame after the last
+    fitted one (a forecast, or an object gone for good) is carried forward
+    from it, one before the first backward; a frame in a gap, with fitted
+    frames on both sides, is carried from the one before up to the frame where
+    the two sides' paths come nearest, and from the one after from then on:
+    each side's path is right up to whatever the object met while unseen, and
+    where it comes back is known. Speed and spin come from the frame carried from and the fitted one
+    next to it away from the gap; with no other, the pose holds. A move the
+    two poses cannot tell from their own noise (`noise` (B, T, K), each pose's
+    uncertainty: how far the fit's points sit from where it puts them, over the
+    root of how many back it; a turn counted at `radius` (B, K), the shape's
+    size) is no move: a still object would otherwise drift on at its noise's
+    speed (on the fall test, its still points' forecast 0.88 against holding's
     0.95). A pose places shape point s at R s + shift."""
     B, T, K = good.shape
-    dev = R.device
-    t = torch.arange(T, device=dev)[None, :, None]
+    t = torch.arange(T, device=R.device)[None, :, None]
     last = torch.where(good, t, -1).cummax(1).values                                 # (B, T, K) last fitted, -1 none
     nxt = torch.where(good, t, T).flip(1).cummin(1).values.flip(1)                     # next fitted, T none
-    has = (last >= 0) | (nxt < T)
-    ref = torch.where(last >= 0, last, nxt).clamp(0, T - 1)
     before = torch.cat([torch.full_like(last[:, :1], -1), last[:, :-1]], 1)           # last fitted strictly before
     after = torch.cat([nxt[:, 1:], torch.full_like(nxt[:, :1], T)], 1)                # next fitted strictly after
     at = lambda x, i: x.gather(1, i.clamp(0, T - 1).reshape(B, T, K, *([1] * (x.dim() - 3))).expand_as(x))
-    forward = last >= 0
-    partner = torch.where(forward, at(before, ref), at(after, ref))
-    third = torch.where(forward, at(before, partner), at(after, partner))
-    two, three = (partner >= 0) & (partner < T), (partner >= 0) & (partner < T) & (third >= 0) & (third < T)
     C = (R @ centre[:, None, :, :, None])[..., 0] + shift                             # (B, T, K, 3) the centre
-    Cr, Cp, C3, Rr = at(C, ref), at(C, partner), at(C, third), at(R, ref)
-    tr, tp, t3 = ref.float(), partner.float(), third.float()
-    dt = torch.where(two, tr - tp, torch.ones_like(tr))[..., None]
-    spin = turn_vector(Rr @ at(R, partner).transpose(-1, -2)) / dt                   # per frame, forward in time
-    acc = torch.zeros_like(C)
-    if fall is not None:
-        # Falling free where the three fitted frames' second divided difference along down is
-        # nearer gravity than nothing: an object at rest or rolling on the floor gets none.
-        g = fall[:, None, None].expand_as(C)
-        gap = lambda a, b: torch.where(three, a - b, torch.ones_like(a))[..., None]
-        second = 2 * ((C3 - Cp) / gap(t3, tp) - (Cp - Cr) / gap(tp, tr)) / gap(t3, tr)
-        free = three & ((second * g).sum(-1) > 0.5 * (g * g).sum(-1))
-        acc = torch.where(free[..., None], g, acc)
-    speed = (Cr - Cp) / dt + acc * (tr - (tr + tp) / 2)[..., None]                   # at the frame carried from
-    bar = 2 * (at(noise, ref) + at(noise, partner))                                    # (B, T, K) about 3 sd of the move
-    moves = two & ((Cr - Cp).norm(dim=-1) > bar)
-    turns = two & ((spin * dt).norm(dim=-1) * radius[:, None] > bar)
-    speed, spin = speed * moves[..., None], spin * turns[..., None]
-    k = (t - ref).float()[..., None]
-    Rt = turn_matrix(spin * k) @ Rr
-    Ct = Cr + speed * k + 0.5 * acc * k * k
-    return Rt, Ct - (Rt @ centre[:, None, :, :, None])[..., 0], has
+
+    def from_side(ref: torch.Tensor, away: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The pose in every frame carried from its fitted frame `ref` (B, T, K), `away` (B, T,
+        K) giving each frame's fitted neighbour on the side away from the gap."""
+        partner = at(away, ref)
+        third = at(away, partner)
+        two = (partner >= 0) & (partner < T)
+        three = two & (third >= 0) & (third < T)
+        Cr, Cp, C3, Rr = at(C, ref), at(C, partner), at(C, third), at(R, ref)
+        tr, tp, t3 = ref.float(), partner.float(), third.float()
+        dt = torch.where(two, tr - tp, torch.ones_like(tr))[..., None]
+        spin = turn_vector(Rr @ at(R, partner).transpose(-1, -2)) / dt               # per frame, forward in time
+        acc = torch.zeros_like(C)
+        if fall is not None:
+            # Falling free where the three fitted frames' second divided difference along down is
+            # nearer gravity than nothing: an object at rest or rolling on the floor gets none.
+            g = fall[:, None, None].expand_as(C)
+            gap = lambda a, b: torch.where(three, a - b, torch.ones_like(a))[..., None]
+            second = 2 * ((C3 - Cp) / gap(t3, tp) - (Cp - Cr) / gap(tp, tr)) / gap(t3, tr)
+            free = three & ((second * g).sum(-1) > 0.5 * (g * g).sum(-1))
+            acc = torch.where(free[..., None], g, acc)
+        speed = (Cr - Cp) / dt + acc * (tr - (tr + tp) / 2)[..., None]               # at the frame carried from
+        bar = 2 * (at(noise, ref) + at(noise, partner))                              # (B, T, K) about 3 sd of the move
+        moves = two & ((Cr - Cp).norm(dim=-1) > bar)
+        turns = two & ((spin * dt).norm(dim=-1) * radius[:, None] > bar)
+        speed, spin = speed * moves[..., None], spin * turns[..., None]
+        k = (t - ref).float()[..., None]
+        return turn_matrix(spin * k) @ Rr, Cr + speed * k + 0.5 * acc * k * k
+
+    (Rf, Cf), (Rb, Cb) = from_side(last, before), from_side(nxt, after)
+    fwd, bwd = last >= 0, nxt < T
+    gap = fwd & bwd & ~good
+    # In a gap each side's path is right up to whatever the object met unseen: the path from
+    # before until the frame the two come nearest (where it met it; anywhere, if nothing), the
+    # path from after from then on.
+    apart = torch.where(gap, (Cf - Cb).norm(dim=-1), torch.full_like(Cf[..., 0], float("inf")))
+    start = last.clamp_min(0)
+    nearest = torch.full_like(apart, float("inf")).scatter_reduce(1, start, apart, "amin").gather(1, start)
+    met = torch.where(gap & (apart <= nearest), t, -1).cummax(1).values                # the last such frame so far
+    met = torch.cat([torch.full_like(met[:, :1], -1), met[:, :-1]], 1)                 # ... before this one
+    late = (gap & (met > last)) | ~fwd
+    Rt = torch.where(late[..., None, None], Rb, Rf)
+    Ct = torch.where(late[..., None], Cb, Cf)
+    return Rt, Ct - (Rt @ centre[:, None, :, :, None])[..., 0], fwd | bwd
 
 
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
