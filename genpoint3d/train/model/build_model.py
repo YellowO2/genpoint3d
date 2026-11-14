@@ -16,4 +16,5 @@ def build_model(settings, feat_dim: int) -> PointDiT:
                     fit_robust=a("fit_robust", 0),
                     fit_fresh=a("fit_fresh", 0.0),
                     patch=a("patch", 0),
-                    centre=a("centre_loss", 0.0) > 0)
+                    centre=a("centre_loss", 0.0) > 0,
+                    follow_fit=bool(a("follow_fit", 0)))

@@ -47,6 +47,7 @@ class PointDiT(nn.Module):
         fit_fresh: float = 0.0,
         patch: int = 0,
         centre: bool = False,
+        follow_fit: bool = False,
     ) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
@@ -126,6 +127,13 @@ class PointDiT(nn.Module):
         self.fit_robust, self.fit_fresh = fit_robust, fit_fresh
         if rigid_proposal:
             self.rigid_in = zero_init(nn.Linear(99 + 1, dim, bias=False), almost=False)
+        # How far to go along the fit's offset, a number per point and frame added to the
+        # correction: following the fit is saying 1, not reproducing the offset. Starts at 0.
+        if follow_fit and not rigid_proposal:
+            raise ValueError("follow_fit follows the rigid proposal: needs rigid_proposal")
+        self.follow_fit = follow_fit
+        if follow_fit:
+            self.follow = zero_init(nn.Linear(dim, 1, bias=False), almost=False)
         # Each frame, an arrow from the point's guess to its object's centre of mass,
         # in the guess's units: what the point knows of the whole object from its part.
         self.centre = centre
@@ -344,7 +352,11 @@ class PointDiT(nn.Module):
         pooled = (h.float().mean(1) * here[..., None]).sum(1) / here.sum(1, keepdim=True).clamp_min(1)
         down_said = F.normalize(self.down_out(pooled).float(), dim=-1)
         arrow = self.centre_out(h) if self.centre else None
-        return self.place(h), logits, groups, down_said, arrow
+        step = self.place(h)
+        if self.follow_fit and rigid is not None:
+            # The offset is a position's; the correction is in the guess's units.
+            step = step + self.follow(h) * (rigid[..., :3].float().clamp(-2, 2) / self.traj_scale).to(step.dtype)
+        return step, logits, groups, down_said, arrow
 
     def _fine_at_queries(self, fine_map, fine_xyz, clip_map, clip_proj, clip_xyz, uv, pos, anchor,
                          query_t, view, clip_view):

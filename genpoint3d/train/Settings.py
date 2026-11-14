@@ -86,6 +86,9 @@ class Settings(argparse.Namespace):
                        help="the object's pose counts a mate 1 / (1 + turn / DEG)^2 as much, its turn since given (0: alike)")
         p.add_argument("--rigid-proposal", type=int, default=1, choices=[0, 1],
                        help="each point told where moving with its piece would put it (needs --group-feedback)")
+        p.add_argument("--follow-fit", type=int, default=1, choices=[0, 1],
+                       help="each point also says how far to go along its fit's offset, added to its correction "
+                            "(needs --rigid-proposal)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
                        help="multiplies what the fed-back visibility and group vector add")
         # Refinement
@@ -138,6 +141,8 @@ class Settings(argparse.Namespace):
             p.error("--mix gives each --cache a share above 0")
         if settings.rigid_proposal and not settings.group_feedback:
             p.error("--rigid-proposal is built from the group vectors: needs --group-feedback E")
+        if settings.follow_fit and not settings.rigid_proposal:
+            p.error("--follow-fit follows the rigid proposal: needs --rigid-proposal 1")
         if bool(settings.group_feedback) != (settings.group_loss > 0):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss, settings.centre_loss) < 0:
