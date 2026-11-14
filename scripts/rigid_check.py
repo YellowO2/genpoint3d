@@ -83,7 +83,7 @@ def main() -> int:
     ways = ("no fit", "fitted pose", "carried pose")
     way_counts = {w: 0 for w in ways}
     flight_counts = {}
-    names += () if args.fill else ("true groups", "true seen", "all true")
+    names += () if args.fill else ("true groups", "true seen", "all true", "true centre")
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -141,9 +141,16 @@ def main() -> int:
             # The true pieces as group vectors (one axis each, far apart), then the true visibility, then all true.
             piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
             truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
+            # True visibility only in frames with their image: nothing is seen in a forecast frame.
+            shown = b["visibility"].float() * (torch.arange(T, device=device) < (args.cutoff or T))[None, :, None]
             fits["true groups"] = place(pos, truth)
-            fits["true seen"] = place(pos, truth, b["visibility"].float())
-            fits["all true"] = place(true_pos, truth, b["visibility"].float())
+            fits["true seen"] = place(pos, truth, shown)
+            fits["all true"] = place(true_pos, truth, shown)
+            if "centre" in b:
+                # And the arrows true too: each point's tip at its object's true centre of mass.
+                known = b["centre_known"][:, None, :, None]
+                true_tips = torch.where(known, model.lookup_pos(b["centre"].float(), anchor), tips)
+                fits["true centre"] = to_guess(object_places(true_pos, eq, truth, member, shown, robust, fresh, true_tips, fall)[0])
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         gt = to_metres(b["traj"], b)
         moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > MOVING_PX)[:, None]
@@ -216,6 +223,7 @@ def main() -> int:
             rows.setdefault(("by distance", kind), []).append(torch.stack([far_from[mask], err[mask]], -1).cpu())
 
     print("\nAPD (no rescale), the model's own guess and where the object's pose puts each point:")
+    names = tuple(n for n in names if ("hidden", "all", n) in rows)       # "true centre" only where the clips have centres
     print(f"  {'point-frames':<16}" + "".join(f"{n:>14}" for n in names))
     for kind in ("hidden", "seen") + (("forecast", "fc 1-4", "fc 5-12", "fc 13+") if args.cutoff else ()):
         for which in ("all", "moving") + (("still",) if args.cutoff else ()):
