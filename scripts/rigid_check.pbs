@@ -1,6 +1,6 @@
 #!/bin/bash
 # The rigid proposal against the truth and the model's own guess
-# (scripts/rigid_check.py), on the standard test's clips, our clips and the ball.
+# (scripts/rigid_check.py), on the standard test's clips, our clips and the ball, each filled to 1,000 points as the design runs.
 #
 #   qsub -v CKPT=outputs/RUN/best.pt scripts/rigid_check.pbs
 #
@@ -25,7 +25,7 @@ for spec in "fit_check/std_fyP_0/val cache/kubric_frames384 256" \
             "ball_test/by_motion/spin_up_10 ball_test/frames 100000"; do
   set -- $spec
   echo "########## $CKPT on $1"
-  python scripts/rigid_check.py --ckpt $CKPT --cache $ROOT/$1 --frames-cache $ROOT/$2 --points $3 2>&1 \
+  python scripts/rigid_check.py --ckpt $CKPT --cache $ROOT/$1 --frames-cache $ROOT/$2 --points $3 --fill 1000 2>&1 \
     | grep -v "Warn\|warn" || true
 done
 echo "=== RIGID CHECK DONE ==="
