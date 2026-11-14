@@ -74,6 +74,8 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
         out.update(_hidden_scores(pred_m, gt_m, vis, moving, q, b, j))
         if j.cutoff:
             out.update(_split_scores(pred_m, gt_m, vis, mv, b, j))
+        else:
+            out.update(_query_side_scores(pred_m, gt_m, vis, moving, q, b))
     return out
 
 
@@ -141,6 +143,28 @@ def _hidden_scores(pred_m, gt_m, vis, moving, q, b: dict, j: ScoreSettings) -> d
         mask = hidden & points[:, None]
         out[name + "_hidden"] = _apd(pred_m, gt_m, mask, b, scaling)
         out[name + "_hidden_lastseen"] = _apd(lastseen, gt_m, mask, b, scaling)
+    return out
+
+
+QUERY_SIDE_KEYS = ("apd_moving_seen_after", "apd_moving_seen_before", "apd_moving_hidden_after",
+                   "apd_moving_hidden_before", "apd_moving_before_1_4", "apd_moving_before_5_12",
+                   "apd_moving_before_13")
+
+
+def _query_side_scores(pred_m, gt_m, vis, moving, q, b: dict) -> dict:
+    """The moving points on the frames after their query frame and before it,
+    seen and hidden apart, no rescale: the frames before are what only the
+    backward sweep reaches, a point's past from before it was handed over.
+    The frames before, seen or not, also by how far before."""
+    T = gt_m.shape[1]
+    before = q[:, None, :] - torch.arange(T, device=gt_m.device)[None, :, None]      # (B, T, N) frames to the query
+    mv = moving[:, None].expand_as(vis)
+    out = {}
+    for kind, m in (("seen", vis & mv), ("hidden", ~vis & mv)):
+        out[f"apd_moving_{kind}_after"] = _apd(pred_m, gt_m, m & (before < 0), b, "none")
+        out[f"apd_moving_{kind}_before"] = _apd(pred_m, gt_m, m & (before > 0), b, "none")
+    for name, lo, hi in (("1_4", 1, 4), ("5_12", 5, 12), ("13", 13, T)):
+        out[f"apd_moving_before_{name}"] = _apd(pred_m, gt_m, mv & (before >= lo) & (before <= hi), b, "none")
     return out
 
 

@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.main import score
+from genpoint3d.train.score.track_scores import QUERY_SIDE_KEYS
 from genpoint3d.train.tools.batch import fine_inputs, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.metrics import HIDDEN_KEYS, MOVING_PX, clip_mean, error_and_motion, motion_px, motion_table, tapvid3d_metrics
 from genpoint3d.train.tools.regress import refine
@@ -135,6 +136,8 @@ def main() -> int:
                             "occlusion_accuracy") if k in m]),
               ("hidden on the observed frames, beside the last-seen and constant-speed baselines:",
                [k for k in HIDDEN_KEYS if k in m]),
+              ("moving points after and before their query frame (before: only the backward sweep reaches it):",
+               [k for k in QUERY_SIDE_KEYS if k in m]),
               (f"forecast, frames {args.eval_cutoff}+ without images:",
                [k for k in m if k.endswith("_obs") or "_fut" in k]))
     for title, keys in groups:
