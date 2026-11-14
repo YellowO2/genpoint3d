@@ -138,7 +138,8 @@ def main() -> int:
                                               per_clip=True)["average_pts_within_thresh"].cpu()
         for name, pts in fits.items():
             m = to_metres(pts, b)
-            ahead = (torch.arange(T, device=device) >= args.cutoff)[None, :, None] if args.cutoff else torch.zeros_like(vis)
+            ahead = ((torch.arange(T, device=device) >= args.cutoff)[None, :, None] & torch.ones_like(vis) if args.cutoff
+                     else torch.zeros_like(vis))
             for kind, mask in (("hidden", ~vis & ~ahead), ("seen", vis & ~ahead), ("forecast", ahead)):
                 for which, sel in (("all", mask), ("moving", mask & moving)):
                     rows.setdefault((kind, which, name), []).append(apd(m, sel))
