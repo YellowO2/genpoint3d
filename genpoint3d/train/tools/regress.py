@@ -148,25 +148,34 @@ def objects(groups: torch.Tensor, member: torch.Tensor) -> tuple[torch.Tensor, t
 
 
 def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
-                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+                  seen: torch.Tensor, robust: int = 0, fresh: float = 0.0,
+                  passes: int = 12) -> tuple[torch.Tensor, torch.Tensor]:
     """(B, T, N, 3) each point where its object's pose puts it, and (B, T, N)
     how many of its object's points are seen behind that pose, each counted
     by the belief it is seen (`seen`): 2 points surely seen and 2 half seen
-    count 3. The objects
-    are `objects`'; each is kept as one rigid shape in which a point's place
-    is fixed when it is given (in its query frame, through the pose there). In
-    each frame the pose that best carries the shape onto the object's points
-    believed seen there (`seen` (B, T, N); a weighted Kabsch fit, refit
-    `robust` times) places every point of it, so a point is placed as well as
-    its whole object's pose is known, and nothing builds up from frame to
-    frame. With `fresh` (degrees), a point counts 1 / (1 + turn / fresh)^2 as
-    much, its turn being how far its object has turned since the point was
-    given: a tracked point drifts as it turns from the look it was given by
-    (on the ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). Where under
-    MIN_POSE_POINTS seen points back a pose the last one holds; a point not yet given, or
-    in no object, keeps its own guess. The turn and the shape carry no
-    gradient (an SVD's is unstable where points lie nearly in a line); the
-    group vectors reach the places through the weights' centres.
+    count 3. The objects are `objects`'; each is kept as one rigid shape in
+    which a point's place is fixed through the pose at its query frame. Every
+    frame's pose is the one that best carries the shape onto the object's
+    points believed seen there (`seen` (B, T, N); a weighted Kabsch fit, refit
+    `robust` times), all frames at once, and places every point of it, so a
+    point is placed as well as its whole object's pose is known.
+
+    A point backs poses only after its query frame: the pose that gives it its
+    place never holds the point itself (one that did would only confirm the
+    place it gave, and the shape would drift with its own errors). So the
+    shape grows in passes: the object's first points (given at its first
+    frame) fit every frame; the points given in a frame that got a pose then
+    join through that pose; and so on, each pass placing every joined point
+    again through the last pass's poses, until no point joins or moves. With
+    `fresh` (degrees), a point counts 1 / (1 + turn / fresh)^2 as much, its
+    turn being how far its object has turned since the point was given (by the
+    last pass's poses, a frame with too few points holding the one before): a
+    tracked point drifts as it turns from the look it was given by (on the
+    ball, 0.3 cm off within 15 degrees, 2.5 cm past 90). A frame where under
+    MIN_POSE_POINTS seen points back the pose, a point not yet given, or one
+    in no object keeps its own guess. The turn and the shape carry no gradient
+    (an SVD's is unstable where points lie nearly in a line); the group
+    vectors reach the places through the weights' centres.
 
     pos (B, T, N, 3) every guess; q (B, N) query frames; groups (B, N, E) the
     group vectors, member (B, N) the points that count."""
@@ -176,44 +185,47 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
         pos, seen = pos.float(), seen.float()
         weight, which = objects(groups, member)                                            # (B, K, N), (B, N)
         K = weight.shape[1]
-        mine = which.clamp_min(0)                                                          # each point's object, as an index
-        pick = lambda x: x.gather(1, mine.reshape(B, N, *([1] * (x.dim() - 2))).expand(B, N, *x.shape[2:]))
-        shape = torch.zeros(B, N, 3, device=dev)                                           # each point's place in its object
-        given = torch.zeros(B, N, dtype=torch.bool, device=dev)
-        R = torch.eye(3, device=dev).expand(B, K, 3, 3)
-        ms = md = torch.zeros(B, K, 3, device=dev)
-        out = pos.clone()
-        support = torch.zeros(B, T, N, device=dev)
-        turns = []                                                                         # each frame's poses so far
-        for t in range(T):
-            w = seen[:, t] * given                                                         # (B, N)
-            if fresh and turns:
-                # How far each point's object has turned since the point was given, by the last pose.
-                then = torch.stack(turns, 1)[torch.arange(B, device=dev)[:, None], q.clamp(max=len(turns) - 1), mine]
-                cos = (((pick(R) * then).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
+        on, mine = weight > 0, which.clamp_min(0)
+        b, n, t = torch.arange(B, device=dev)[:, None], torch.arange(N, device=dev)[None], torch.arange(T, device=dev)
+        per_point = lambda x: x.gather(2, mine.reshape(B, 1, N, *([1] * (x.dim() - 3))).expand(B, T, N, *x.shape[3:]))
+        qc = q.clamp(max=T - 1)                                                            # a point asked after T: never given
+        at_query = lambda x: x[b, qc, n]                                                   # (B, T, N, ...) -> (B, N, ...)
+        given = (t[None, :, None] >= q[:, None]) & (which >= 0)[:, None]                  # (B, T, N)
+        backs = (t[None, :, None] > q[:, None]) & (which >= 0)[:, None]
+        first = torch.where(on, q[:, None], T).min(-1).values                             # (B, K) each object's first frame
+        start = (which >= 0) & (q == first.gather(1, mine)) & (q < T)                      # its first points
+        joined, shape, given_at = start, at_query(pos), at_query(pos)                     # given_at: each point at its query
+        turn = None
+        for _ in range(passes):
+            w = seen * backs * joined[:, None]                                             # (B, T, N)
+            if fresh and turn is not None:
+                cos = (((turn * at_query(turn)[:, None]).sum((-1, -2)) - 1) / 2).clamp(-1, 1)
                 w = w / (1 + torch.rad2deg(torch.acos(cos)) / fresh).pow(2)
-            Rn, msn, mdn, _ = robust_kabsch(weight * w[:, None], shape[:, None], pos[:, t, None], robust)
-            # (B, K) the object's given points seen in frame t, each by its belief, not by its likeness.
-            count = ((weight > 0) & given[:, None]).float().mul(seen[:, t, None]).sum(-1)
+            R, ms, md, _ = robust_kabsch(weight[:, None] * w[:, :, None], shape[:, None, None], pos[:, :, None], robust)
+            # (B, T, K) the object's joined points seen in each frame, each by its belief, not by its likeness.
+            count = (on[:, None] & (backs & joined[:, None])[:, :, None]).float().mul(seen[:, :, None]).sum(-1)
             ok = count >= MIN_POSE_POINTS
-            R = torch.where(ok[..., None, None], Rn.detach(), R)
-            ms, md = torch.where(ok[..., None], msn, ms), torch.where(ok[..., None], mdn, md)
-            new = (q == t) & (which >= 0) & ~given
-            back = (pick(R).transpose(-1, -2) @ (pos[:, t] - pick(md))[..., None])[..., 0] + pick(ms)
-            shape = torch.where(new[..., None], back.detach(), shape)
-            given = given | new
-            turns.append(R)
-            placed = given & pick(ok)
-            support[:, t] = pick(count) * placed
-            out[:, t] = torch.where(placed[..., None], (pick(R) @ (shape - pick(ms))[..., None])[..., 0] + pick(md),
-                                    pos[:, t])
-        return out, support
+            R, ms, md, ok_n = per_point(R.detach()), per_point(ms), per_point(md), per_point(ok)  # (B, T, N, ...)
+            # Each frame's last frame with a pose, for the turn: a frame with too few points holds it.
+            last = torch.where(ok_n, t[None, :, None], -1).cummax(1).values.clamp_min(0)
+            turn = R.gather(1, last[..., None, None].expand_as(R))
+            joins = (which >= 0) & (q < T) & at_query(ok_n) & ~start
+            back = (at_query(R).transpose(-1, -2) @ (given_at - at_query(md))[..., None])[..., 0] + at_query(ms)
+            placed = torch.where(joins[..., None], back.detach(), shape)
+            grew, moved = (joins & ~joined).any(), (placed - shape).norm(dim=-1).max()
+            shape, joined = placed, joined | joins
+            if not grew and moved < 1e-4:
+                break
+        placed = given & joined[:, None] & ok_n
+        out = torch.where(placed[..., None], (R @ (shape[:, None] - ms)[..., None])[..., 0] + md, pos)
+        return out, per_point(count) * placed
 
 
 def object_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, member: torch.Tensor,
                     seen: torch.Tensor, start: int, end: int, robust: int = 0, fresh: float = 0.0) -> torch.Tensor:
     """(B, L, N, 4) for frames `start` to `end`: where its object's pose puts
-    each point (`object_places`, walked only up to `end`, all it needs), as an
+    each point (`object_places`, fitted only up to `end`: later frames hold
+    guesses no round has looked at, and no earlier pose or place uses them), as an
     offset from its guess there (0 with nothing behind it), and how much backs
     it, s / (s + 1) for s seen points of its object."""
     places, support = object_places(pos[:, :end], q, groups, member, seen[:, :end], robust, fresh)
