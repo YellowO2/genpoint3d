@@ -309,15 +309,15 @@ def object_proposal(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, me
                     seen: torch.Tensor, start: int, end: int, robust: int = 0, fresh: float = 0.0,
                     tips: Optional[torch.Tensor] = None, fall: Optional[torch.Tensor] = None) -> torch.Tensor:
     """(B, L, N, 4) for frames `start` to `end`: where its object's pose puts
-    each point (`object_places`, fitted only up to `end`: later frames hold
-    guesses no round has looked at, and no earlier pose or place uses them), as an
+    each point (`object_places`, fitted over the whole clip: a frame no round
+    has looked at backs no pose, as `seen` is 0 there, and a point asked after
+    `end` is placed here through the pose at its own query frame), as an
     offset from its guess there (0 for a point in no object), and how much backs
     it, s / (s + 1) for s seen points of its object (under MIN_POSE_POINTS: the
     pose carried on)."""
-    places, support = object_places(pos[:, :end], q, groups, member, seen[:, :end], robust, fresh,
-                                    None if tips is None else tips[:, :end], fall)
-    off = (places - pos[:, :end].float())[:, start:]
-    s = support[:, start:, :, None]
+    places, support = object_places(pos, q, groups, member, seen, robust, fresh, tips, fall)
+    off = (places - pos.float())[:, start:end]
+    s = support[:, start:end, :, None]
     return torch.cat([off, s / (s + 1)], -1)
 
 
@@ -445,7 +445,8 @@ class Sweeps:
                         self.vis[:, start:end] = torch.where(alive[:, None], logits.detach(), self.vis[:, start:end])
                     self.looked[:, start:end] |= alive[:, None]
                     if arrow is not None:
-                        self.arrow[:, start:end] = arrow.detach().float()
+                        self.arrow[:, start:end] = torch.where(alive[:, None, :, None], arrow.detach().float(),
+                                                               self.arrow[:, start:end])
                     own = g.detach() + _corrected(step, at, self.rays)
                     g = torch.where(alive[:, None, :, None], own, g.detach())
                     yield _Round(i, start, end, g, logits, emb, alive, down, arrow)
