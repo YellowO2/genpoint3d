@@ -25,10 +25,10 @@ def visibility_scores(prediction: Prediction) -> dict:
     target = visible_target(vis, observed)
     right = ((logits > 0) == target).float()
     return {"vis_acc": right.flatten(1).mean(1),
-            "vis_acc_hidden": per_clip(right, ~vis & observed),
-            "vis_acc_visible": per_clip(right, vis & observed)}
+            "vis_acc_hidden": _per_clip(right, ~vis & observed),
+            "vis_acc_visible": _per_clip(right, vis & observed)}
 
 
-def per_clip(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+def _per_clip(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
     """(B, T, N) values -> (B,) mean over each clip's valid entries; NaN for none."""
     return (x * valid).flatten(1).sum(1) / valid.flatten(1).sum(1)

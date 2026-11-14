@@ -1,7 +1,8 @@
-"""The transformer blocks `PointDiT.py` is built from, adapted from
-`tesfaldet/genpt` (HDiT): RMSNorm, AdaRMSNorm (the conditioning scales each
-channel), attention with QK-norm and RoPE, GEGLU feed-forward, and residual
-branches that start at zero."""
+"""The transformer blocks `PointDiT.py` is built from.
+
+Adapted from `tesfaldet/genpt` (HDiT): RMSNorm, AdaRMSNorm (the conditioning
+scales each channel), attention with QK-norm and RoPE, GEGLU feed-forward, and
+residual branches that start at zero."""
 
 import math
 from typing import Optional

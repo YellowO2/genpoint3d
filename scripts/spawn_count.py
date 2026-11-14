@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 import genpoint3d.train.score.Predictor as predictor_module
 from genpoint3d.train.score.Predictor import Predictor
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.score.spawn_points import spawn_all
+from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import to_metres
 from genpoint3d.train.tools.metrics import _to_camera_t
 
@@ -34,12 +34,12 @@ added = {}
 
 
 def kept(*a, **k):
-    """`spawn_all`, its clip kept to count."""
-    added["b"] = spawn_all(*a, **k)
+    """`spawn_points`, its clip kept to count."""
+    added["b"] = spawn_points(*a, **k)
     return added["b"]
 
 
-predictor_module.spawn_all = kept
+predictor_module.spawn_points = kept
 predictor = Predictor(run.model, run.judging(dev, spawn=args.spawn))
 with torch.no_grad():
     for clip, batch in zip(ds.clips, DataLoader(ds, batch_size=1)):

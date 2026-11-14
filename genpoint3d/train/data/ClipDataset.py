@@ -12,9 +12,10 @@ from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.NormStats import NormStats
 from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH_SPREAD, RADIUS, REACH, SCENE_SCALE,
                                          TRAJ_SCALE_DISP)
-from genpoint3d.train.model.FineFinder import frame_spread
 from genpoint3d.train.tools.batch import _cell_xyz
 from genpoint3d.train.tools.camera import image_projection
+from genpoint3d.train.tools.farthest_first import farthest_first
+from genpoint3d.train.tools.frame_spread import frame_spread
 from genpoint3d.train.tools.metrics import resize_intrinsics
 
 # Each clip's depth beside its frames, as `scripts/cache_frames.py` writes it.
@@ -158,7 +159,7 @@ class ClipDataset(Dataset):
 
 def _clip_unit(depth: torch.Tensor, clip: CachedClip) -> torch.Tensor:
     """() metres per model unit for `clip`: its frame-0 cells' spread, as the
-    matcher measures it (`FineFinder.frame_spread`), over MATCH_SPREAD, so
+    matcher measures it (`tools/frame_spread.py`), over MATCH_SPREAD, so
     that spread is MATCH_SPREAD in every clip's unit and a typical clip's
     unit is about SCENE_SCALE."""
     proj = image_projection(clip.intrinsics[None, :1], clip.extrinsics[None, :1], torch.tensor(clip.hw)[None],
@@ -217,20 +218,6 @@ def _spawned(clip: CachedClip, num_points: int, cap: int, gap: float) -> CachedC
     anchor[b] = clip.traj[start[b], n[b]].to(anchor.dtype)
     query_uv[b] = uv[start[b], n[b]].to(query_uv.dtype)
     return _points(dataclasses.replace(clip, anchor=anchor, query_uv=query_uv, query_t=start), keep)
-
-
-def farthest_first(px: torch.Tensor, d: torch.Tensor, far: float, most: int) -> list[int]:
-    """Up to `most` of the candidates at pixels `px` (C, 2), the farthest
-    first: each farther than `far` both by `d` (C,), its distance to what is
-    there already, and from the ones picked before it."""
-    picked = []
-    while len(picked) < most:
-        j = int(d.argmax())
-        if d[j] <= far:
-            break
-        picked.append(j)
-        d = torch.minimum(d, (px - px[j]).norm(dim=-1))
-    return picked
 
 
 def _points(clip: CachedClip, keep: torch.Tensor) -> CachedClip:

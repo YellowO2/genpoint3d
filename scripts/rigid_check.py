@@ -30,7 +30,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.score.spawn_points import spawn_all
+from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project, unproject
 from genpoint3d.train.tools.metrics import clip_mean, motion_px, tapvid3d_metrics
@@ -87,7 +87,7 @@ def main() -> int:
 
         sweeps, every = track(b), b
         if args.spawn:
-            every = spawn_all(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
+            every = spawn_points(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
             sweeps = track(every)
         # Fitted over every point, the added ones too; only the clip's own are scored.
         anchor, eq = every["anchor"].float(), every["query_t"]

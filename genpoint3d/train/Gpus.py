@@ -1,6 +1,8 @@
-"""Training on several GPUs of one machine: one process a GPU (`torchrun`),
-each on its own clips, their gradients averaged before every step, so every
-copy of the weights takes the same steps and stays the same."""
+"""Training on several GPUs of one machine.
+
+One process a GPU (`torchrun`), each on its own clips, their gradients
+averaged before every step, so every copy of the weights takes the same steps
+and stays the same."""
 
 import datetime
 import os

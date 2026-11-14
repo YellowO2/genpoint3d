@@ -1,5 +1,6 @@
-"""The weighted Kabsch fit: the turn and shift that best carry one set of
-points onto another, and its robust refit."""
+"""The weighted Kabsch fit, and its robust refit.
+
+The fit is the turn and shift that best carry one set of points onto another."""
 
 import torch
 

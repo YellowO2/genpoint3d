@@ -1,8 +1,10 @@
-"""Every point stepped one frame on by a learned simulator: GNS (Sanchez-Gonzalez
-et al. 2020, `deepmind-research/learning_to_simulate`), layer for layer where
-it applies. A point's last `history` velocities and gravity make its node, its
-`k` nearest points its edges (their offset, distance, and whether the two are
-on one piece); ten rounds of message passing, each with its own weights and a
+"""Every point stepped one frame on by a learned simulator.
+
+The simulator is GNS (Sanchez-Gonzalez et al. 2020,
+`deepmind-research/learning_to_simulate`), layer for layer where it applies. A
+point's last `history` velocities and gravity make its node, its `k` nearest
+points its edges (their offset, distance, and whether the two are on one
+piece); ten rounds of message passing, each with its own weights and a
 residual, then the point's acceleration, and the next position by
 semi-implicit Euler. Trained one step at a time on true positions with a
 random walk added, as GNS, so it learns to recover from its own drift.
@@ -32,7 +34,7 @@ def _gather(x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     return x.gather(1, idx.reshape(S, N * k, 1).expand(-1, -1, x.shape[-1])).view(S, N, k, -1)
 
 
-def random_walk(past: torch.Tensor, std: float) -> torch.Tensor:
+def _random_walk(past: torch.Tensor, std: float) -> torch.Tensor:
     """(S, H+1, N, 3) noise for `past`: GNS's random walk on the velocities
     (`get_random_walk_noise_for_position_sequence`), `std` on the last step, the
     first position untouched."""
@@ -41,7 +43,7 @@ def random_walk(past: torch.Tensor, std: float) -> torch.Tensor:
     return torch.cat([torch.zeros_like(past[:, :1]), v.cumsum(1)], 1)
 
 
-def shape_match(x: torch.Tensor, rest: torch.Tensor, piece: torch.Tensor) -> torch.Tensor:
+def _shape_match(x: torch.Tensor, rest: torch.Tensor, piece: torch.Tensor) -> torch.Tensor:
     """(S, N, 3) `x` with each piece's points set where the turn and shift that
     best carry the piece's `rest` (S, N, 3) onto `x` put them (shape matching,
     Mueller et al. 2005; FIGNet keeps objects rigid this way in its rollouts).
@@ -123,7 +125,7 @@ class Stepper(nn.Module):
         walk's last step, squared error of the normalised acceleration. The
         moving points (`moving`, (S, N)) and the still ones count half each:
         most points are still scene."""
-        walk = random_walk(past, noise)
+        walk = _random_walk(past, noise)
         noisy = past + walk
         acc = (nxt + walk[:, -1] - noisy[:, -1]) - (noisy[:, -1] - noisy[:, -2])
         err = (self(noisy, gravity, piece) - (acc - self.acc_mean) / self.acc_std).pow(2).sum(-1)

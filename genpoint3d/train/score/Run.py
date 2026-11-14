@@ -1,5 +1,6 @@
-"""A trained run loaded for scoring: its model, and its data and refinement
-as it was trained."""
+"""A trained run loaded for scoring.
+
+Its model, and its data and refinement as it was trained."""
 
 from dataclasses import dataclass
 from pathlib import Path

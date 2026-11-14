@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.score.spawn_points import spawn_all
+from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.regress import Sweeps, _sq_dist, object_places
 
@@ -51,7 +51,7 @@ def main() -> int:
         return sweeps
 
     sweeps = track(b)
-    every = spawn_all(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.spawn else b
+    every = spawn_points(model, b, fine, view, args.spawn, 0.05, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.spawn else b
     sweeps = track(every)
     anchor, eq = every["anchor"].float(), every["query_t"]
     guess = sweeps.whole.float()

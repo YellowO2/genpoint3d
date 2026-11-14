@@ -1,32 +1,33 @@
-"""New points where surface comes into view with no point on it, as a tracker
-on real video adds them: training's spawning (`ClipDataset._spawned`) at test
-time, without the truth. One rule for every frame: a place on a surface that
-no point sits on gets one. As in training, where the scene's points come as
-given and only new surface is capped, the first frame's points are limited by
-the gap and the clip's point budget, and new surface after it fills the
-rest of that budget, as training's points per clip. The first frame's
-points are tracked before the later ones are added, so every point already
-there covers where it really goes (`spawn_all`)."""
+"""New points where surface comes into view with no point on it.
+
+They are added as a tracker on real video adds them: training's spawning
+(`ClipDataset._spawned`) at test time, without the truth. One rule for every
+frame: a place on a surface that no point sits on gets one. As in training,
+where the scene's points come as given and only new surface is capped, the
+first frame's points are limited by the gap and the clip's point budget, and
+new surface after it fills the rest of that budget, as training's points per
+clip. The first frame's points are tracked before the later ones are added, so
+every point already there covers where it really goes (`spawn_points`)."""
 
 import torch
 
 from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.tools.traj_scale import RADIUS
-from genpoint3d.train.data.ClipDataset import farthest_first
 from genpoint3d.train.tools.camera import project
+from genpoint3d.train.tools.farthest_first import farthest_first
 
 
-def spawn_all(model, b: dict, fine: dict, view: torch.Tensor, points: int, gap: float, tracks_of) -> dict:
+def spawn_points(model, b: dict, fine: dict, view: torch.Tensor, points: int, gap: float, tracks_of) -> dict:
     """`b` with points added until it has `points`, in two rounds, each
     tracked before the next (`tracks_of(clip)` gives a clip's tracks and
     visibility logits): the first frame's gaps, then new surface after it."""
-    b = spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], True)
-    return spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], False)
+    b = _spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], True)
+    return _spawned(model, b, fine, *tracks_of(b), view, gap, points - b["traj"].shape[2], False)
 
 
 @torch.no_grad()
-def spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None, view: torch.Tensor, gap: float,
-            cap: int, first: bool) -> dict:
+def _spawned(model, b: dict, fine: dict, tracks: torch.Tensor, logits: torch.Tensor | None, view: torch.Tensor, gap: float,
+             cap: int, first: bool) -> dict:
     """`b` (one clip) with up to `cap` points added after its own: in the
     first frame seen whole if `first`, else in the frames seen whole after it,
     frame by frame. They go where no point covers the CNN cells, the

@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader, Dataset
 from genpoint3d.tools.traj_scale import GRAVITY_REF
 from genpoint3d.train.data.ClipDataset import ClipDataset
 from genpoint3d.train.data.split_clips import split_clips
-from genpoint3d.train.model.Stepper import Stepper, shape_match
+from genpoint3d.train.model.Stepper import Stepper, _shape_match
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.track_scores import track_scores
@@ -85,7 +85,7 @@ def _score(stepper: Stepper, val: list[dict], cutoff: int, device) -> dict:
             x = pos.clone()
             for t in range(cutoff, x.shape[1]):
                 nxt = stepper.step(x[:, t - H - 1:t], b["g"], piece)
-                x[:, t] = shape_match(nxt, pos[:, cutoff - 1], piece) if rigid else nxt
+                x[:, t] = _shape_match(nxt, pos[:, cutoff - 1], piece) if rigid else nxt
             tracks = (x - b["norm_offset"]) / b["norm_traj_scale"][:, None, None, None]
             s = track_scores(Prediction(batch=b, visual_mask=None, tracks=tracks, loss=0.0), j)
             rows.setdefault(name, []).append(s["apd_moving_fut"].cpu())

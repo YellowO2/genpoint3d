@@ -345,8 +345,8 @@ class PointDiT(nn.Module):
             proj_q = clip_proj.float().gather(1, query_t[..., None, None].expand(-1, -1, 3, 4))
             uv0 = project(anchor.float()[:, :, None], proj_q)[0][:, :, 0]              # (B, N, 2)
             places = dict(xyz=fine_xyz.float(), pos=pos, pos0=anchor.float(), xyz0=clip_xyz.float())
-        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, ok=cells(view, h, w),
-                         ok0=cells(clip_view, h, w), **places)
+        return self.fine(fine_map, clip_map, uv, uv0, query_t=query_t, ok=_cells(view, h, w),
+                         ok0=_cells(clip_view, h, w), **places)
 
 
 def _point_bias(v, known, live, scale, dtype) -> torch.Tensor:
@@ -403,7 +403,7 @@ def _in_patches(block, x, cond, theta, pos, v, known, live, scale, size: int, de
     return out.view(R, -1, C).gather(1, at[:, :N, None].expand(R, N, C))
 
 
-def cells(view: torch.Tensor, h: int, w: int) -> torch.Tensor:
+def _cells(view: torch.Tensor, h: int, w: int) -> torch.Tensor:
     """(B, T, 2, 2) seen quarters -> (B, T, h, w) seen cells (h, w even)."""
     return view.repeat_interleave(h // 2, 2).repeat_interleave(w // 2, 3)
 

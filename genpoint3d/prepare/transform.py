@@ -1,7 +1,8 @@
-"""Reframe and normalise one raw Kubric clip: world coordinates into the
-fixed frame-0 camera (relative poses only, as real video gives), and a scale
-from the observed frames' pointmap (`_compute_norm_stats`). `KubricSample`
-stores time first, (T, N, ...).
+"""Reframe and normalise one raw Kubric clip.
+
+World coordinates go into the fixed frame-0 camera (relative poses only, as
+real video gives), and a scale comes from the observed frames' pointmap
+(`_compute_norm_stats`). `KubricSample` stores time first, (T, N, ...).
 """
 
 import torch
@@ -18,7 +19,7 @@ def _relative_extrinsics(extrinsics: torch.Tensor) -> torch.Tensor:
     return extrinsics @ torch.linalg.inv(extrinsics[0])[None]
 
 
-def up_in_frame0(extrinsics_world: torch.Tensor) -> torch.Tensor:
+def _up_in_frame0(extrinsics_world: torch.Tensor) -> torch.Tensor:
     """(3,) Kubric's up, world +z, in the frame-0 camera frame: (T, 4, 4)
     world->cam_t extrinsics, OpenCV axes."""
     return extrinsics_world[0, :3, :3] @ torch.tensor([0.0, 0.0, 1.0])
@@ -113,7 +114,7 @@ def transform(
         visibility=visibility,
         query_uv=query_uv,
         query_t=query_t,
-        up=up_in_frame0(extrinsics_world),
+        up=_up_in_frame0(extrinsics_world),
         num_context_frames=num_context_frames,
         norm=norm,
         segment=None if sample.segment is None else torch.from_numpy(sample.segment).long(),

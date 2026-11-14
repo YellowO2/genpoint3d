@@ -1,5 +1,6 @@
-"""Encode video frames into frozen DINOv3 patch features, and each patch's 3D
-position.
+"""Encode video frames into frozen DINOv3 patch features.
+
+Each patch also gets its 3D position.
 
 Nothing learnable lives here: this is what the cache stores, and anything
 cached is frozen. The query's id card is sampled from the grid
