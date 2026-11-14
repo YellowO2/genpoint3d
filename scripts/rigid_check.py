@@ -140,7 +140,10 @@ def main() -> int:
             m = to_metres(pts, b)
             ahead = ((torch.arange(T, device=device) >= args.cutoff)[None, :, None] & torch.ones_like(vis) if args.cutoff
                      else torch.zeros_like(vis))
-            for kind, mask in (("hidden", ~vis & ~ahead), ("seen", vis & ~ahead), ("forecast", ahead)):
+            steps = torch.arange(T, device=device)[None, :, None] - args.cutoff                # frames into the forecast
+            soon, later = ahead & (steps < 4), ahead & (steps >= 4) & (steps < 12)
+            for kind, mask in (("hidden", ~vis & ~ahead), ("seen", vis & ~ahead), ("forecast", ahead),
+                               ("fc 1-4", soon), ("fc 5-12", later), ("fc 13+", ahead & (steps >= 12))):
                 for which, sel in (("all", mask), ("moving", mask & moving)):
                     rows.setdefault((kind, which, name), []).append(apd(m, sel))
             for label, lo, hi in bins:
@@ -171,7 +174,7 @@ def main() -> int:
 
     print("\nAPD (no rescale), the model's own guess and where the object's pose puts each point:")
     print(f"  {'point-frames':<16}" + "".join(f"{n:>14}" for n in names))
-    for kind in ("hidden", "seen") + (("forecast",) if args.cutoff else ()):
+    for kind in ("hidden", "seen") + (("forecast", "fc 1-4", "fc 5-12", "fc 13+") if args.cutoff else ()):
         for which in ("all", "moving"):
             print(f"  {kind + ' ' + which:<16}" + "".join(f"{clip_mean(rows[kind, which, n]):>14.4f}" for n in names))
     total = max(sum(counts.values()), 1)

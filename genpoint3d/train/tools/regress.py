@@ -208,9 +208,10 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
     `robust` times), all frames at once, and places every point of it, so a
     point is placed as well as its whole object's pose is known.
 
-    A point backs poses only after its query frame: the pose that gives it its
-    place never holds the point itself (one that did would only confirm the
-    place it gave, and the shape would drift with its own errors). So the
+    A point backs poses only after its query frame (the object's first points
+    their own frame too, where the shape is theirs): the pose that gives a
+    point its place never holds the point itself (one that did would only
+    confirm the place it gave, and the shape would drift with its own errors). So the
     shape grows in passes: the object's first points (given at its first
     frame) fit every frame; the points given in a frame that got a pose then
     join through that pose; and so on, each pass placing every joined point
@@ -243,9 +244,12 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
         per_point = lambda x: x.gather(2, mine.reshape(B, 1, N, *([1] * (x.dim() - 3))).expand(B, T, N, *x.shape[3:]))
         qc = q.clamp(max=T - 1)                                                            # a point asked after T: never given
         at_query = lambda x: x[b, qc, n]                                                   # (B, T, N, ...) -> (B, N, ...)
-        backs = (t[None, :, None] > q[:, None]) & (which >= 0)[:, None]
         first = torch.where(on, q[:, None], T).min(-1).values                             # (B, K) each object's first frame
         start = (which >= 0) & (q == first.gather(1, mine)) & (q < T)                      # its first points
+        # The first points back their own frame too: the shape is where they are there, so that
+        # pose is the shape's own place, not a confirmation (a forecast from 3 frames gets 3 poses).
+        backs = ((t[None, :, None] > q[:, None]) | ((t[None, :, None] == q[:, None]) & start[:, None])) \
+            & (which >= 0)[:, None]
         joined, shape, given_at = start, at_query(pos), at_query(pos)                     # given_at: each point at its query
         turn = None
         for _ in range(passes):
