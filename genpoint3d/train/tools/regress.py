@@ -160,9 +160,9 @@ def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: t
     falling free), and it keeps turning about its centre at its spin. Speed
     and spin come from that frame and the fitted one next to it; with no
     other, the pose holds. A move the two poses cannot tell from their own
-    noise (`noise` (B, T, K), how far the fit's points sit from where each
-    pose puts them; a turn counted at `radius` (B, K), the shape's size) is
-    no move: a still object would otherwise drift on at its noise's speed
+    noise (`noise` (B, T, K), each pose's uncertainty: how far the fit's points
+    sit from where it puts them, over the root of how many back it; a turn
+    counted at `radius` (B, K), the shape's size) is no move: a still object would otherwise drift on at its noise's speed
     (on the fall test, its still points' forecast 0.88 against holding's
     0.95). A pose places shape point s at R s + shift."""
     B, T, K = good.shape
@@ -194,7 +194,7 @@ def _carried(R: torch.Tensor, shift: torch.Tensor, good: torch.Tensor, centre: t
         free = three & ((second * g).sum(-1) > 0.5 * (g * g).sum(-1))
         acc = torch.where(free[..., None], g, acc)
     speed = (Cr - Cp) / dt + acc * (tr - (tr + tp) / 2)[..., None]                   # at the frame carried from
-    bar = at(noise, ref) + at(noise, partner)                                          # (B, T, K)
+    bar = 2 * (at(noise, ref) + at(noise, partner))                                    # (B, T, K) about 3 sd of the move
     moves = two & ((Cr - Cp).norm(dim=-1) > bar)
     turns = two & ((spin * dt).norm(dim=-1) * radius[:, None] > bar)
     speed, spin = speed * moves[..., None], spin * turns[..., None]
@@ -301,7 +301,11 @@ def object_places(pos: torch.Tensor, q: torch.Tensor, groups: torch.Tensor, memb
             centre = torch.where(total > 0, said, centre)
         # How far the fit's points sit from where each pose puts them, and the shape's size.
         off = misfit(Rk, msk, mdk, shape[:, None, None], pos[:, :, None]).detach()          # (B, T, K, N)
-        noise = ((wk * off * off).sum(-1) / wk.sum(-1).clamp_min(1e-6)).sqrt()
+        # ... as the pose's own uncertainty: the points' typical misfit over the root of how many
+        # back it (their weights' effective count). The misfit itself, one point's, froze an object
+        # moving 5 cm a frame under 1.5 cm of tracking noise.
+        backing = wk.sum(-1).pow(2) / wk.pow(2).sum(-1).clamp_min(1e-12)
+        noise = ((wk * off * off).sum(-1) / wk.sum(-1).clamp_min(1e-6)).sqrt() / backing.clamp_min(1).sqrt()
         spread = (shape[:, None] - middle[:, :, None]).pow(2).sum(-1)                      # (B, K, N)
         radius = ((body * spread).sum(-1) / body.sum(-1).clamp_min(1e-6)).sqrt()
         Rc, shiftc, has = _carried(Rk, shift, ok, centre, fall, noise, radius)
