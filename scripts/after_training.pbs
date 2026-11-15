@@ -2,6 +2,8 @@
 # The tests every new checkpoint gets, in one job:
 #   standard   100 val clips of the old Kubric, 256 points asked, filled to 1,000, every frame seen (training's own
 #              validation covers forecasting from 12)
+#   train      the same on 100 clips it trained on; forecast: the same val clips, frames 12 on without their image
+#              (the weekly report's Train and Forecasting columns)
 #   fall test  our Kubric's val clips, forecast from 3: thrown objects fall, bounce and tumble
 #   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5
 #   ball       the spinning ball (spin_up_10), error by how the point faces the camera
@@ -32,6 +34,13 @@ echo "--- standard, every frame seen"
 python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 \
   --points 256 --fill 1000 --batch 1 --out $OUT/standard_c0.json 2>&1 | quiet \
   | grep -E "average_pts_within|apd_static|apd_moving |apd_hidden |apd_moving_hidden |average_jaccard|occlusion"
+echo "--- standard, 100 clips it trained on"
+python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_tr/train --frames-cache $ROOT/cache/kubric_frames384 \
+  --points 256 --fill 1000 --batch 1 --out $OUT/standard_train.json 2>&1 | quiet | grep -E "average_pts_within|apd_hidden "
+echo "--- standard, forecast from 12"
+python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fit_check/std_fyP_0/val --frames-cache $ROOT/cache/kubric_frames384 \
+  --points 256 --fill 1000 --batch 1 --eval-cutoff 12 --out $OUT/standard_c12.json 2>&1 | quiet \
+  | grep -E "apd_fut |apd_moving_fut |apd_moving_obs "
 echo "--- fall test, forecast from 3"
 python scripts/evaluate.py --ckpt $CKPT --cache $ROOT/fall_test/val --frames-cache $ROOT/cache/kubric_movi48_frames384 \
   --points 500 --fill 1000 --batch 1 --eval-cutoff 3 --out $OUT/fall_test.json 2>&1 | quiet \
