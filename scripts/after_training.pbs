@@ -6,8 +6,8 @@
 #              (the weekly report's Train and Forecasting columns)
 #   fall test  our Kubric's val clips, forecast from 3: thrown objects fall, bounce and tumble
 #   drop test  one object dropped from rest (scripts/drop_kubric.pbs made it), forecast from 5
-#   ball       the spinning ball (spin_up_10), error by how the point faces the camera
-#   video      the same ball clip every time (clip 0, every point drawn), in ~/scratch/renders/ball_RUN_CKPT
+#   ball       the spinning ball (spin_up_10), filled to 1,000 as the design runs, error by how the point faces the camera
+#   video      the same ball clip every time (clip 0, filled to 1,000, every asked point drawn), in ~/scratch/renders/ball_RUN_CKPT
 #
 #   qsub -v CKPT=outputs/RUN/best.pt scripts/after_training.pbs
 #
@@ -50,8 +50,8 @@ python scripts/drop_curve.py --ckpt $CKPT --cache $ROOT/drop_kubric/cache --fram
   --cutoff 5 2>&1 | quiet
 echo "--- ball, spin_up_10"
 python scripts/ball_view_angle.py --ckpt $CKPT --cache $ROOT/ball_test/by_motion/spin_up_10 \
-  --frames-cache $ROOT/ball_test/frames --raw $ROOT/ball_test/raw_centres 2>&1 | quiet | tail -7
+  --frames-cache $ROOT/ball_test/frames --raw $ROOT/ball_test/raw_centres --fill 1000 2>&1 | quiet | tail -7
 echo "--- ball video, clip 0, every point drawn"
 python scripts/render_tracks.py --ckpt $CKPT --cache $ROOT/ball_test/by_motion/spin_up_10 --frames-cache $ROOT/ball_test/frames \
-  --clip spin_up_10_0_q000_f --points 1000 --out $ROOT/renders/ball_$(basename $OUT)_$(basename $CKPT .pt) 2>&1 | quiet | grep "APD"
+  --clip spin_up_10_0_q000_f --points 1000 --fill 1000 --out $ROOT/renders/ball_$(basename $OUT)_$(basename $CKPT .pt) 2>&1 | quiet | grep "APD"
 echo "=== AFTER TRAINING DONE ==="

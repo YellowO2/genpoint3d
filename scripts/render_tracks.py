@@ -199,6 +199,8 @@ def main() -> int:
                    help="these clips by name instead of the val split")
     p.add_argument("--points", type=int, default=32,
                    help="query points drawn, the most moving first")
+    p.add_argument("--fill", type=int, default=0,
+                   help="points each clip is filled up to where surface has none, as the design runs (0: none added)")
     p.add_argument("--panel-points", type=int, default=0,
                    help="also draw this many points on black beside the video; 0 none")
     p.add_argument("--forecast-from", type=int, default=0, metavar="C",
@@ -223,7 +225,7 @@ def main() -> int:
     # As many points as are drawn: a clip's first points are often all of one object.
     ds = run.dataset(clips, args.frames_cache, points=max(rs.points, args.points), query_before=args.eval_cutoff)
     loader = DataLoader(ds, batch_size=args.batch or rs.batch, shuffle=False, num_workers=2)
-    judging = run.judging(device, cutoff=args.eval_cutoff)
+    judging = run.judging(device, cutoff=args.eval_cutoff, fill=args.fill)
     predictor = Predictor(run.model, judging)
     # The same model, the frames from C on blank: what it forecasts there.
     forecaster = (Predictor(run.model, dataclasses.replace(judging, cutoff=args.forecast_from))
