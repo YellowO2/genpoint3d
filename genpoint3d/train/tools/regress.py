@@ -557,7 +557,6 @@ def regress_loss(
     down_true: Optional[torch.Tensor] = None,
     down_scored: Optional[torch.Tensor] = None,
     down_weight: float = 0.0,
-    fit_weight: float = 0.0,
     centre_true: Optional[torch.Tensor] = None,
     centre_known: Optional[torch.Tensor] = None,
     centre_weight: float = 0.0,
@@ -573,9 +572,7 @@ def regress_loss(
     vectors' error against `groups(start, end)`, the pairs to put together in
     the window's frames (what the window can see and its rigid fit needs),
     which way is down (the angle, radians) against `down_true` (B, 3) on the
-    clips `down_scored` (B,), those not told it, the places the objects' poses
-    give from the group vectors the round said (`object_proposal`, the guess
-    fixed) against the truth, so the groups learn what the fit needs, the tip
+    clips `down_scored` (B,), those not told it, the tip
     of each point's arrow (from the guess, fixed) against its object's centre
     of mass `centre_true` (B, T, N, 3) on the points `centre_known` (B, N),
     and the visibility head's against `visible`. With `backward`, each round's
@@ -602,10 +599,6 @@ def regress_loss(
             loss = loss + w[r.i] * rigid_weight * _rigid_error(g, x1_w, idx, ok_w)
         if group_weight:
             loss = loss + w[r.i] * group_weight * _group_error(r.groups, *groups(r.start, r.end), r.alive)
-        if fit_weight and r.groups is not None:
-            fit = run.proposal(g.detach(), r.groups, r.start, r.end)
-            placed = g.detach() + fit[..., :3] / model.traj_scale
-            loss = loss + w[r.i] * fit_weight * _error(placed, x1_w, mask_w, weight_w)
         if centre_weight:
             known = centre_known[:, None] & keep
             centre = w[r.i] * centre_weight * _error(g.detach() + r.arrow.float(), centre_true[:, r.start:r.end], known,

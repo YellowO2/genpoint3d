@@ -40,8 +40,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     told = torch.rand(traj.shape[0]) >= settings.down_hidden
     fine["down_known"] = truly & told.to(hardware.device)
     # What the model says of them is scored; its motion state everywhere.
-    extra.update(down_true=fine["down"], down_scored=truly & ~fine["down_known"], down_weight=settings.down_loss,
-                 fit_weight=settings.fit_loss)
+    extra.update(down_true=fine["down"], down_scored=truly & ~fine["down_known"], down_weight=settings.down_loss)
     if settings.centre_loss:
         extra.update(centre_true=b["centre"], centre_known=b["centre_known"], centre_weight=settings.centre_loss)
     if settings.vis_loss:
