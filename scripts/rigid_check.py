@@ -62,6 +62,8 @@ def main() -> int:
     p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
     p.add_argument("--robust", type=int, default=None, help="the pose's refits (default: the run's)")
     p.add_argument("--fresh", type=float, default=None, help="the pose's freshness weighting, degrees (default: the run's)")
+    p.add_argument("--spawn-share", type=float, default=None,
+                   help="the share of --fill kept for new surface after the first frame (default: the run's)")
     p.add_argument("--dump", default="", help="save the first clip's fit inputs and truth here (a .pt), to take the fit apart offline")
     p.add_argument("--cutoff", type=int, default=0, help="frames from this one on without their image: a forecast (0: none)")
     args = p.parse_args()
@@ -113,7 +115,7 @@ def main() -> int:
                     pass
             return sweeps
 
-        every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, run.spawn_share,
+        every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, run.spawn_share if args.spawn_share is None else args.spawn_share,
                              lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.fill else b
         handed.clear()
         Sweeps.proposal = recorded
