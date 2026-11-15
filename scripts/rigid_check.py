@@ -31,6 +31,7 @@ Run:  python scripts/rigid_check.py --ckpt outputs/RUN/best.pt --cache DIR --fra
 """
 
 import argparse
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -67,7 +68,7 @@ def main() -> int:
     p.add_argument("--follow", action="store_true",
                    help="a what-if: each round, a point-frame believed hidden that has a fit takes the fit's place, "
                         "whatever the model says (what following the fit exactly would give)")
-    p.add_argument("--dump", default="", help="save the first clip's fit inputs and truth here (a .pt), to take the fit apart offline")
+    p.add_argument("--dump", default="", help="save the first 10 clips' fit inputs and truth in this directory, to take the fit apart offline")
     p.add_argument("--cutoff", type=int, default=0, help="frames from this one on without their image: a forecast (0: none)")
     args = p.parse_args()
 
@@ -113,6 +114,7 @@ def main() -> int:
         handed.append((start, end, g.float(), out.float()))
         return out
 
+    dumped = 0
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -145,11 +147,14 @@ def main() -> int:
         place = lambda at, groups=sweeps.groups, seen=belief: to_guess(object_places(at, eq, groups, member, seen,
                                                                                      robust, fresh, tips, fall)[0])
         fits = {"guess": guess, "object": place(pos)}
-        if args.dump and not rows:
+        if args.dump and dumped < 10:
+            dumped += 1
+            Path(args.dump).mkdir(parents=True, exist_ok=True)
             torch.save({k: (v.cpu() if torch.is_tensor(v) else v) for k, v in dict(
                 pos=pos, q=eq, groups=sweeps.groups, member=member, belief=belief, tips=tips, fall=fall, robust=robust, fresh=fresh,
                 anchor=anchor, guess=guess, traj_scale=model.traj_scale, true_pos=model.lookup_pos(b["traj"].float(), anchor[:, :N]),
-                vis=vis, N=N, handed=[(a, e, g.cpu(), f.cpu()) for a, e, g, f in handed]).items()}, args.dump)
+                vis=vis, N=N, piece=rigid_groups(b).float().argmax(-1),
+                handed=[(a, e, g.cpu(), f.cpu()) for a, e, g, f in handed]).items()}, f"{args.dump}/{dumped - 1}.pt")
         # The clip's own points at their true depth (their predicted place in the image kept), at
         # their true place in the image (their predicted depth kept), and both; and the seen points'
         # own errors dealt out among the points seen in that frame at random.
