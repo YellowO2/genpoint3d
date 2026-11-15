@@ -17,6 +17,10 @@ points kept out of its fits (kept out as good as in it says leaving the fit
 costs nothing), its error lined up on the frame each point hides in, and by
 how far a point is from the centre of its piece's seen points.
 
+And the fit as each round is actually handed it, round by round: the error
+of the guess the round starts from, of the fit handed (guess + offset), how
+often the fit is the nearer, and the final answer.
+
 With `--fill`, points are first added on new surface as at test time; they
 are mates but not scored and have no truth. `--spawn` draws the clip's
 own tracks as training does instead, so every point has its truth. With
@@ -84,6 +88,14 @@ def main() -> int:
     way_counts = {w: 0 for w in ways}
     flight_counts = {}
     names += () if args.fill else ("true groups", "true seen", "all true", "true centre")
+    # The fit as each round is handed it: (start, end, the guess the round starts from, the offsets).
+    handed, plain = [], Sweeps.proposal
+
+    def recorded(self, g, groups, start, end):
+        out = plain(self, g, groups, start, end)
+        handed.append((start, end, g.float(), out.float()))
+        return out
+
     for batch in loader:
         b = to_device(batch, device)
         vis, q, N = b["visibility"].bool(), b["query_t"], b["traj"].shape[2]
@@ -100,10 +112,12 @@ def main() -> int:
                     pass
             return sweeps
 
-        sweeps, every = track(b), b
-        if args.fill:
-            every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, run.spawn_share, lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb)))
-            sweeps = track(every)
+        every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, run.spawn_share,
+                             lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.fill else b
+        handed.clear()
+        Sweeps.proposal = recorded
+        sweeps = track(every)
+        Sweeps.proposal = plain
         # Fitted over every point, the added ones too; only the clip's own are scored.
         anchor, eq = every["anchor"].float(), every["query_t"]
         guess = sweeps.whole.float()
@@ -154,6 +168,16 @@ def main() -> int:
         fits = {k: v[:, :, :N] for k, v in fits.items()}
         gt = to_metres(b["traj"], b)
         moving = (motion_px(gt, vis, b["intrinsics_256"], b["extrinsics"], q) > MOVING_PX)[:, None]
+        # Round by round: the guess the round starts from against the fit it is handed (guess + offset).
+        for k, (start, end, g, fit) in enumerate(handed):
+            e_g = (to_metres(g[:, :, :N], b) - gt[:, start:end]).norm(dim=-1)
+            e_f = (to_metres(g[:, :, :N] + fit[:, :, :N, :3] / model.traj_scale, b) - gt[:, start:end]).norm(dim=-1)
+            e_end = (to_metres(guess[:, start:end, :N], b) - gt[:, start:end]).norm(dim=-1)
+            backed = fit[:, :, :N, 3] > 0
+            for kind, m in (("hidden", ~vis[:, start:end] & moving), ("seen", vis[:, start:end] & moving)):
+                for key, x in (("guess", e_g[m]), ("fit", e_f[m]), ("final", e_end[m]), ("nearer", (e_f < e_g)[m & backed].float()),
+                               ("backed", backed[m].float())):
+                    rows.setdefault(("handed", k, start, end, kind, key), []).append(x.cpu())
         # Each point-frame's seen points on its true piece, itself left out.
         mates = rigid_groups(b) & ~torch.eye(N, dtype=torch.bool, device=device)
         seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)
@@ -284,6 +308,13 @@ def main() -> int:
         for label in ("free flight", "in contact"):
             for part in ("1-4", "5-12"):
                 print(f"  {label:<12} {part:<6}" + "".join(f"{clip_mean(rows['flight ref', label, part, n]):>22.4f}" for n in refs))
+    print("\nThe fit as each round is handed it, moving point-frames, error in cm (median):")
+    print(f"  {'round':>5} {'frames':>7} {'kind':<7}{'has a fit':>10}{'start guess':>12}{'fit handed':>11}{'fit nearer':>11}{'final':>8}")
+    for key in sorted(k[1:5] for k in rows if k[0] == "handed" and k[5] == "guess"):
+        got = lambda name: torch.cat(rows[("handed", *key, name)])
+        if len(got("guess")):
+            print(f"  {key[0]:>5} {f'{key[1]}-{key[2] - 1}':>7} {key[3]:<7}{got('backed').mean():>10.2f}{100 * got('guess').median():>12.1f}"
+                  f"{100 * got('fit').median():>11.1f}{got('nearer').mean():>11.2f}{100 * got('final').median():>8.1f}")
     ks = sorted(key[1] for key in rows if key[0] == "hiding")
     if ks:
         print("\nThe object's pose, error (cm, median) around the frame a point hides in (0), seen before it:")
