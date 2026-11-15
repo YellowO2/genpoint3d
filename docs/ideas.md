@@ -35,3 +35,4 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - The matcher on the fixed 9 m ruler (fzR): Kubric lost 0.017 against the clip's own spread.
 - Caching cross-attention keys and values: 9.4% slower, memory-bound (flow-matching design, 2026-09).
 - The turn of a tumbling object in free flight: keeping the last turn is the fit's limit there (0.74 with true inputs against 0.99 with the true turn, forecast_all_true); the network should learn it (it needs the object's mass spread), not a new fit rule.
+- The fit's hand rules learned instead: keep the closed-form rigid solve, let the network say each point's weight in it (in place of the robust refits, the freshness weighting and the support threshold), and leave carrying an unseen object on to the network (the carry-forward rules score below the model's own guess there, hidden_by_placement).
