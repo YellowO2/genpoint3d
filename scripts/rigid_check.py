@@ -64,6 +64,9 @@ def main() -> int:
     p.add_argument("--fresh", type=float, default=None, help="the pose's freshness weighting, degrees (default: the run's)")
     p.add_argument("--spawn-share", type=float, default=None,
                    help="the share of --fill kept for new surface after the first frame (default: the run's)")
+    p.add_argument("--follow", action="store_true",
+                   help="a what-if: each round, a point-frame believed hidden that has a fit takes the fit's place, "
+                        "whatever the model says (what following the fit exactly would give)")
     p.add_argument("--dump", default="", help="save the first clip's fit inputs and truth here (a .pt), to take the fit apart offline")
     p.add_argument("--cutoff", type=int, default=0, help="frames from this one on without their image: a forecast (0: none)")
     args = p.parse_args()
@@ -91,6 +94,17 @@ def main() -> int:
     way_counts = {w: 0 for w in ways}
     flight_counts = {}
     names += () if args.fill else ("true groups", "true seen", "all true", "true centre")
+    if args.follow:
+        said = model.forward
+
+        def following(*a, rigid=None, vis_prev=None, **kw):
+            step, *rest = said(*a, rigid=rigid, vis_prev=vis_prev, **kw)
+            if rigid is not None and vis_prev is not None:
+                hidden = (torch.sigmoid(vis_prev) < 0.5) & (rigid[..., 3] > 0)
+                step = torch.where(hidden[..., None], (rigid[..., :3].float() / model.traj_scale).to(step.dtype), step)
+            return (step, *rest)
+
+        model.forward = following
     # The fit as each round is handed it: (start, end, the guess the round starts from, the offsets).
     handed, plain = [], Sweeps.proposal
 
