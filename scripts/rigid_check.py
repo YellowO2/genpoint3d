@@ -62,6 +62,7 @@ def main() -> int:
     p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
     p.add_argument("--robust", type=int, default=None, help="the pose's refits (default: the run's)")
     p.add_argument("--fresh", type=float, default=None, help="the pose's freshness weighting, degrees (default: the run's)")
+    p.add_argument("--dump", default="", help="save the first clip's fit inputs and truth here (a .pt), to take the fit apart offline")
     p.add_argument("--cutoff", type=int, default=0, help="frames from this one on without their image: a forecast (0: none)")
     args = p.parse_args()
 
@@ -128,6 +129,11 @@ def main() -> int:
         place = lambda at, groups=sweeps.groups, seen=belief: to_guess(object_places(at, eq, groups, member, seen,
                                                                                      robust, fresh, tips, fall)[0])
         fits = {"guess": guess, "object": place(pos)}
+        if args.dump and not rows:
+            torch.save({k: (v.cpu() if torch.is_tensor(v) else v) for k, v in dict(
+                pos=pos, q=eq, groups=sweeps.groups, member=member, belief=belief, tips=tips, fall=fall, robust=robust, fresh=fresh,
+                anchor=anchor, guess=guess, traj_scale=model.traj_scale, true_pos=model.lookup_pos(b["traj"].float(), anchor[:, :N]),
+                vis=vis, N=N, handed=[(a, e, g.cpu(), f.cpu()) for a, e, g, f in handed]).items()}, args.dump)
         # The clip's own points at their true depth (their predicted place in the image kept), at
         # their true place in the image (their predicted depth kept), and both; and the seen points'
         # own errors dealt out among the points seen in that frame at random.
