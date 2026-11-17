@@ -28,4 +28,5 @@ deactivate
 source $ROOT/venvs/fyp/bin/activate
 echo "$(ls $ROOT/movi_objects | wc -l) of $(ls $ROOT/kubric | wc -l) old clips have a twin"
 python scripts/label_old_kubric.py --old $ROOT/kubric --objects $ROOT/movi_objects --write --caches $(for c in ${CACHES:-}; do echo $ROOT/$c; done)
+python scripts/one_clip_per_video.py --objects $ROOT/movi_objects --out $ROOT/cache_left_out --caches $(for c in ${CACHES:-}; do echo $ROOT/$c; done)
 echo "=== MOVI OBJECTS DONE ==="
