@@ -77,7 +77,7 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
         for p in m.parameters():
             p.add_(torch.randn_like(p) * 0.05)
     s = types.SimpleNamespace(hidden_loss=1.0, vel_loss=1.0, rigid_loss=1.0,
-                              group_loss=1.0 if kw else 0.0, group_labels="object", vis_loss=1.0 if kw else 0.0,
+                              group_loss=1.0 if kw else 0.0, vis_loss=1.0 if kw else 0.0,
                               accum=1, window=8, overlap=4, schedule=sched, down_hidden=1.0, down_loss=1.0,
                               centre_loss=1.0 if kw else 0.0)
     m.train()

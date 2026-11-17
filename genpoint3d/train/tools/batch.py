@@ -126,93 +126,51 @@ def nearest(p: torch.Tensor, k: int, among: torch.Tensor | None = None) -> torch
     return d.topk(min(k, N - 1), dim=-1, largest=False).indices
 
 
-def group_pairs(b: dict, by_object: bool = True, frames: tuple[int, int] | None = None,
-                k: int = NEIGHBOURS, far: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
-    """The pairs the group vectors are trained on, as `rigid_groups` labels
-    them but only for each point's `k` nearest points in the first of
-    `frames` (the truth's: where pieces meet, the pairs that are hard) among
-    the points queried before they end (the window has the others only once
-    a sweep has given them a past), and `far` points drawn at random (mostly
-    other pieces): (B, N, k + far) their indices and (B, N, k + far) bool
-    which are on its piece."""
+def same_group(b: dict, idx: torch.Tensor | None = None) -> torch.Tensor:
+    """(B, N, M) whether each point and its `idx` (B, N, M) (default: every
+    point) are on one rigid group: one object, where the clip says which
+    (`segment`); else a pair whose distance stays within RIGID_TOL of the
+    first frame's over the clip."""
     p = to_metres(b["traj"], b)
-    if frames is not None:
-        p = p[:, frames[0]:frames[1]]
     B, T, N, _ = p.shape
-    self_ = torch.arange(N, device=p.device)[None, :, None]
-    among = None if frames is None else b["query_t"] < frames[1]
-    idx = nearest(p[:, 0], k, among)
-    if far:
-        rand = torch.randint(0, N - 1, (B, N, far), device=p.device)
-        idx = torch.cat([idx, rand + (rand >= self_).long()], -1)        # never the point itself
+    if idx is None:
+        idx = torch.arange(N, device=p.device).expand(B, N, N)
+        d = torch.cdist(p.flatten(0, 1), p.flatten(0, 1)).view(B, T, N, N)
+    else:
+        m = idx.shape[-1]
+        mate = p.gather(2, idx.reshape(B, 1, N * m, 1).expand(B, T, N * m, 3)).reshape(B, T, N, m, 3)
+        d = (mate - p[:, :, :, None]).norm(dim=-1)
     m = idx.shape[-1]
-    mate = p.gather(2, idx.reshape(B, 1, N * m, 1).expand(B, T, N * m, 3)).reshape(B, T, N, m, 3)
-    d = (mate - p[:, :, :, None]).norm(dim=-1)
     same = (d - d[:, :1]).abs().amax(dim=1) < RIGID_TOL
-    if by_object and "segment" in b:
+    if "segment" in b:
         seg = b["segment"]
         labelled = (seg >= 0).all(-1)
         same = torch.where(labelled[:, None, None], seg[:, :, None] == seg.gather(1, idx.flatten(1)).view(B, N, m), same)
-    return idx, same
+    return same
 
 
-def rigid_pairs(b: dict, k: int = NEIGHBOURS) -> tuple[torch.Tensor, torch.Tensor]:
-    """Each point's partners for the rigidity loss: up to `k` of its nearest
-    points in frame 0 (the truth's) on the same moving rigid piece
-    (`rigid_buddies`): (B, N, k) their indices and (B, N, k) bool which are
-    partners. As Dynamic 3D Gaussians (Luiten et al. 2024) keep each point's
-    nearest neighbours rigid, found once in the first frame: on a rigid piece
-    a pair's distance is the same in every frame."""
-    return rigid_buddies(to_metres(b["traj"], b), k)
+def group_pairs(b: dict, frames: tuple[int, int], k: int = NEIGHBOURS, far: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
+    """The pairs the group vectors are trained on in a window over `frames`:
+    each point's `k` nearest in the window's first frame among the points
+    queried before its end, and `far` drawn at random: (B, N, k + far) their
+    indices and whether they are on its rigid group (`same_group`)."""
+    p = to_metres(b["traj"], b)[:, frames[0]]
+    B, N, _ = p.shape
+    idx = nearest(p, k, b["query_t"] < frames[1])
+    if far:
+        rand = torch.randint(0, N - 1, (B, N, far), device=p.device)
+        idx = torch.cat([idx, rand + (rand >= torch.arange(N, device=p.device)[None, :, None]).long()], -1)
+    return idx, same_group(b, idx)
 
 
-def components(same: torch.Tensor) -> torch.Tensor:
-    """(B, N) each point's piece, its lowest-numbered point, for `same` (B, N,
-    N) the pairs on one piece: points joined through each other."""
-    label = torch.arange(same.shape[1], device=same.device).expand(same.shape[0], -1)
-    while True:
-        new = torch.where(same, label[:, None], same.shape[1]).amin(-1).minimum(label)
-        if torch.equal(new, label):
-            return label
-        label = new
-
-
-def rigid_groups(b: dict, by_object: bool = True, frames: tuple[int, int] | None = None) -> torch.Tensor:
-    """(B, N, N) what the group vectors should put together: with `by_object`,
-    in a clip that says which object each point is on (`segment`), the pairs on
-    one object (Kubric's objects are rigid, the background one piece);
-    otherwise the pairs whose distance never strays more than RIGID_TOL from
-    the first frame's, moving or not, over `frames` (start, end), the frames a
-    window sees and its rigid fit works over (the whole clip by default)."""
+def rigid_pairs(b: dict, k: int = NEIGHBOURS, moved: float = 0.05) -> tuple[torch.Tensor, torch.Tensor]:
+    """Each point's partners for the rigidity loss: up to `k` of its `2k`
+    nearest in frame 0 on its rigid group (`same_group`), both moving more
+    than `moved` metres at some frame: (B, N, k) indices and which count."""
     p = to_metres(b["traj"], b)
-    if frames is not None:
-        p = p[:, frames[0]:frames[1]]
-    B, T, N, _ = p.shape
-    d = torch.cdist(p.flatten(0, 1), p.flatten(0, 1)).view(B, T, N, N)
-    groups = (d - d[:, :1]).abs().amax(dim=1) < RIGID_TOL
-    if by_object and "segment" in b:
-        seg = b["segment"]
-        labelled = (seg >= 0).all(-1)                                     # (B,)
-        groups = torch.where(labelled[:, None, None], seg[:, :, None] == seg[:, None], groups)
-    return groups
-
-
-def rigid_buddies(p: torch.Tensor, k: int, moved: float = 0.05) -> tuple[torch.Tensor, torch.Tensor]:
-    """From true positions (B, T, N, 3) in metres, each point's up to `k`
-    nearest points in frame 0 whose distance to it never strays more than
-    RIGID_TOL from frame 0's, both moving more than `moved` at some frame: (B, N,
-    k) indices and (B, N, k) bool which count. Kubric objects are rigid, so
-    this finds them without object ids; the moving part leaves the
-    background out. Only the 2k nearest are checked, never every pair."""
-    B, T, N, _ = p.shape
-    idx = nearest(p[:, 0], 2 * k)                                        # (B, N, c) nearest first
-    c = idx.shape[-1]
-    mate = p.gather(2, idx.reshape(B, 1, N * c, 1).expand(B, T, N * c, 3)).reshape(B, T, N, c, 3)
-    d = (mate - p[:, :, :, None]).norm(dim=-1)                          # (B, T, N, c)
-    rigid = (d - d[:, :1]).abs().amax(dim=1) < RIGID_TOL
-    move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved             # (B, N)
-    ok = rigid & move[:, :, None] & move.gather(1, idx.flatten(1)).view(B, N, c)
-    # The k nearest that count: a stable sort keeps the nearest first among them.
+    idx = nearest(p[:, 0], 2 * k)
+    move = (p - p[:, :1]).norm(dim=-1).amax(dim=1) > moved
+    ok = same_group(b, idx) & move[:, :, None] & move.gather(1, idx.flatten(1)).view(idx.shape)
     order = (~ok).float().argsort(dim=-1, stable=True)[..., :k]
     return idx.gather(2, order), ok.gather(2, order)
 

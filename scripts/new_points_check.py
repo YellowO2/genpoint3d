@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 
 from genpoint3d.tools.feature_lookup import id_cards
 from genpoint3d.train.score.Run import Run
-from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, same_group, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, robust_kabsch
 from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
@@ -113,7 +113,7 @@ def main() -> int:
         both["traj"] = torch.cat([b["traj"][:, :, :n], b["traj"][:, :, extra]], 2)
         both["norm_offset"] = torch.cat([b["norm_offset"][:, :, :n], b["norm_offset"][:, :, extra]], 2)
         both["segment"] = torch.cat([b["segment"][:, :n], b["segment"][:, extra]], 1)
-        piece = rigid_groups(both)                                           # (1, n + M, n + M)
+        piece = same_group(both)                                           # (1, n + M, n + M)
         piece = piece & ~torch.eye(piece.shape[1], dtype=torch.bool, device=device)
         q = old["query_t"]
         src_old = p_old.gather(1, q[:, None, :, None].expand(-1, 1, -1, 3))[:, 0]   # (1, n, 3) where queried

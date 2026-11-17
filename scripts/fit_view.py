@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, Subset
 
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_points
-from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, same_group, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.regress import Sweeps, object_places
 
@@ -69,7 +69,7 @@ def main() -> int:
     w = a[:, None] * belief[:, :, None, :]                                                     # (1, T, M, M)
     vis = b["visibility"][0].bool()
     true = to_metres(b["traj"].float(), b)[0]
-    piece = rigid_groups(b)[0].float().argmax(-1)                     # each point's piece: its first point
+    piece = same_group(b)[0].float().argmax(-1)                     # each point's piece: its first point
     hidden = []
     for t in range(T):
         for i in torch.nonzero(~vis[t])[:, 0].tolist():

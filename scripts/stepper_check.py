@@ -27,7 +27,7 @@ from genpoint3d.train.model.Stepper import Stepper, _shape_match
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.track_scores import track_scores
-from genpoint3d.train.tools.batch import components, rigid_groups
+from genpoint3d.train.tools.batch import components, same_group
 from genpoint3d.train.tools.metrics import clip_mean
 
 KEEP = ("traj", "visibility", "query_t", "segment", "intrinsics_256", "extrinsics", "norm_mean", "norm_scale",
@@ -50,9 +50,9 @@ class _Lean(Dataset):
 
 def _pieces(b: dict, device) -> torch.Tensor:
     """(1, N) each point's piece where the cache does not say: the points
-    whose distances to each other stay put over the clip (`rigid_groups`'
+    whose distances to each other stay put over the clip (`same_group`'
     motion rule), joined through each other."""
-    return components(rigid_groups({k: v.to(device) for k, v in b.items()}, by_object=False)).cpu()
+    return components(same_group({k: v.to(device) for k, v in b.items() if k != "segment"})).cpu()
 
 
 def _clips(ds: ClipDataset, workers: int, device) -> list[dict]:

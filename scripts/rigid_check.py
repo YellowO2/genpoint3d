@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader
 from genpoint3d.tools.traj_scale import GRAVITY, KUBRIC_FPS
 from genpoint3d.train.score.Run import Run
 from genpoint3d.train.score.spawn_points import spawn_points
-from genpoint3d.train.tools.batch import fine_inputs, rigid_groups, to_device, to_metres, visual_mask
+from genpoint3d.train.tools.batch import fine_inputs, same_group, to_device, to_metres, visual_mask
 from genpoint3d.train.tools.camera import project, unproject
 from genpoint3d.train.tools.metrics import MOVING_PX, clip_mean, motion_px, tapvid3d_metrics
 from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS
@@ -148,7 +148,7 @@ def main() -> int:
             torch.save({k: (v.cpu() if torch.is_tensor(v) else v) for k, v in dict(
                 pos=pos, q=eq, groups=sweeps.groups, member=member, belief=belief, tips=tips, fall=fall, robust=robust, fresh=fresh,
                 anchor=anchor, guess=guess, traj_scale=model.traj_scale, true_pos=model.lookup_pos(b["traj"].float(), anchor[:, :N]),
-                vis=vis, N=N, piece=rigid_groups(b).float().argmax(-1),
+                vis=vis, N=N, piece=same_group(b).float().argmax(-1),
                 handed=[(a, e, g.cpu(), f.cpu()) for a, e, g, f in handed]).items()}, f"{args.dump}/{dumped - 1}.pt")
         # The clip's own points at their true depth (their predicted place in the image kept), at
         # their true place in the image (their predicted depth kept), and both; and the seen points'
@@ -175,7 +175,7 @@ def main() -> int:
             fits[name] = place(at)
         if not args.fill:
             # The true pieces as group vectors (one axis each, far apart), then the true visibility, then all true.
-            piece = rigid_groups(b).float().argmax(-1)                       # (B, N) the piece's first point
+            piece = same_group(b).float().argmax(-1)                       # (B, N) the piece's first point
             truth = torch.nn.functional.one_hot(piece, piece.shape[1]).float() * 10
             # True visibility only in frames with their image: nothing is seen in a forecast frame.
             shown = b["visibility"].float() * (torch.arange(T, device=device) < (args.cutoff or T))[None, :, None]
@@ -201,7 +201,7 @@ def main() -> int:
                                ("backed", backed[m].float())):
                     rows.setdefault(("handed", k, start, end, kind, key), []).append(x.cpu())
         # Each point-frame's seen points on its true piece, itself left out.
-        mates = rigid_groups(b) & ~torch.eye(N, dtype=torch.bool, device=device)
+        mates = same_group(b) & ~torch.eye(N, dtype=torch.bool, device=device)
         seen_mates = torch.einsum("btj,bij->bti", vis.float(), mates.float())             # (B, T, N)
         for label, lo, hi in bins:
             counts[label] += int((~vis & moving & (seen_mates >= lo) & (seen_mates < hi)).sum())
@@ -249,7 +249,7 @@ def main() -> int:
             # turning; along the thrown path without turning; along the thrown path, turned as it truly turns.
             # And turned on as it turned over the last two seen frames (what the carry-forward does),
             # or with that turn changing as it changed over the last three.
-            last, arm, same = gt[:, C - 1:C], gt - c, rigid_groups(b).float()
+            last, arm, same = gt[:, C - 1:C], gt - c, same_group(b).float()
 
             def turn(a, to):
                 """(B, N, 3, 3) each point's object's turn from arms `a` to arms `to` (B, N, 3)."""

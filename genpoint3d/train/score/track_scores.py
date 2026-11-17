@@ -9,7 +9,7 @@ import torch
 
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
-from genpoint3d.train.tools.batch import rigid_groups, to_metres
+from genpoint3d.train.tools.batch import same_group, to_metres
 from genpoint3d.train.tools.likeness import SAME, likeness
 from genpoint3d.train.tools.metrics import MOVING_PX, at_query, motion_px, tapvid3d_metrics
 
@@ -80,12 +80,11 @@ def track_scores(prediction: Prediction, judging: ScoreSettings) -> dict:
 
 
 def _group_scores(groups: torch.Tensor, b: dict) -> dict:
-    """The group vectors against the training labels' pieces (`rigid_groups`):
-    a `likeness` over `SAME` says "same piece". Pairs
-    of a point with itself are left out."""
+    """The group vectors against the true rigid groups (`same_group`): a
+    `likeness` over `SAME` says "same group". A point with itself is left out."""
     v = groups.float()
     said = likeness(v[:, :, None], v[:, None]) > SAME
-    true = rigid_groups(b)
+    true = same_group(b)
     off = ~torch.eye(v.shape[1], dtype=torch.bool, device=v.device)
     said, true = said & off, true & off
     both = (said & true).flatten(1).sum(1).float()

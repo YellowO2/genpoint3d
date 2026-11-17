@@ -8,7 +8,7 @@ from genpoint3d.train.tools.farthest_first import GAP
 
 # Flags since removed, as a checkpoint may still hold them: each with the value
 # that left it off. A loss weight here only weighed its feature's loss.
-REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None, "spawn": None}
+REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None, "spawn": None, "group_labels": None}
 
 
 class Settings(argparse.Namespace):
@@ -114,9 +114,6 @@ class Settings(argparse.Namespace):
                             "clip says (0: no arrow)")
         p.add_argument("--down-loss", type=float, default=1.0,
                        help="which way is down, said for clips not told it: its angle off the truth")
-        p.add_argument("--group-labels", default="motion", choices=["object", "motion"],
-                       help="the pairs to put together: on one object where the clip says (else as motion), "
-                            "or those whose distance stays within 2 cm")
         p.add_argument("--vis-loss", type=float, default=1.0, help="the visibility head (0: no head)")
         # Optimiser
         p.add_argument("--lr", type=float, default=2e-4)
