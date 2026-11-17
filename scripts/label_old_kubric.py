@@ -74,7 +74,8 @@ for f in sorted(objects.glob("*.npz"))[: args.limit]:
             mine, raw0 = clip["traj_metric"].double(), to_cam0(traj)
             near, idx = torch.cdist(mine.transpose(0, 1).flatten(1), raw0.transpose(0, 1).flatten(1)).min(1)
             if float(near.max()) > 1e-2:
-                raise SystemExit(f"{pt}: a cached point matches no raw point ({float(near.max()):.3f})")
+                print(f"  left as it was: {pt}, a cached point matches no raw point ({float(near.max()):.3f} m)", flush=True)
+                continue
             clip["segment"] = torch.from_numpy(label)[idx].long()
             clip["centre_metric"] = to_cam0(centre.astype(np.float64))[:, idx].float()
             torch.save(clip, pt.with_suffix(".tmp"))
