@@ -4,7 +4,7 @@ One line each. Now: decided, being built. Later: not yet. Ruled out: tried, with
 
 ## Now
 
-- The theme: we give the model mechanisms to learn to use, as a simulator would; we do not enforce them on its answer.
+- The model is a learned physics engine: the engine's parts are ours to reference (rigid bodies, contacts, joints, motors, a step of gravity and inertia); what an engine calculates from known shapes and masses, the model says. Mechanisms for it to learn to use, not rules enforced on its answer.
 - Rigid place: a point is pulled toward the place that keeps its group's shape, as strongly as the model says the group is stiff (not enforced: a soft body gets no pull).
 - Contact force: where two rigid bodies touch, the model says the force between them, a push or a pull (one vector at the touching point, equal and opposite on the two); fixed physics turns it into each body's change of speed and spin about its centre of gravity, and its points follow. Inertia and gravity are given. Two things colliding and two limbs at a joint are the same case.
 
