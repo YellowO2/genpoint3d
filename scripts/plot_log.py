@@ -43,7 +43,7 @@ def main() -> int:
     if train:
         ax1.plot(steps[-len(train):], train, label="train", marker="o", ms=3)
     ax1.plot(steps[-len(val):], val, label="val", marker="o", ms=3)
-    ax1.set_xlabel("step"); ax1.set_ylabel("flow matching loss")
+    ax1.set_xlabel("step"); ax1.set_ylabel("loss")
     ax1.set_title("loss -- a widening gap is overfitting")
     ax1.legend(); ax1.grid(alpha=0.3)
 

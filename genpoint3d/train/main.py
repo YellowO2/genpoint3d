@@ -1,8 +1,7 @@
 """Fit the tracker to cached clips, scoring and saving it as it goes.
 
-Each training clip keeps its images before a random cutoff and forecasts the
-rest; validation does the same from `--eval-cutoff`, and reports APD in metres
-(TAPVid-3D's `average_pts_within_thresh`) beside the static baseline.
+Each training clip loses the images of some frames; validation loses those
+from `--eval-cutoff` on, and reports TAPVid-3D's APD.
 
 Run:  python -m genpoint3d.train.main --cache CACHE --frames-cache FRAMES --init CKPT
 """
