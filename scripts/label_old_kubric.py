@@ -67,23 +67,16 @@ for f in sorted(objects.glob("*.npz"))[: args.limit]:
             pt = Path(c).expanduser() / f"{f.stem}.pt"
             if not pt.exists():
                 continue
-            clip = torch.load(pt, weights_only=False)
-            get = (lambda k: clip[k]) if isinstance(clip, dict) else (lambda k: getattr(clip, k))
+            clip = torch.load(pt, weights_only=False)                                    # CachedClip.to_dict
             e0 = np.linalg.inv(raw["matrix_world"][0])
-            flip = np.diag([1.0, -1.0, -1.0])
-            world_to_cam0 = lambda x: (x @ e0[:3, :3].T + e0[:3, 3]) @ flip.T              # Blender's axes to OpenCV's
-            mine = get("traj").double()                                                    # (T, n, 3) frame-0 camera
-            raw0 = torch.from_numpy(world_to_cam0(traj)).transpose(0, 1)                   # (T, N, 3)
-            d = torch.cdist(mine.transpose(0, 1).flatten(1), raw0.transpose(0, 1).flatten(1))
-            near, idx = d.min(1)
+            flip = np.diag([1.0, -1.0, -1.0])                                              # Blender's axes to OpenCV's
+            to_cam0 = lambda x: torch.from_numpy((x @ e0[:3, :3].T + e0[:3, 3]) @ flip.T).transpose(0, 1)   # (T, N, 3)
+            mine, raw0 = clip["traj_metric"].double(), to_cam0(traj)
+            near, idx = torch.cdist(mine.transpose(0, 1).flatten(1), raw0.transpose(0, 1).flatten(1)).min(1)
             if float(near.max()) > 1e-2:
                 raise SystemExit(f"{pt}: a cached point matches no raw point ({float(near.max()):.3f})")
-            segment = torch.from_numpy(label)[idx].long()
-            cen = torch.from_numpy(world_to_cam0(centre.astype(np.float64))).transpose(0, 1)[:, idx].float()
-            if isinstance(clip, dict):
-                clip["segment"], clip["centre"] = segment, cen
-            else:
-                clip.segment, clip.centre = segment, cen
+            clip["segment"] = torch.from_numpy(label)[idx].long()
+            clip["centre_metric"] = to_cam0(centre.astype(np.float64))[:, idx].float()
             torch.save(clip, pt.with_suffix(".tmp"))
             pt.with_suffix(".tmp").replace(pt)
 
