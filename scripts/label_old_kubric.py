@@ -53,6 +53,9 @@ for f in sorted(objects.glob("*.npz"))[: args.limit]:
     still = moved < STILL
     label = np.where(still.any(1), (votes * still).argmax(1), votes.argmax(1))
     n = np.arange(len(label))
+    if (moved[n, label] < STILL).mean() < 0.99:
+        print(f"  not its twin, left unlabelled: {f.stem} ({(moved[n, label] < STILL).mean():.1%} of its points still)", flush=True)
+        continue
     share.append(votes[n, label][seen.any(1)] / seen.sum(1)[seen.any(1)])
     kept.append(moved[n, label])
     centre = np.full(traj.shape, np.nan, np.float32)
