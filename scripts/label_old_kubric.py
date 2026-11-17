@@ -32,6 +32,9 @@ share, kept, clips = [], [], 0
 for f in sorted(objects.glob("*.npz"))[: args.limit]:
     o = np.load(f)
     path = old / f.stem / f"{f.stem}.npy"
+    if not path.exists():
+        print(f"  no points file, left out: {f.stem}", flush=True)
+        continue
     raw = np.load(path, allow_pickle=True).item()
     xy, seen, traj = raw["coords"], ~raw["occluded"], raw["traj_3d"].astype(np.float64)   # (N, T, 2) px, (N, T), (N, T, 3)
     seg = o["seg"]                                                                        # (T, h, w)
