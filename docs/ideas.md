@@ -25,6 +25,7 @@ line each; a line leaves when it is built (runs.md then has it) or dropped.
 - The turn of a tumbling object in free flight: keeping the last turn is the fit's limit there (0.74 with true inputs against 0.99 with the true turn, forecast_all_true); the network should learn it (it needs the object's mass spread), not a new fit rule.
 - The fit's hand rules learned instead: keep the closed-form rigid solve, let the network say each point's weight in it (in place of the robust refits, the freshness weighting and the support threshold), and leave carrying an unseen object on to the network (the carry-forward rules score below the model's own guess there, hidden_by_placement).
 - The fit's own uncertainty as the model's trust input (the pose's standard error, already computed for the carry-forward) in place of s/(s+1), which barely tells 6 backing points from 44: the fit beats the guess only with 16+ seen points (kubric_fit_by_seen_points).
+- The rigid place (17 Nov, replaces "the fit"): a point is pulled toward the place that keeps its group's shape, as strongly as the model says that group is stiff (shape matching, Müller 2005): a mechanism the model uses as a simulator, not a rule; full pull is a rigid body, none a soft one. Where an unseen object goes is not part of it: that is physics (inertia, gravity, collisions). Kubric teaches only the stiff case.
 - Surface that comes back into view with its old point tracked wrong gets a second point, and nothing merges the two (the ball's returned points).
 
 ## Ruled out
