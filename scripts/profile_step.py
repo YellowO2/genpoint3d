@@ -26,7 +26,7 @@ def main(warm: int = 5, steps: int = 15) -> int:
     settings = Settings.from_command_line()
     torch.manual_seed(settings.seed)
     hardware = Hardware.pick(settings)
-    clips = apply_run_settings(split_clips(settings.cache, settings.val_frac, settings.seed, settings.mix),
+    clips = apply_run_settings(split_clips(settings.cache, settings.mix),
                                settings, hardware)
     loaders = Loaders(clips, settings)
     model = set_up_model(build_model(settings, clips.feat_dim), settings, hardware)

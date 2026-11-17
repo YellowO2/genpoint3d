@@ -41,7 +41,7 @@ def main() -> int:
     model, s = run.model, run.settings
     if not model.centre:
         raise SystemExit("the run has no arrows")
-    clips = split_clips([args.cache], s.val_frac, s.seed).val
+    clips = split_clips([args.cache]).val
     loader = DataLoader(run.dataset(clips, args.frames_cache), batch_size=1, shuffle=False, num_workers=4)
     amp = device.type == "cuda"
     print(f"{len(clips)} held-out clips | step {run.step} of {args.ckpt} | filled to {args.fill}", flush=True)

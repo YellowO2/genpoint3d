@@ -2,13 +2,12 @@
 
 import argparse
 
-from genpoint3d.train.data.split_clips import SEED, VAL_FRAC
 from genpoint3d.train.tools.farthest_first import GAP
 
 
 # Flags since removed, as a checkpoint may still hold them: each with the value
 # that left it off. A loss weight here only weighed its feature's loss.
-REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None, "spawn": None, "group_labels": None}
+REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None, "spawn": None, "group_labels": None, "val_frac": None}
 
 
 class Settings(argparse.Namespace):
@@ -52,7 +51,6 @@ class Settings(argparse.Namespace):
                        help="points asked and scored per clip; the rest are added where seen surface has none (0: all asked)")
         p.add_argument("--spawn-gap", type=float, default=GAP,
                        help="the spacing of added points, a share of the frame's width")
-        p.add_argument("--val-frac", type=float, default=VAL_FRAC)
         p.add_argument("--val-every", type=int, default=500)
         p.add_argument("--resume", default=None, metavar="RESUME_PT",
                        help="go on from an earlier job of this run: its resume.pt (weights, optimiser, schedule, log)")
@@ -64,7 +62,7 @@ class Settings(argparse.Namespace):
                        help="train and validate on the first N clips")
         p.add_argument("--workers", type=int, default=4)
         p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="bf16 autocast")
-        p.add_argument("--seed", type=int, default=SEED)
+        p.add_argument("--seed", type=int, default=0)
         # Model
         p.add_argument("--dim", type=int, default=256)
         p.add_argument("--depth", type=int, default=6)

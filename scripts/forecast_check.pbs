@@ -26,8 +26,8 @@ VAL=$ROOT/forecast_check/val
 mkdir -p $VAL
 python - <<PY
 from pathlib import Path
-from genpoint3d.train.data.split_clips import SEED, VAL_FRAC, split_clips
-for c in split_clips(["$ROOT/cache/kubric_obj48_centre"], VAL_FRAC, SEED).val:
+from genpoint3d.train.data.split_clips import split_clips
+for c in split_clips(["$ROOT/cache/kubric_obj48_centre"]).val:
     link = Path("$VAL") / c.name
     if not link.exists():
         link.symlink_to(c)

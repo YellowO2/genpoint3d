@@ -30,7 +30,7 @@ from genpoint3d.train.validation_settings import validation_settings
 def train(settings: Settings, gpus: Gpus):
     hardware = Hardware.pick(settings)
     saver = Saver(settings)
-    clips = split_clips(settings.cache, settings.val_frac, settings.seed, settings.mix)
+    clips = split_clips(settings.cache, settings.mix)
     clips = apply_run_settings(clips, settings, hardware)
     loaders = Loaders(clips, settings, gpus.rank, gpus.world)
     model = build_model(settings, clips.feat_dim)
