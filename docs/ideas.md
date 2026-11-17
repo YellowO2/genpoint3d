@@ -4,7 +4,8 @@ One line each. Now: decided, being built. Later: not yet. Ruled out: tried, with
 
 ## Now
 
-- Rigid place: a point is pulled toward the place that keeps its group's shape, as strongly as the model says the group is stiff.
+- The theme: we give the model mechanisms to learn to use, as a simulator would; we do not enforce them on its answer.
+- Rigid place: a point is pulled toward the place that keeps its group's shape, as strongly as the model says the group is stiff (not enforced: a soft body gets no pull).
 - Where an unseen object goes is physics (inertia, gravity, collisions), not rigidity: idea open.
 
 ## Later
