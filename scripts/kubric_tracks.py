@@ -43,13 +43,14 @@ def num_to_sample(counts, total, max_frac=0.1):
 
 
 def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matrix_world, n_tracks, rng,
-                 centre=0.5, centres=None):
+                 centre=0.5, centres=None, queries=None):
   """dict of coords (N, T, 2) pixels, occluded (N, T), traj_3d (N, T, 3)
   world, queries (N, 3) t, y, x, segment (N,) each point's object, and with
   `centres`, centre_3d (N, T, 3) its object's centre of mass in the world
   (NaN on the background). `centre` is where in its pixel a pixel's values
   were rendered: 0.5 for a render at its own size, 0.25 for MOVi-F's 256 px,
-  every other pixel of its 512 px."""
+  every other pixel of its 512 px. With `queries` (M, 3) t, y, x, a track
+  for each of those pixels instead of `n_tracks` drawn ones."""
   T, H, W = depth.shape
   cam_pos = matrix_world[:, :3, 3]
 
@@ -88,21 +89,26 @@ def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matr
         rough = rough + (diff > 0.05 ** 2)
     return rough <= 2
 
-  stride = 4
-  offset = rng.randint(0, stride, size=3)
-  tt, yy, xx = np.meshgrid(np.arange(offset[0], T, stride), np.arange(offset[1], H, stride),
-                           np.arange(offset[2], W, stride), indexing="ij")
-  grid = np.stack([tt, yy, xx], -1).reshape(-1, 3)  # (t, y, x) query candidates
+  if queries is None:
+    stride = 4
+    offset = rng.randint(0, stride, size=3)
+    tt, yy, xx = np.meshgrid(np.arange(offset[0], T, stride), np.arange(offset[1], H, stride),
+                             np.arange(offset[2], W, stride), indexing="ij")
+    grid = np.stack([tt, yy, xx], -1).reshape(-1, 3)  # (t, y, x) query candidates
+  else:
+    grid = np.asarray(queries)
   grid_seg = seg[grid[:, 0], grid[:, 1], grid[:, 2]]
   counts = np.bincount(grid_seg, minlength=len(boxes) + 1)
-  # The objects that move (a box corner more than 1 cm from where it started)
-  # get half the points, at up to all their candidates, so the still
-  # background does not crowd out the moving surfaces; the rest share the remainder.
-  moves = np.array([False] + [bool(np.abs(b - b[:1]).max() > 0.01) for b in boxes])
-  per_seg = np.zeros(len(counts), np.int64)
-  if moves.any():
-    per_seg[moves] = num_to_sample(counts[moves], n_tracks // 2, max_frac=1.0)
-  per_seg[~moves] = num_to_sample(counts[~moves], n_tracks - per_seg.sum())
+  per_seg = counts
+  if queries is None:
+    # The objects that move (a box corner more than 1 cm from where it started)
+    # get half the points, at up to all their candidates, so the still
+    # background does not crowd out the moving surfaces; the rest share the remainder.
+    moves = np.array([False] + [bool(np.abs(b - b[:1]).max() > 0.01) for b in boxes])
+    per_seg = np.zeros(len(counts), np.int64)
+    if moves.any():
+      per_seg[moves] = num_to_sample(counts[moves], n_tracks // 2, max_frac=1.0)
+    per_seg[~moves] = num_to_sample(counts[~moves], n_tracks - per_seg.sum())
   trust = trusted_normals()
 
   all_uv, all_occ, all_xyz, all_query, all_seg, all_centre = [], [], [], [], [], []
@@ -110,7 +116,7 @@ def point_tracks(depth, seg, obj_coords, normals, boxes, quats, intrinsics, matr
     candidates = grid[grid_seg == i]
     if per_seg[i] == 0 or len(candidates) == 0:
       continue
-    q = candidates[rng.choice(len(candidates), size=min(per_seg[i], len(candidates)), replace=False)]
+    q = candidates if queries is not None else candidates[rng.choice(len(candidates), size=min(per_seg[i], len(candidates)), replace=False)]
     qt, qy, qx = q[:, 0], q[:, 1], q[:, 2]
     if i == 0:
       # Background does not move: unproject from the query frame's depth and

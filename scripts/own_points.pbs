@@ -1,0 +1,33 @@
+#!/bin/bash
+# Each old Kubric clip's own points from its MOVi-F twin (scripts/movi_points.py), then a copy
+# of each cache holding them (scripts/own_points_cache.py). CPU only.
+#
+#   qsub -v "CACHES=kubric_dense kubric_more_dense" scripts/own_points.pbs      (LIMIT=n: a trial on n videos a process)
+#
+#PBS -N own_points
+#PBS -l select=1:ncpus=16:mem=96gb
+#PBS -l walltime=12:00:00
+#PBS -q normal
+#PBS -P personal-yhuang01
+#PBS -j oe
+#PBS -o /home/users/ntu/yhuang01/own_points.log
+
+set -euo pipefail
+ROOT=$HOME/scratch
+cd $ROOT/genpoint3d
+exec > >(tee -a $ROOT/${PBS_JOBNAME:-job}.live.log) 2>&1
+module load python/3.11.7-gcc11
+R=$ROOT/movi_f/256x256/1.0.0
+OUT=$ROOT/movi_points${LIMIT:+_trial}
+source $ROOT/venvs/movi/bin/activate
+for k in $(seq 0 15); do
+  python scripts/movi_points.py --root $R --shards $(( k * 64 )) $(( (k + 1) * 64 )) --objects $ROOT/movi_objects --out $OUT ${LIMIT:+--limit $LIMIT} &
+done
+wait
+deactivate
+source $ROOT/venvs/fyp/bin/activate
+export PYTHONPATH=$ROOT/genpoint3d
+for c in ${CACHES:?}; do
+  python scripts/own_points_cache.py --src $ROOT/cache/$c --points $OUT --dst $ROOT/cache/${c}_own${LIMIT:+_trial}
+done
+echo "=== OWN POINTS DONE ==="
