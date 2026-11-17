@@ -12,9 +12,7 @@ class Loaders:
     split, None without it."""
 
     def __init__(self, clips: Clips, settings, rank: int = 0, world: int = 1) -> None:
-        # What every loader shares: how a clip is turned into a sample,
-        # and how its points are made: as many as training's, its helpers added by the same rule.
-        how_data = dict(frames=clips.frames, spawn=settings.spawn, spawn_gap=settings.spawn_gap)
+        how_data = dict(frames=clips.frames, asked=settings.asked, spawn_gap=settings.spawn_gap)
         drawn = (dict(sampler=WeightedRandomSampler(clips.weights, len(clips.train)))
                  if clips.weights else dict(shuffle=True))
         self.train = DataLoader(

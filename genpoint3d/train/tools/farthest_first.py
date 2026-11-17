@@ -1,64 +1,37 @@
-"""Pick new points' places, the farthest from what is there first."""
+"""A point stands for the smallest piece of surface the camera can tell apart, never smaller than UNIT."""
 
 from typing import Callable
 
 import torch
 
-# A new point starts only this far (a share of the frame's width) from every
-# point seen there, in training (`ClipDataset._spawned`) and at test time
-# (`spawn_points`).
-SPAWN_GAP = 0.05
-# A point covers its place only if it sits on the surface its own pixel shows:
-# within this share of the depth there (test time; training knows who is seen).
-SURFACE_TOL = 0.03
+GAP = 0.05          # the piece the camera tells apart, a share of the frame's width
+UNIT = 0.05         # the smallest piece, metres
+SURFACE_TOL = 0.03  # a point is on the surface its pixel shows within this share of the depth there
 
 
-def farthest_first(px: torch.Tensor, d: torch.Tensor, far: float, most: int) -> list[int]:
-    """Up to `most` of the candidates at pixels `px` (C, 2), the farthest
-    first: each farther than `far` both by `d` (C,), its distance to what is
-    there already, and from the ones picked before it."""
-    picked = []
-    while len(picked) < most:
-        j = int(d.argmax())
-        if d[j] <= far:
-            break
-        picked.append(j)
-        d = torch.minimum(d, (px - px[j]).norm(dim=-1))
-    return picked
+def spacing(z: torch.Tensor, focal: float, width: float, gap: float) -> torch.Tensor:
+    """Pixels between points on surface `z` metres from the camera."""
+    return (UNIT * focal / z.clamp_min(1e-6)).clamp_min(gap * width)
 
 
-def fill_frames(frames: list[int], first: int, total: int, far: float,
-                candidates: Callable[[int, list], tuple[torch.Tensor, torch.Tensor]],
-                covering: Callable[[int, list], torch.Tensor]) -> list[tuple[int, int]]:
-    """The one spawning rule, in training and at test time, over `frames` (the
-    frames seen whole, in order) for a clip already holding the asked points.
-    The first frame is filled, the farthest first from every point seen there
-    and from each other, until the clip has `first` points: no gap minimum,
-    the farthest-first order spreads them evenly. Each later frame adds new
-    surface: a candidate farther than `far` (pixels) from every point seen
-    there, the farthest first, until the clip has `total`. `candidates(t,
-    born)` gives frame t's candidate pixels (C, 2) and their ids (C,);
-    `covering(t, born)` the pixels (M, 2) of the points seen in frame t, the
-    asked ones included; both are told the points added so far (`born`), and
-    the counts are of points added, so `first` and `total` are given net of
-    the asked points. Returns the added points as (frame, id)."""
+def add_points(frames: list[int], room: int,
+               candidates: Callable[[int, list], tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+               covering: Callable[[int, list], torch.Tensor]) -> list[tuple[int, int]]:
+    """Up to `room` new points as (frame, id): in each frame, a candidate with
+    no point within its spacing, the emptiest place first. `candidates(t,
+    born)` gives pixels (C, 2), ids (C,) and spacings (C,); `covering(t,
+    born)` the pixels (M, 2) of the points seen there."""
     born = []
-    for k, t in enumerate(frames):
-        room, gap = (first, 0.0) if k == 0 else (total, far)
-        if len(born) >= room:
-            continue
-        px, ids = candidates(t, born)
+    for t in frames:
+        px, ids, far = candidates(t, born)
         if not len(ids):
             continue
         cover = covering(t, born)
-        d = (torch.cdist(px, cover).min(1).values if len(cover)
-             else torch.full((len(ids),), float("inf"), device=px.device))
-        born += [(t, int(ids[j])) for j in farthest_first(px, d, gap, room - len(born))]
+        d = (torch.cdist(px, cover).min(1).values if len(cover) else torch.full_like(far, float("inf"))) / far
+        while len(born) < room:
+            j = int(d.argmax())
+            if d[j] <= 1:
+                break
+            born.append((t, int(ids[j])))
+            d = torch.minimum(d, (px - px[j]).norm(dim=-1) / far)
     return born
-
-
-def first_frame_share(total: int, reserve: int, asked: int) -> tuple[int, int]:
-    """(first, total) for `fill_frames`, net of the `asked` points: the first
-    frame filled up to `total - reserve` points, the later frames up to
-    `total`, `reserve` kept for new surface."""
-    return max(total - reserve - asked, 0), max(total - asked, 0)

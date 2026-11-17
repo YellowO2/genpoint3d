@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from genpoint3d.train.tools.farthest_first import SPAWN_GAP
+from genpoint3d.train.tools.farthest_first import GAP
 
 
 @dataclass
@@ -19,6 +19,5 @@ class ScoreSettings:
     scaling: str = "median"       # the protocol's global rescale, or "none"
     min_motion_px: float = 0.0    # score only points that move more than this
     cutoff: int = 0               # frames from here on get no image; 0 = none
-    fill: int = 0                 # points a clip is filled up to where surface has none; 0 = none added
-    spawn_gap: float = SPAWN_GAP  # a gap that wide (a share of the frame's width) gets a point: the run's
-    spawn_share: float = 0.5      # the share of `fill` kept for new surface after the first frame: the run's
+    fill: int = 0                 # points are added up to this many; 0 = none added
+    spawn_gap: float = GAP        # the run's

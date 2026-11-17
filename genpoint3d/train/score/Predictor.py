@@ -38,8 +38,7 @@ class Predictor:
         truly = fine["down_known"]
         fine["down_known"] = truly & ~hide
         if j.fill:
-            # With points added where none covers the frame, as helpers.
-            b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap, j.spawn_share,
+            b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, fine, vm)[1]))
         loss, out = self._track(b, fine, vm)
         b, out = _asked_only(b, out)

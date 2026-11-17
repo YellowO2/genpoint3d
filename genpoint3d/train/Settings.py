@@ -3,12 +3,12 @@
 import argparse
 
 from genpoint3d.train.data.split_clips import SEED, VAL_FRAC
-from genpoint3d.train.tools.farthest_first import SPAWN_GAP
+from genpoint3d.train.tools.farthest_first import GAP
 
 
 # Flags since removed, as a checkpoint may still hold them: each with the value
 # that left it off. A loss weight here only weighed its feature's loss.
-REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None}
+REMOVED = {"fit_blend": 0, "physics": 0, "blend_hidden": 0, "trust_loss": None, "physics_loss": None, "spawn": None}
 
 
 class Settings(argparse.Namespace):
@@ -47,14 +47,11 @@ class Settings(argparse.Namespace):
         p.add_argument("--steps", type=int, default=1000)
         p.add_argument("--batch", type=int, default=1)
         p.add_argument("--accum", type=int, default=1, help="micro-batches per optimiser step")
-        p.add_argument("--points", type=int, default=1000, help="points drawn per clip")
-        p.add_argument("--spawn", type=int, default=500, metavar="M",
-                       help="M of each clip's --points are helpers added by the spawning rule, frame by frame where "
-                            "no point seen covers the surface, the clip's other tracks standing in for them; the "
-                            "rest are asked, and only those are scored (0: all asked)")
-        p.add_argument("--spawn-gap", type=float, default=SPAWN_GAP,
-                       help="a new point starts only this far (a share of the frame's width) from every point "
-                            "tracked and seen there, in training and when the run is scored")
+        p.add_argument("--points", type=int, default=1000, help="the most points a clip holds")
+        p.add_argument("--asked", type=int, default=256,
+                       help="points asked and scored per clip; the rest are added where seen surface has none (0: all asked)")
+        p.add_argument("--spawn-gap", type=float, default=GAP,
+                       help="the spacing of added points, a share of the frame's width")
         p.add_argument("--val-frac", type=float, default=VAL_FRAC)
         p.add_argument("--val-every", type=int, default=500)
         p.add_argument("--resume", default=None, metavar="RESUME_PT",
@@ -144,8 +141,8 @@ class Settings(argparse.Namespace):
             p.error("--group-feedback E and --group-loss W go together")
         if min(settings.hidden_loss, settings.vis_loss, settings.vel_loss, settings.rigid_loss, settings.centre_loss) < 0:
             p.error("loss weights are 0 or more")
-        if settings.spawn and settings.batch > 1:
-            p.error("--spawn fills each clip as far as its surface allows, so clips differ in points: needs --batch 1")
+        if settings.asked and settings.batch > 1:
+            p.error("--asked adds points as the surface allows, so clips differ in points: needs --batch 1")
         if settings.min_context < 1:
             p.error("--min-context is at least 1: frame 0 always keeps its image")
         return settings

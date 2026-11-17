@@ -22,8 +22,7 @@ of the guess the round starts from, of the fit handed (guess + offset), how
 often the fit is the nearer, and the final answer.
 
 With `--fill`, points are first added on new surface as at test time; they
-are mates but not scored and have no truth. `--spawn` draws the clip's
-own tracks as training does instead, so every point has its truth. With
+are mates but not scored and have no truth. With
 `--cutoff C`, frames from C on have no image (a forecast) and are scored on
 their own: there every pose is carried on from the fitted frames.
 
@@ -57,14 +56,11 @@ def main() -> int:
     p.add_argument("--cache", required=True)
     p.add_argument("--frames-cache", required=True)
     p.add_argument("--points", type=int, default=256)
-    p.add_argument("--fill", type=int, default=0, help="points each clip is filled up to first where surface has none")
-    p.add_argument("--spawn", type=int, default=0,
-                   help="up to this many of the clip's tracks started where they come into view, as training draws them")
+    p.add_argument("--fill", type=int, default=0, help="points are added up to this many")
     p.add_argument("--query-before", type=int, default=0, help="only the tracks queried before this frame (0: all)")
     p.add_argument("--robust", type=int, default=None, help="the pose's refits (default: the run's)")
     p.add_argument("--fresh", type=float, default=None, help="the pose's freshness weighting, degrees (default: the run's)")
-    p.add_argument("--spawn-share", type=float, default=None,
-                   help="the share of --fill kept for new surface after the first frame (default: the run's)")
+    p.add_argument("--spawn-gap", type=float, default=None, help="the spacing of added points (default: the run's)")
     p.add_argument("--follow", action="store_true",
                    help="a what-if: each round, a point-frame believed hidden that has a fit takes the fit's place, "
                         "whatever the model says (what following the fit exactly would give)")
@@ -79,8 +75,7 @@ def main() -> int:
         raise SystemExit("the run has no fit input")
     robust = model.fit_robust if args.robust is None else args.robust
     fresh = model.fit_fresh if args.fresh is None else args.fresh
-    ds = run.dataset(args.cache, args.frames_cache, points=args.points, query_before=args.query_before,
-                     spawn=args.spawn)
+    ds = run.dataset(args.cache, args.frames_cache, points=args.points, query_before=args.query_before)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=4)
     amp = device.type == "cuda"
     print(f"{len(ds)} clips | step {run.step} of {args.ckpt} | refits {robust}, freshness {fresh}", flush=True)
@@ -131,7 +126,7 @@ def main() -> int:
                     pass
             return sweeps
 
-        every = spawn_points(model, b, fine, view, args.fill, run.spawn_gap, run.spawn_share if args.spawn_share is None else args.spawn_share,
+        every = spawn_points(model, b, fine, view, args.fill, args.spawn_gap or run.spawn_gap,
                              lambda bb: (lambda sw: (sw.whole, sw.vis))(track(bb))) if args.fill else b
         handed.clear()
         Sweeps.proposal = recorded
