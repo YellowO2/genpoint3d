@@ -26,6 +26,7 @@ p.add_argument("--write", action="store_true", help="save the labels (without: o
 p.add_argument("--limit", type=int, default=None)
 args = p.parse_args()
 old, objects = Path(args.old).expanduser(), Path(args.objects).expanduser()
+STILL = 0.001   # metres
 
 share, kept, clips = [], [], 0
 for f in sorted(objects.glob("*.npz"))[: args.limit]:
@@ -42,22 +43,26 @@ for f in sorted(objects.glob("*.npz"))[: args.limit]:
     shown = seg[np.arange(T)[None], v, u]                                                  # (N, T)
     K = len(o["positions"])
     votes = np.stack([((shown == k) & seen).sum(1) for k in range(K + 1)], 1)              # (N, K + 1)
-    label = votes.argmax(1)
-    share.append(votes.max(1)[seen.any(1)] / seen.sum(1)[seen.any(1)])
-    # Its place in its object's frame, which a point of the object keeps (the background: the world).
-    local = traj.copy()
+    # How far the point moves in each object's frame (0: the world, the background's).
+    moved = np.empty((len(traj), K + 1))
+    for k in range(K + 1):
+        local = traj if k == 0 else np.einsum("tji,ntj->nti", quat_to_rot(o["quaternions"][k - 1].astype(np.float64)),
+                                              traj - o["positions"][k - 1][None])
+        moved[:, k] = np.linalg.norm(local - local.mean(1, keepdims=True), axis=-1).max(1)
+    # Its object: one in whose frame it stays still; of several (things at rest), the one its pixel shows most.
+    still = moved < STILL
+    label = np.where(still.any(1), (votes * still).argmax(1), votes.argmax(1))
+    n = np.arange(len(label))
+    share.append(votes[n, label][seen.any(1)] / seen.sum(1)[seen.any(1)])
+    kept.append(moved[n, label])
     centre = np.full(traj.shape, np.nan, np.float32)
     for k in range(1, K + 1):
-        R = quat_to_rot(o["quaternions"][k - 1].astype(np.float64))                        # (T, 3, 3)
-        m = label == k
-        local[m] = np.einsum("tji,ntj->nti", R, traj[m] - o["positions"][k - 1][None])
-        centre[m] = o["positions"][k - 1][None]
-    moved = np.linalg.norm(local - local.mean(1, keepdims=True), axis=-1).max(1)           # (N,) metres
-    kept.append(moved)
+        centre[label == k] = o["positions"][k - 1][None]
     clips += 1
     if args.write:
         raw["segment"], raw["centre_3d"] = label.astype(np.int32), centre
-        np.save(path, raw)
+        np.save(path.with_suffix(".tmp.npy"), raw)
+        path.with_suffix(".tmp.npy").replace(path)
         for c in args.caches:
             pt = Path(c).expanduser() / f"{f.stem}.pt"
             if not pt.exists():
@@ -79,11 +84,12 @@ for f in sorted(objects.glob("*.npz"))[: args.limit]:
                 clip["segment"], clip["centre"] = segment, cen
             else:
                 clip.segment, clip.centre = segment, cen
-            torch.save(clip, pt)
+            torch.save(clip, pt.with_suffix(".tmp"))
+            pt.with_suffix(".tmp").replace(pt)
 
 share, kept = np.concatenate(share), np.concatenate(kept)
 print(f"{clips} clips, {len(kept)} points")
 print(f"  the frames a seen point is shown on its object: median {np.median(share):.3f}, under 0.8 for {(share < 0.8).mean():.3%} of points")
 print(f"  how far a point moves in its object's frame, cm: median {np.median(kept) * 100:.2f}, "
       f"90% under {np.percentile(kept, 90) * 100:.2f}, 99% under {np.percentile(kept, 99) * 100:.2f}, "
-      f"over 2 cm {(kept > 0.02).mean():.3%}")
+      f"not still in any object's frame {(kept >= STILL).mean():.3%}")
