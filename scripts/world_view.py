@@ -92,8 +92,8 @@ const renderer = new THREE.WebGLRenderer({antialias: true});
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(40, 1, 0.05, 500), controls = new OrbitControls(camera, renderer.domElement);
-camera.up.set(0, 0, 1);
-controls.maxPolarAngle = Math.PI / 2 - 0.03;                                 // never under the floor                                                    // Kubric's world: z up, the floor at z = 0
+camera.up.set(0, 0, 1);                                                    // Kubric's world: z up, the floor at z = 0
+controls.maxPolarAngle = Math.PI / 2 - 0.03;                               // never under the floor
 scene.background = new THREE.Color(0x111111);
 scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 2.4));
 const sun = new THREE.DirectionalLight(0xffffff, 1.4);
