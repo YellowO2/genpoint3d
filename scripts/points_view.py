@@ -65,28 +65,65 @@ for i in args.clips:
         print(views[-1]["name"], flush=True)
 
 PAGE = """<!doctype html><meta charset=utf-8><title>Points view</title>
-<style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-canvas{display:block;width:100vw;height:calc(100vh - 50px);cursor:grab}</style>
+<style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif;overflow:hidden}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;height:34px}
+canvas{display:block}</style>
 <div id=bar><select id=which></select><label>frame <input id=t type=range min=0 value=0> <span id=tn></span></label>
-<label><input id=colour type=checkbox> colour by object</label><label><input id=faces type=checkbox checked> faces</label><label>point size <input id=size type=range min=1 max=8 value=3></label>
-<span>drag to turn, wheel to zoom; faded: not seen in this frame</span></div><canvas id=c></canvas>
-<script>const V=__DATA__;const $=i=>document.getElementById(i),c=$('c'),g=c.getContext('2d');let yaw=0,pitch=0,zoom=1,v;
-V.forEach((x,i)=>$('which').add(new Option(x.name,i)));
-function pick(){v=V[$('which').value];$('t').max=v.xyz.length-1;let s=[0,0,0],k=0;v.xyz[0].forEach((p,i)=>{if(v.born[i]==0){s[0]+=p[0];s[1]+=p[1];s[2]+=p[2];k++}});v.mid=s.map(a=>a/Math.max(k,1));draw()}
-function hue(k){return k?`hsl(${k*67%360},80%,60%)`:'#888'}
-function draw(){c.width=c.clientWidth;c.height=c.clientHeight;g.fillStyle='#111';g.fillRect(0,0,c.width,c.height);const t=+$('t').value;$('tn').textContent=t;
-const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch),f=c.height*1.1*zoom,D=v.mid[2],sz=+$('size').value,out=[],at={};
-v.xyz[t].forEach((p,i)=>{if(v.born[i]>t)return;let x=p[0]-v.mid[0],y=p[1]-v.mid[1],z=p[2]-v.mid[2];
-let x1=cy*x+sy*z,z1=-sy*x+cy*z,y1=cp*y-sp*z1,z2=sp*y+cp*z1+D;if(z2<10)return;at[i]=[z2,c.width/2+f*x1/z2,c.height/2+f*y1/z2,i];out.push(at[i])});
-const col=i=>$('colour').checked?null:v.rgb[i];
-if($('faces').checked){const F=v.faces[t].filter(a=>a.every(i=>at[i])).map(a=>[(at[a[0]][0]+at[a[1]][0]+at[a[2]][0])/3,a]).sort((a,b)=>b[0]-a[0]);
-for(const [z,a] of F){g.beginPath();g.moveTo(at[a[0]][1],at[a[0]][2]);g.lineTo(at[a[1]][1],at[a[1]][2]);g.lineTo(at[a[2]][1],at[a[2]][2]);g.closePath();
-g.fillStyle=col(a[0])?`rgb(${[0,1,2].map(k=>Math.round((v.rgb[a[0]][k]+v.rgb[a[1]][k]+v.rgb[a[2]][k])/3))})`:hue(v.object[a[0]]);g.fill()}}
-out.sort((a,b)=>b[0]-a[0]);for(const [z,x,y,i] of out){g.globalAlpha=v.seen[t][i]?1:0.25;
-g.fillStyle=$('colour').checked?hue(v.object[i]):`rgb(${v.rgb[i]})`;const s=Math.max(sz*D/z,1);g.fillRect(x-s/2,y-s/2,s,s)}g.globalAlpha=1}
-let down=null;c.onmousedown=e=>down=[e.clientX,e.clientY];onmouseup=()=>down=null;
-onmousemove=e=>{if(!down)return;yaw+=(e.clientX-down[0])/200;pitch+=(e.clientY-down[1])/200;down=[e.clientX,e.clientY];draw()};
-c.onwheel=e=>{e.preventDefault();zoom*=e.deltaY<0?1.1:0.9;draw()};
-['which'].forEach(i=>$(i).onchange=pick);['t','size','colour','faces'].forEach(i=>$(i).oninput=draw);onresize=draw;pick();</script>"""
+<label><input id=colour type=checkbox> colour by object</label><label><input id=faces type=checkbox checked> faces</label>
+<label>point size <input id=size type=range min=1 max=10 value=3></label>
+<span>drag to turn, right-drag to move, wheel to zoom; dim: not seen in this frame</span></div>
+<script type=importmap>{"imports":{"three":"https://unpkg.com/three@0.178.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.178.0/examples/jsm/"}}</script>
+<script type=module>
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+const V = __DATA__, $ = i => document.getElementById(i), BAR = 50;
+const renderer = new THREE.WebGLRenderer({antialias: true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000), controls = new OrbitControls(camera, renderer.domElement);
+scene.background = new THREE.Color(0x111111);
+const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({vertexColors: true, size: 0.03}));
+const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.DoubleSide}));
+scene.add(mesh, points);
+V.forEach((x, i) => $('which').add(new Option(x.name, i)));
+let v;
+// The clip's points are in the first frame's camera, in cm, x right, y down, z ahead; three.js looks down -z with y up.
+const place = p => [p[0] / 100, -p[1] / 100, -p[2] / 100];
+const paint = (i, dim) => {
+  const c = $('colour').checked ? new THREE.Color().setHSL(v.object[i] * 67 % 360 / 360, v.object[i] ? 0.8 : 0, 0.6)
+                                : new THREE.Color().setRGB(v.rgb[i][0] / 255, v.rgb[i][1] / 255, v.rgb[i][2] / 255, THREE.SRGBColorSpace);
+  return c.multiplyScalar(dim).toArray();
+};
+function show() {
+  const t = +$('t').value, here = [];
+  $('tn').textContent = t;
+  v.xyz[t].forEach((p, i) => { if (v.born[i] <= t) here.push(i); });
+  points.geometry.dispose();
+  points.geometry = new THREE.BufferGeometry();
+  points.geometry.setAttribute('position', new THREE.Float32BufferAttribute(here.flatMap(i => place(v.xyz[t][i])), 3));
+  points.geometry.setAttribute('color', new THREE.Float32BufferAttribute(here.flatMap(i => paint(i, v.seen[t][i] ? 1 : 0.3)), 3));
+  points.material.size = +$('size').value / 100;
+  mesh.geometry.dispose();
+  mesh.geometry = new THREE.BufferGeometry();
+  mesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(v.xyz[t].flatMap(place), 3));
+  mesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(v.xyz[t].flatMap((p, i) => paint(i, 0.8)), 3));
+  mesh.geometry.setIndex(v.faces[t].flat());
+  mesh.visible = $('faces').checked;
+}
+function pick() {
+  v = V[$('which').value];
+  $('t').max = v.xyz.length - 1;
+  const first = v.xyz[0].filter((p, i) => v.born[i] == 0).map(place), mid = [0, 1, 2].map(k => first.reduce((s, p) => s + p[k], 0) / Math.max(first.length, 1));
+  camera.position.set(0, 0, 0);
+  controls.target.set(...mid);
+  controls.update();
+  show();
+}
+function size() { const w = innerWidth, h = innerHeight - BAR; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+$('which').onchange = pick;
+['t', 'size', 'colour', 'faces'].forEach(i => $(i).oninput = show);
+addEventListener('resize', size);
+size(); pick();
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>"""
 Path(args.out).expanduser().write_text(PAGE.replace("__DATA__", json.dumps(views, separators=(",", ":"))))
 print(f"written {args.out}")
