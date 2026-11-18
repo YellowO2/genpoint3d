@@ -132,7 +132,8 @@ b = batch()
 b["traj"][:, :, :3] = b["traj"][:, :, :1]                 # three points that move as one: a body
 b["segment"] = torch.tensor([[0, 0, 0, 1, 1, 1]])
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
-dead = [n for n, p in m.named_parameters() if p.grad is None or p.grad.abs().sum() == 0]
+dead = [n for n, p in m.named_parameters() if (p.grad is None or p.grad.abs().sum() == 0)
+        and not n.startswith(("pair", "touch_out"))]            # the touches' weights: checked below, on bodies that touch
 bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
 print(f"world: loss {losses.method:.4f} vis {losses.visibility:.4f}, params without gradient: {dead}, "
       f"with a non-finite one: {len(bad)} {bad[:3]} (want 0)")
