@@ -2,7 +2,7 @@
 
 ## The design
 
-A converter from the real world to a physics engine: the model refines the engine's world as it sees more. Whatever a physics engine does, the engine here does.
+A model that imagines the world with a physics engine as its tool: it keeps the world stored as an engine's, the engine plays it, and the model corrects it as it sees more. Whatever a physics engine does, the engine here does.
 
 1. The world is stored once: bodies, each with its points, whole shape, mass, stiffness and a record of how it moved.
 2. Each frame, the engine predicts and the model corrects the stored world from what it sees: where things are, and what each body is.
