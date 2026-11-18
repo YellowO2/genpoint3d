@@ -168,6 +168,13 @@ class World:
         pairs = torch.unique(torch.stack([torch.where(swap, m, n), torch.where(swap, n, m)], 1), dim=0)
         return pairs[:, 0], pairs[:, 1]
 
+    def sliding(self, t: int, n: torch.Tensor, m: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Midway between each pair of points `n`, `m` (C,) in frame `t`, (C, 3), and how the two's bodies go
+        past each other there, as they now go, (C, 3)."""
+        at = (self.pos[t, n] + self.pos[t, m]) / 2
+        goes = lambda k: self.speed[k] + torch.linalg.cross(self.spin[k], at - self.centre[t, k])
+        return at, goes(self.body[n]) - goes(self.body[m])
+
     def ahead(self, t: int, gravity: torch.Tensor, free: Optional[torch.Tensor] = None,
               heavy: Optional[torch.Tensor] = None, touch: Optional[Touch] = None) -> torch.Tensor:
         """(N, 3) where the engine puts every point in frame `t` + 1, written there as the world's until that

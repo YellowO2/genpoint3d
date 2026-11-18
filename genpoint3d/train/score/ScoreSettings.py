@@ -14,6 +14,7 @@ class ScoreSettings:
     window: int = 0               # frames tracked at a time, 0 = the whole clip
     overlap: int = 0              # frames each window shares with the one before
     schedule: str = "ffbb"        # the sweeps over the windows
+    rounds: int = 0               # looks at each frame of the stored world; 0 = over windows
     space: str = "3d"             # "2d" scores the projections in pixels
     oracle_axis: str = ""         # "x", "y" or "z": that channel set to the truth
     scaling: str = "median"       # the protocol's global rescale, or "none"

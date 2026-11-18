@@ -48,4 +48,5 @@ class Run:
         """Scoring with the run's own refinement and spawning, from `cutoff` (0: every frame has its image)."""
         s = self.settings
         return ScoreSettings(device=device, amp=device.type == "cuda", window=s.window, overlap=s.overlap, schedule=s.schedule,
-                             cutoff=cutoff, spawn_gap=self.spawn_gap, **kw)
+                             cutoff=cutoff, spawn_gap=self.spawn_gap,
+                             rounds=s.rounds if vars(s).get("world") else 0, **kw)

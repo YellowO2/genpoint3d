@@ -10,6 +10,7 @@ from genpoint3d.train.tools.batch import (
 )
 from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.regress import regress_loss
+from genpoint3d.train.tools.track import track_loss
 from genpoint3d.train.tools.visibility import visible_target
 
 
@@ -25,7 +26,7 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     vm = b["view"]
     b["frames"] = black_out(b["frames"], vm)
     mask, w = hidden_weight(vis, apd_weight(b, traj), settings.hidden_loss)
-    extra = dict(vel_weight=settings.vel_loss)
+    extra = {}
     if settings.rigid_loss:
         extra.update(pairs=rigid_pairs(b), rigid_weight=settings.rigid_loss)
     if settings.group_loss:
@@ -48,12 +49,12 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
         # Back-propagated a round at a time, divided by accum so the
         # accumulated gradient is the effective batch's mean.
-        loss, parts = regress_loss(model, traj, anchor, mask=mask, weight=w,
-                                   backward=1 / settings.accum,
-                                   window=settings.window, overlap=settings.overlap,
-                                   schedule=settings.schedule, **extra,
-                                   context=b["context"], visual_mask=vm, id_card=b["id_card"],
-                                   patch_xyz=b["patch_xyz"], **fine)
+        how = (dict(rounds=settings.rounds, ahead_weight=settings.ahead_loss) if settings.world
+               else dict(window=settings.window, overlap=settings.overlap, schedule=settings.schedule,
+                         vel_weight=settings.vel_loss))
+        loss, parts = (track_loss if settings.world else regress_loss)(
+            model, traj, anchor, mask=mask, weight=w, backward=1 / settings.accum, **how, **extra,
+            context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"], **fine)
         # What the backward passes left on the map, the rest of the way into the CNN.
         model.fine.replay(b["frames"], fine["fine_map"])
     return Losses(method=loss.item() / settings.accum, visibility=parts["visibility"].item() / settings.accum,

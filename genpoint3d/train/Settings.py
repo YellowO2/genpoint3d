@@ -86,6 +86,12 @@ class Settings(argparse.Namespace):
                             "(needs --rigid-proposal)")
         p.add_argument("--feedback-scale", type=float, default=10.0,
                        help="multiplies what the fed-back visibility and group vector add")
+        # The stored world, beside the windows until it is shown to work
+        p.add_argument("--world", type=int, default=0, choices=[0, 1],
+                       help="track a frame at a time on the stored world (tools/track.py) instead of over windows")
+        p.add_argument("--rounds", type=int, default=3, help="with --world, looks at each frame")
+        p.add_argument("--ahead-loss", type=float, default=1.0,
+                       help="with --world, the error of the engine's next frame: what the model says of the bodies")
         # Refinement
         p.add_argument("--window", type=int, default=16, help="frames per window")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")

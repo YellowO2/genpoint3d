@@ -7,6 +7,7 @@ from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, to_device, visual_mask
 from genpoint3d.train.tools.regress import regress_loss
+from genpoint3d.train.tools.track import track_loss
 
 
 class Predictor:
@@ -54,9 +55,9 @@ class Predictor:
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             # The loss, as every score, on the asked points only.
-            return regress_loss(self.model, b["traj"], b["anchor"], mask=b["visibility"] & b["asked"][:, None],
-                                window=j.window,
-                                overlap=j.overlap, schedule=j.schedule, **cond)
+            how = dict(rounds=j.rounds) if j.rounds else dict(window=j.window, overlap=j.overlap, schedule=j.schedule)
+            return (track_loss if j.rounds else regress_loss)(
+                self.model, b["traj"], b["anchor"], mask=b["visibility"] & b["asked"][:, None], **how, **cond)
 
     def done(self) -> None:
         self.model.train()
