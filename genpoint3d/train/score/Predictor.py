@@ -2,6 +2,7 @@
 
 import torch
 
+from genpoint3d.train.score.Adder import Adder
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
 from genpoint3d.train.score.spawn_points import spawn_points
@@ -38,16 +39,20 @@ class Predictor:
         self.served += traj.shape[0]
         truly = fine["down_known"]
         fine["down_known"] = truly & ~hide
-        if j.fill:
+        add = None
+        if j.fill and j.rounds:
+            # The stored world adds its points as the clip goes.
+            add = Adder(b, fine, vm, j.fill, j.spawn_gap)
+        elif j.fill:
             b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, fine, vm)[1]))
-        loss, out = self._track(b, fine, vm)
+        loss, out = self._track(b, fine, vm, add)
         b, out = _asked_only(b, out)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],
                           down_scored=truly & hide)
 
-    def _track(self, b: dict, fine: dict, vm: torch.Tensor):
+    def _track(self, b: dict, fine: dict, vm: torch.Tensor, add=None):
         j = self.judging
         # The batch's own query frames: it may hold points added since `fine` was made.
         cond = dict(context=b["context"], visual_mask=vm, id_card=b["id_card"], patch_xyz=b["patch_xyz"],
@@ -55,7 +60,7 @@ class Predictor:
         # The training step's autocast: a bf16 model is scored in bf16.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=j.amp):
             # The loss, as every score, on the asked points only.
-            how = dict(rounds=j.rounds) if j.rounds else dict(window=j.window, overlap=j.overlap, schedule=j.schedule)
+            how = dict(rounds=j.rounds, add=add) if j.rounds else dict(window=j.window, overlap=j.overlap, schedule=j.schedule)
             return (track_loss if j.rounds else regress_loss)(
                 self.model, b["traj"], b["anchor"], mask=b["visibility"] & b["asked"][:, None], **how, **cond)
 

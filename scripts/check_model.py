@@ -144,6 +144,19 @@ print(f"  tracks {tuple(pred.tracks.shape)}, forecast change when frames >= 6 ch
 print(f"  {len({**track_scores(pred, j), **visibility_scores(pred)})} scores")
 js = ScoreSettings(device=torch.device("cpu"), rounds=2, cutoff=6, fill=N + 8, spawn_gap=0.02)
 print(f"  with points added: tracks {tuple(Predictor(m, js)(b).tracks.shape)} (want {tuple(pred.tracks.shape)})")
+from genpoint3d.train.score.Adder import Adder
+from genpoint3d.train.tools.track import Tracker
+
+bd = to_device(b, torch.device("cpu"))
+whole = torch.ones(B, T, 2, 2, dtype=torch.bool)
+fi = fine_inputs(m, bd)
+run = Tracker(m, bd["anchor"], T, 2, dict(context=bd["context"], visual_mask=whole, id_card=bd["id_card"],
+                                          patch_xyz=bd["patch_xyz"], **fi), Adder(bd, fi, whole, N + 8, 0.02))
+with torch.no_grad():
+    for _ in run:
+        pass
+print(f"  points added as the clip goes: {run.anchor.shape[1] - N} (want 8), first given in frames "
+      f"{sorted(set(run.cond['query_t'][0, N:].tolist()))}, tracks {tuple(run.tracks.shape)}")
 
 
 def world_tracks(b: dict, view: torch.Tensor) -> torch.Tensor:

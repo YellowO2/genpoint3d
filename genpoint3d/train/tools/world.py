@@ -44,6 +44,16 @@ class World:
         # points, and how many frames have said where its centre of gravity is.
         self.seed, self.first, self.backed, self.told = (torch.zeros(0, dtype=torch.long, device=dev) for _ in range(4))
 
+    def add(self, anchor: torch.Tensor, t: int) -> None:
+        """More points, given in frame `t` at `anchor` (M, 3)."""
+        M, dev = len(anchor), anchor.device
+        self.pos = torch.cat([self.pos, anchor.float()[None].repeat(len(self.pos), 1, 1)], 1)
+        self.query = torch.cat([self.query, torch.full((M,), t, dtype=torch.long, device=dev)])
+        self.given = torch.cat([self.given, torch.ones(M, dtype=torch.bool, device=dev)])
+        self.body = torch.cat([self.body, torch.full((M,), -1, dtype=torch.long, device=dev)])
+        self.place = torch.cat([self.place, torch.zeros(M, 3, device=dev)])
+        self.like = torch.cat([self.like, torch.zeros(M, device=dev)])
+
     def alive(self, t: int) -> torch.Tensor:
         """(N,) the points the world has by frame `t`."""
         return self.given & (self.query <= t)

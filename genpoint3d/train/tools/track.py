@@ -42,17 +42,26 @@ class Look:
     arrow: torch.Tensor             # (1, N, 3) to each point's body's centre of gravity
     ahead: Optional[torch.Tensor]   # (1, N, 3) the engine's next frame, after the frame's last round (none after the clip's last)
 
+    def first(self, n: int) -> "Look":
+        """The look at the clip's first `n` points: those it came with, not the ones added since."""
+        cut = lambda x: None if x is None else x[:, :n]
+        return Look(self.t, self.i, self.alive[:n], cut(self.g), cut(self.logits), cut(self.groups), self.down, cut(self.arrow),
+                    cut(self.ahead))
+
 
 class Tracker:
     """Every round of every frame, in order, as `Look`s. `tracks`, `vis`,
     `groups`, `down` and `arrow` then hold the clip as the world has it, each
     frame's visibility logits, each point's last group vector, which way is
-    down and each frame's arrows."""
+    down and each frame's arrows. With `add`, points are added as the clip
+    goes: before a frame is looked at, `add(t, pos, alive)` gives the ones to
+    add there (`score.Adder`), after the clip's own."""
 
-    def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, rounds: int, cond: dict) -> None:
+    def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, rounds: int, cond: dict,
+                 add: Optional[Callable] = None) -> None:
         if anchor.shape[0] != 1:
             raise ValueError("a clip is tracked alone: its points come and go with its own frames")
-        self.model, self.anchor, self.T, self.rounds = model, anchor, T, rounds
+        self.model, self.anchor, self.T, self.rounds, self.add = model, anchor, T, rounds, add
         self.cond = dict(cond)
         if self.cond.get("visual_mask") is None:
             self.cond["visual_mask"] = torch.ones(1, T, 2, 2, dtype=torch.bool, device=anchor.device)
@@ -108,10 +117,29 @@ class Tracker:
                                        slide, at, self._fall())
         return self._guess(w.ahead(t, self._fall(), free, heavy, touch))
 
+    def _added(self, t: int) -> None:
+        """The points `add` gives for frame `t`, put after the clip's others: each given there, nothing said of it yet."""
+        new = self.add(t, self.world.pos[t], self.world.alive(t))
+        if new is None:
+            return
+        anchor, card = (x[None] for x in new)
+        M, c, dev = anchor.shape[1], self.cond, anchor.device
+        more = lambda x, dim=1: torch.cat([x, torch.zeros(*x.shape[:dim], M, *x.shape[dim + 1:], dtype=x.dtype, device=dev)], dim)
+        here = torch.full((1, M), t, dtype=torch.long, device=dev)
+        self.rays = torch.cat([self.rays, _rays({**c, "query_t": here}, anchor)], 1)
+        self.anchor = torch.cat([self.anchor, anchor.to(self.anchor.dtype)], 1)
+        c["id_card"], c["query_t"] = torch.cat([c["id_card"], card.to(c["id_card"].dtype)], 1), torch.cat([c["query_t"], here], 1)
+        self.vis, self.arrow = more(self.vis, 2), more(self.arrow, 2)
+        self.groups, self.known = more(self.groups), more(self.known)
+        self.world.add(anchor[0], t)
+
     def __iter__(self):
         m, w, dev = self.model, self.world, self.anchor.device
-        N, q, view = self.anchor.shape[1], self.cond["query_t"], self.cond["visual_mask"]
+        view = self.cond["visual_mask"]
         for t in range(self.T):
+            if self.add is not None:
+                self._added(t)
+            N, q = self.anchor.shape[1], self.cond["query_t"]
             alive = w.alive(t)
             idx = torch.nonzero(alive)[:, 0]
             if not len(idx):
@@ -176,6 +204,7 @@ def track_loss(
     centre_known: Optional[torch.Tensor] = None,
     centre_weight: float = 0.0,
     ahead_weight: float = 0.0,
+    add: Optional[Callable] = None,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """The loss of every round of every frame against the truth `x1` (1, T, N,
@@ -190,15 +219,18 @@ def track_loss(
     round, the error of the engine's next frame: what teaches the model what
     it says of the bodies. With `backward`, each round's loss times it is
     back-propagated at once (one round in memory) and the loss comes back
-    detached. The dict also holds the tracks, the visibility logits, each
-    point's last group vector, which way is down, the arrows, and the arrows'
-    loss alone (in the total)."""
-    run = Tracker(model, anchor, x1.shape[1], rounds, cond)
+    detached. With `add`, points are added as the clip goes (`Tracker`); the
+    loss and what comes back are of the clip's own points. The dict also holds
+    the tracks, the visibility logits, each point's last group vector, which
+    way is down, the arrows, and the arrows' loss alone (in the total)."""
+    run = Tracker(model, anchor, x1.shape[1], rounds, cond, add)
+    own = x1.shape[2]
     w = [ROUND_DECAY ** (rounds - 1 - i) for i in range(rounds)]
     w = [v / sum(w) for v in w]
     share = 1 / x1.shape[1]
     total = vis_total = centre_total = x1.new_zeros(())
     for r in run:
+        r = r.first(own)
         keep = r.alive[None]
         at = lambda x: None if x is None else x[:, r.t]
         loss = w[r.i] * _error(r.g, at(x1), at(mask) & keep, at(weight))
@@ -230,8 +262,9 @@ def track_loss(
         vis_total = vis_total + vis_loss
     if backward is None:
         total = total + vis_weight * vis_total
-    return total, {"loss": total.detach(), "visibility": vis_total.detach(), "tracks": run.tracks, "logits": run.vis,
-                   "groups": run.groups, "down": run.down, "arrows": run.arrow, "centre": centre_total}
+    return total, {"loss": total.detach(), "visibility": vis_total.detach(), "tracks": run.tracks[:, :, :own],
+                   "logits": run.vis[:, :, :own], "groups": run.groups[:, :own], "down": run.down,
+                   "arrows": run.arrow[:, :, :own], "centre": centre_total}
 
 
 @torch.no_grad()
