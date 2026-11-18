@@ -1,18 +1,21 @@
-"""The points the adding rule gives a clip, to turn and look at (no video, each
-point in its pixel's colour), at a few gaps and flat-patch distances: can the
+"""The points the adding rule gives a clip, to turn and look at (each point in its
+pixel's colour, the clip's video beside it), at a few gaps and flat-patch distances: can the
 scene be told from them? Each body's points seen in a frame are joined into
-faces, as a game's mesh. Picked as training picks them
+faces, as a game's mesh, where the body's seen surface lies on the face. Picked as training picks them
 (`ClipDataset._spawned`), with no model.
 
   python scripts/points_view.py --cache CACHE --frames FRAMES --clips 0 40 --gaps 0.025 --flats 0 0.01 --out points_view.html
 """
 
 import argparse
+import base64
+import io
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 from scipy.spatial import Delaunay, QhullError
 
 from genpoint3d.CachedClip import CachedClip
@@ -28,6 +31,22 @@ p.add_argument("--limit", type=int, default=4000, help="the most points a clip h
 p.add_argument("--asked", type=int, default=256)
 p.add_argument("--out", default="points_view.html")
 args = p.parse_args()
+
+FACE = 0.02  # metres the seen surface inside a face may lie off it
+
+
+def _pixels(clip: CachedClip, t: int) -> torch.Tensor:
+    """(N, 2) where frame `t`'s camera sees the clip's points."""
+    P = torch.cat([clip.traj[t].float(), torch.ones(clip.traj.shape[1], 1)], -1)
+    pix = (clip.intrinsics[t].float() @ (clip.extrinsics[t].float()[:3] @ P.T)).T
+    return pix[:, :2] / pix[:, 2:].clamp_min(1e-6)
+
+
+def _jpeg(frame: np.ndarray) -> str:
+    out = io.BytesIO()
+    Image.fromarray(frame).save(out, "JPEG", quality=80)
+    return base64.b64encode(out.getvalue()).decode()
+
 
 files = sorted(Path(args.cache).expanduser().glob("*.pt"))
 views = []
@@ -45,18 +64,27 @@ for i in args.clips:
         faces = []                                                                         # per frame, (F, 3) points
         for t in range(T):
             faces.append([])
+            px, px_all = _pixels(got, t), _pixels(clip, t)
             for k in got.segment.unique().tolist():
                 i = torch.nonzero((got.segment == k) & got.visibility[t].bool() & (q <= t))[:, 0].numpy()
-                if len(i) < 3:
+                d = torch.nonzero((clip.segment == k) & clip.visibility[t].bool())[:, 0]
+                if len(i) < 3 or not len(d):
                     continue
-                here = got.traj[t, i].float()
                 try:
-                    faces[-1] += i[Delaunay((here[:, :2] / here[:, 2:].clamp_min(1e-6)).numpy()).simplices].tolist()
+                    mesh = Delaunay(px[i].numpy())
                 except QhullError:
-                    pass
+                    continue
+                # A face is drawn if the body's surface seen inside it lies on it.
+                inside = torch.from_numpy(mesh.find_simplex(px_all[d].numpy()))
+                corner = got.traj[t, i].float()[torch.from_numpy(mesh.simplices).long()]   # (F, 3, 3)
+                normal = torch.nn.functional.normalize(torch.linalg.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0]), dim=-1)
+                d, inside = d[inside >= 0], inside[inside >= 0]
+                off = ((clip.traj[t, d].float() - corner[inside, 0]) * normal[inside]).sum(-1).abs()
+                keep = [f for f in inside.unique().tolist() if off[inside == f].median() <= FACE]
+                faces[-1] += i[mesh.simplices[keep]].tolist()
         views.append({
             "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {int((q == 0).sum())} in the first frame",
-            "faces": faces,
+            "faces": faces, "video": [_jpeg(f) for f in video],
             "xyz": (got.traj.float() * 100).round().int().tolist(),                        # (T, N, 3) cm, the first frame's camera
             "seen": got.visibility.int().tolist(), "born": q.tolist(),
             "rgb": video[q.numpy(), at[:, 1].numpy(), at[:, 0].numpy()].tolist(),
@@ -66,11 +94,12 @@ for i in args.clips:
 
 PAGE = """<!doctype html><meta charset=utf-8><title>Points view</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif;overflow:hidden}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;height:34px}
-canvas{display:block}</style>
+canvas{display:block}#video{position:fixed;right:8px;top:58px;width:320px;border:1px solid #555}</style>
 <div id=bar><select id=which></select><label>frame <input id=t type=range min=0 value=0> <span id=tn></span></label>
 <label><input id=colour type=checkbox> colour by object</label><label><input id=faces type=checkbox checked> faces</label>
 <label>point size <input id=size type=range min=1 max=10 value=3></label>
 <span>drag to turn, right-drag to move, wheel to zoom; dim: not seen in this frame</span></div>
+<img id=video title="the clip's video at this frame">
 <script type=importmap>{"imports":{"three":"https://unpkg.com/three@0.178.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.178.0/examples/jsm/"}}</script>
 <script type=module>
 import * as THREE from 'three';
@@ -96,6 +125,7 @@ const paint = (i, dim) => {
 function show() {
   const t = +$('t').value, here = [];
   $('tn').textContent = t;
+  $('video').src = 'data:image/jpeg;base64,' + v.video[t];
   v.xyz[t].forEach((p, i) => { if (v.born[i] <= t) here.push(i); });
   points.geometry.dispose();
   points.geometry = new THREE.BufferGeometry();
