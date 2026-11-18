@@ -25,6 +25,8 @@ One line each. Now: decided, being built. Later: not yet. Ruled out: tried, with
 - More data: PointOdyssey, SynthVerse, soft bodies.
 - Model size and where spatial attention goes: never chosen.
 - The world is the memory: the points and bodies are stored once at their place, as a game engine keeps a level; each frame physics steps what moves, the model corrects only what the camera sees, and the rest is saved and costs nothing until seen again. Near-only attention (`--patch`) is built but never used in a run.
+- Each frame, physics predicts and seeing corrects: no going back over frames; a point seen again has its hidden stretch filled by the engine between the two sightings.
+- The whole body as a guess: the model says a body's full shape, unseen side included, corrected as more of it is seen; the engine's centre of gravity and mass spread come from it.
 - A long run once the design settles.
 
 ## Ruled out
