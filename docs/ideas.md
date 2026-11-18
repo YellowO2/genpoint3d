@@ -14,6 +14,7 @@ The model is offered these to learn to use; nothing is enforced on its answer.
 
 ## Later
 
+- Points as the vertices of a body's shape, as a game's collision mesh: one added only where the seen surface is not already explained by the body's points, so a flat floor needs few.
 - Rigid parts within an object (limbs).
 - The model says a body's properties once and the engine works out the forces.
 - Confidence as CoTracker3's.
