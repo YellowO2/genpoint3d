@@ -1,10 +1,9 @@
 """The points the adding rule gives a clip, to turn and look at beside the clip's
 video, at a few gaps and flat-patch distances: can the scene be told from them?
-A point is drawn as what it stores, with no joins guessed: a disc at its place,
-in its pixel's colour, facing the way its surface faces (read off the depth in
-its query frame and turned with its body), as wide as its nearest points that
-face alike are far. Picked as training picks them (`ClipDataset._spawned`),
-with no model.
+A point stores its place, its pixel's colour and the way its surface faces
+(read off the depth in its query frame and turned with its body); its body's
+skin follows from these, each point joined to its nearest points that face
+alike. Picked as training picks them (`ClipDataset._spawned`), with no model.
 
   python scripts/points_view.py --cache CACHE --frames FRAMES --clips 0 40 --gaps 0.025 --flats 0 0.01 --out points_view.html
 """
@@ -18,10 +17,10 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+from scipy.spatial import Delaunay, QhullError
 
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.train.data.ClipDataset import DEPTH, _near, _query_frames, _spawned
-from genpoint3d.train.tools.farthest_first import UNIT
 from genpoint3d.train.tools.kabsch import kabsch
 
 p = argparse.ArgumentParser()
@@ -36,7 +35,7 @@ p.add_argument("--out", default="points_view.html")
 args = p.parse_args()
 
 ALIKE = 0.7  # two points face alike if their facings are within 45 degrees
-NEAR = 3     # a disc reaches its third nearest point that faces alike
+NEAR = 8     # a point is joined among this many of its nearest points that face alike
 
 
 def _facing(clip: CachedClip, depth: torch.Tensor) -> torch.Tensor:
@@ -63,21 +62,31 @@ def _turns(clip: CachedClip) -> dict:
                       clip.traj[:, clip.segment == k].float())[0] for k in clip.segment.unique().tolist()}
 
 
-def _discs(got: CachedClip, facing: torch.Tensor, turns: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    """(T, N, 3) each point's facing in every frame, turned with its body, and (T, N) its disc's reach in metres."""
-    T, N = got.visibility.shape
-    q = _query_frames(got)
+def _facings(got: CachedClip, facing: torch.Tensor, turns: dict) -> torch.Tensor:
+    """(T, N, 3) each point's facing in every frame, turned with its body."""
     turn = torch.stack([turns[k] for k in got.segment.tolist()], 1)                       # (T, N, 3, 3)
-    way = (turn @ turn[q, torch.arange(N)].transpose(1, 2) @ facing[:, :, None])[..., 0]
-    reach = torch.full((T, N), UNIT / 2)
-    for t in range(T):
-        on = q <= t
-        apart = torch.cdist(got.traj[t].float(), got.traj[t].float())
-        apart[~((got.segment[:, None] == got.segment[None]) & (way[t] @ way[t].T > ALIKE) & on[None])] = float("inf")
-        near = apart.sort(1).values[:, 1:NEAR + 1]                                          # without itself
-        far = torch.where(near.isfinite(), near, near.new_zeros(())).max(1).values
-        reach[t] = torch.where(far > 0, far, reach[t])
-    return way, reach
+    return (turn @ turn[_query_frames(got), torch.arange(len(facing))].transpose(1, 2) @ facing[:, :, None])[..., 0]
+
+
+def _skin(pos: torch.Tensor, way: torch.Tensor, body: torch.Tensor) -> list:
+    """The faces (F, 3) joining points at `pos` (N, 3) facing `way` (N, 3) of bodies `body` (N,): each point
+    with its NEAR nearest of its body that face alike, laid on the flat its facing gives and joined there."""
+    apart = torch.cdist(pos, pos)
+    apart[~((body[:, None] == body[None]) & (way @ way.T > ALIKE))] = float("inf")
+    near, who = apart.topk(min(NEAR + 1, len(pos)), largest=False)
+    faces = set()
+    for i in range(len(pos)):
+        j = who[i][near[i].isfinite()]
+        if len(j) < 3 or i not in j:
+            continue
+        side = torch.linalg.cross(way[i], torch.eye(3)[way[i].abs().argmin()], dim=0)
+        flat = (pos[j] - pos[i]) @ torch.stack([side, torch.linalg.cross(way[i], side, dim=0)], 1)
+        try:
+            joined = j[torch.from_numpy(Delaunay(flat.numpy()).simplices).long()]
+        except QhullError:
+            continue
+        faces |= {tuple(sorted(f)) for f in joined.tolist() if i in f}
+    return sorted(faces)
 
 
 def _jpeg(frame: np.ndarray) -> str:
@@ -100,10 +109,10 @@ for i in args.clips:
         got, _ = _spawned(clip, args.limit, args.asked, gap, torch.ones(T, dtype=torch.bool), torch.randperm(N), flat)
         q, n = _query_frames(got), torch.arange(got.traj.shape[1])
         at = (got.query_uv / torch.tensor([got.hw[1], got.hw[0]]) * r).long().clamp(0, r - 1)
-        way, reach = _discs(got, _facing(got, depth), _turns(clip))
+        way = _facings(got, _facing(got, depth), _turns(clip))
         views.append({
             "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {int((q == 0).sum())} in the first frame",
-            "way": (way * 100).round().int().tolist(), "reach": (reach * 100).round().int().tolist(),   # (T, N, 3), (T, N) cm
+            "faces": _skin(got.traj[-1].float(), way[-1], got.segment),                     # bodies are stiff: joined once, in the last frame
             "video": [_jpeg(f) for f in video],
             "xyz": (got.traj.float() * 100).round().int().tolist(),                        # (T, N, 3) cm, the first frame's camera
             "seen": got.visibility.int().tolist(), "born": q.tolist(),
@@ -116,7 +125,7 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Points view</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif;overflow:hidden}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;height:34px}
 canvas{display:block}#video{position:fixed;right:8px;top:58px;width:320px;border:1px solid #555}</style>
 <div id=bar><select id=which></select><label>frame <input id=t type=range min=0 value=0> <span id=tn></span></label>
-<label><input id=colour type=checkbox> colour by object</label><label><input id=discs type=checkbox checked> discs</label>
+<label><input id=colour type=checkbox> colour by object</label><label><input id=faces type=checkbox checked> skin</label>
 <label>point size <input id=size type=range min=1 max=10 value=3></label>
 <span>drag to turn, right-drag to move, wheel to zoom; dim: not seen in this frame</span></div>
 <img id=video title="the clip's video at this frame">
@@ -131,9 +140,8 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000), controls = new OrbitControls(camera, renderer.domElement);
 scene.background = new THREE.Color(0x111111);
 const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({vertexColors: true, size: 0.03}));
-const disc = new THREE.CircleGeometry(1, 20), skin = new THREE.MeshBasicMaterial({side: THREE.DoubleSide}), AHEAD = new THREE.Vector3(0, 0, 1);
-let discs = null;
-scene.add(points);
+const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.DoubleSide}));
+scene.add(mesh, points);
 V.forEach((x, i) => $('which').add(new Option(x.name, i)));
 let v;
 // The clip's points are in the first frame's camera, in cm, x right, y down, z ahead; three.js looks down -z with y up.
@@ -153,17 +161,12 @@ function show() {
   points.geometry.setAttribute('position', new THREE.Float32BufferAttribute(here.flatMap(i => place(v.xyz[t][i])), 3));
   points.geometry.setAttribute('color', new THREE.Float32BufferAttribute(here.flatMap(i => paint(i, v.seen[t][i] ? 1 : 0.3)), 3));
   points.material.size = +$('size').value / 100;
-  if (discs) { scene.remove(discs); discs.dispose(); }
-  discs = new THREE.InstancedMesh(disc, skin, here.length);
-  const m = new THREE.Matrix4(), turn = new THREE.Quaternion(), c = new THREE.Color();
-  here.forEach((i, j) => {
-    turn.setFromUnitVectors(AHEAD, new THREE.Vector3(...place(v.way[t][i])).normalize());
-    const r = v.reach[t][i] / 100;
-    discs.setMatrixAt(j, m.compose(new THREE.Vector3(...place(v.xyz[t][i])), turn, new THREE.Vector3(r, r, r)));
-    discs.setColorAt(j, c.fromArray(paint(i, 0.8)));
-  });
-  discs.visible = $('discs').checked;
-  scene.add(discs);
+  mesh.geometry.dispose();
+  mesh.geometry = new THREE.BufferGeometry();
+  mesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(v.xyz[t].flatMap(place), 3));
+  mesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(v.xyz[t].flatMap((p, i) => paint(i, 0.8)), 3));
+  mesh.geometry.setIndex(v.faces.filter(f => f.every(i => v.born[i] <= t)).flat());
+  mesh.visible = $('faces').checked;
 }
 function pick() {
   v = V[$('which').value];
@@ -176,7 +179,7 @@ function pick() {
 }
 function size() { const w = innerWidth, h = innerHeight - BAR; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
 $('which').onchange = pick;
-['t', 'size', 'colour', 'discs'].forEach(i => $(i).oninput = show);
+['t', 'size', 'colour', 'faces'].forEach(i => $(i).oninput = show);
 addEventListener('resize', size);
 size(); pick();
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
