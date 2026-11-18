@@ -1,9 +1,10 @@
 """The points the adding rule gives a clip, to turn and look at beside the clip's
 video, at a few gaps and flat-patch distances: can the scene be told from them?
-A point stores its place, its pixel's colour and the way its surface faces
-(read off the depth in its query frame and turned with its body); its body's
-skin follows from these, each point joined to its nearest points that face
-alike. Picked as training picks them (`ClipDataset._spawned`), with no model.
+A point stores its place, its pixel's colour and its bars: when it is added,
+one to each of its nearest points of its body that the body's surface runs
+straight to (read off the clip's own tracks here; the model's to say). Three
+points barred to each other are a wall. Picked as training picks them
+(`ClipDataset._spawned`), with no model.
 
   python scripts/points_view.py --cache CACHE --frames FRAMES --clips 0 40 --gaps 0.025 --flats 0 0.01 --out points_view.html
 """
@@ -17,11 +18,9 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from scipy.spatial import Delaunay, QhullError
 
 from genpoint3d.CachedClip import CachedClip
-from genpoint3d.train.data.ClipDataset import DEPTH, _near, _query_frames, _spawned
-from genpoint3d.train.tools.kabsch import kabsch
+from genpoint3d.train.data.ClipDataset import _near, _query_frames, _spawned
 
 p = argparse.ArgumentParser()
 p.add_argument("--cache", required=True)
@@ -34,59 +33,40 @@ p.add_argument("--asked", type=int, default=256)
 p.add_argument("--out", default="points_view.html")
 args = p.parse_args()
 
-ALIKE = 0.7  # two points face alike if their facings are within 45 degrees
-NEAR = 8     # a point is joined among this many of its nearest points that face alike
+NEAR = 8     # a point added is barred among this many of its nearest points
+SAG = 0.02   # metres a bar may run off its body's surface, beyond how far apart the surface's tracks are there
+ALONG = torch.tensor([0.25, 0.5, 0.75])
 
 
-def _facing(clip: CachedClip, depth: torch.Tensor) -> torch.Tensor:
-    """(N, 3) the way each point's surface faces in its query frame, toward the camera, read off the depth there."""
-    (T, h, w), (H, W), q = depth.shape, clip.hw, _query_frames(clip)
-    v, u = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
-    cell = (clip.query_uv / torch.tensor([W, H]) * torch.tensor([w, h])).long()
-    out = torch.zeros(len(q), 3)
-    for t in q.unique().tolist():
-        K, z = clip.intrinsics[t].float(), depth[t]
-        xyz = torch.stack([((u + 0.5) / w * W - K[0, 2]) / K[0, 0] * z, ((v + 0.5) / h * H - K[1, 2]) / K[1, 1] * z, z])   # (3, h, w) the camera's
-        pad = torch.nn.functional.pad(xyz[None], (1, 1, 1, 1), mode="replicate")[0]
-        n = torch.linalg.cross(pad[:, 1:-1, 2:] - pad[:, 1:-1, :-2], pad[:, 2:, 1:-1] - pad[:, :-2, 1:-1], dim=0)
-        n = torch.nn.functional.normalize(n, dim=0)
-        n = torch.where((n * xyz).sum(0, keepdim=True) > 0, -n, n)
-        i = q == t
-        out[i] = n[:, cell[i, 1].clamp(0, h - 1), cell[i, 0].clamp(0, w - 1)].T @ clip.extrinsics[t].float()[:3, :3]
-    return out
+def _bars(got: CachedClip, clip: CachedClip) -> list:
+    """The bars (B, 2): each point, when added, to those of its NEAR nearest points of its body there by then
+    that the body's surface runs straight to, the surface being the clip's own tracks."""
+    q, bars = _query_frames(got), set()
+    for f in q.unique().tolist():
+        new, pos, surface = torch.nonzero(q == f)[:, 0], got.traj[f].float(), clip.traj[f].float()
+        spaced = torch.cat([torch.cdist(surface[i:i + 500], surface).masked_fill(clip.segment[i:i + 500, None] != clip.segment[None], float("inf"))
+                            .topk(2, largest=False).values[:, 1] for i in range(0, len(surface), 500)])     # (D,) each track to its nearest
+        apart = torch.cdist(pos[new], pos)
+        apart[~((got.segment[new, None] == got.segment[None]) & (q <= f)[None])] = float("inf")
+        apart[torch.arange(len(new)), new] = float("inf")
+        near, who = apart.topk(min(NEAR, len(pos)), largest=False)
+        a, b = new[:, None].expand_as(who)[near.isfinite()], who[near.isfinite()]
+        on = torch.ones(len(a), dtype=torch.bool)
+        for i in range(0, len(a), 500):                                                     # a few at a time, for memory
+            j = slice(i, i + 500)
+            mid = (pos[a[j], None] + ALONG[:, None] * (pos[b[j]] - pos[a[j]])[:, None]).flatten(0, 1)
+            off, at = torch.cdist(mid, surface).masked_fill(got.segment[a[j]].repeat_interleave(len(ALONG))[:, None] != clip.segment[None], float("inf")).min(1)
+            on[j] = (off <= SAG + spaced[at]).view(-1, len(ALONG)).all(1)
+        bars |= {tuple(sorted(p)) for p in torch.stack([a[on], b[on]], 1).tolist()}
+    return sorted(bars)
 
 
-def _turns(clip: CachedClip) -> dict:
-    """Each body's turn (T, 3, 3) from the first frame, fitted on its points."""
-    return {k: kabsch(torch.ones(len(clip.traj), int((clip.segment == k).sum())), clip.traj[:1, clip.segment == k].float(),
-                      clip.traj[:, clip.segment == k].float())[0] for k in clip.segment.unique().tolist()}
-
-
-def _facings(got: CachedClip, facing: torch.Tensor, turns: dict) -> torch.Tensor:
-    """(T, N, 3) each point's facing in every frame, turned with its body."""
-    turn = torch.stack([turns[k] for k in got.segment.tolist()], 1)                       # (T, N, 3, 3)
-    return (turn @ turn[_query_frames(got), torch.arange(len(facing))].transpose(1, 2) @ facing[:, :, None])[..., 0]
-
-
-def _skin(pos: torch.Tensor, way: torch.Tensor, body: torch.Tensor, there: torch.Tensor) -> list:
-    """The faces (F, 3) joining the points `there` (N,) at `pos` (N, 3) facing `way` (N, 3) of bodies `body` (N,):
-    each point with its NEAR nearest of its body that face alike, laid on the flat its facing gives and joined there."""
-    apart = torch.cdist(pos, pos)
-    apart[~((body[:, None] == body[None]) & (way @ way.T > ALIKE) & there[:, None] & there[None])] = float("inf")
-    near, who = apart.topk(min(NEAR + 1, len(pos)), largest=False)
-    faces = set()
-    for i in range(len(pos)):
-        j = who[i][near[i].isfinite()]
-        if len(j) < 3 or i not in j:
-            continue
-        side = torch.linalg.cross(way[i], torch.eye(3)[way[i].abs().argmin()], dim=0)
-        flat = (pos[j] - pos[i]) @ torch.stack([side, torch.linalg.cross(way[i], side, dim=0)], 1)
-        try:
-            joined = j[torch.from_numpy(Delaunay(flat.numpy()).simplices).long()]
-        except QhullError:
-            continue
-        faces |= {tuple(sorted(f)) for f in joined.tolist() if i in f}
-    return sorted(faces)
+def _walls(bars: list) -> list:
+    """The walls (F, 3): three points barred to each other."""
+    joined = {}
+    for a, b in bars:
+        joined.setdefault(a, set()).add(b)
+    return [[a, b, c] for a, b in bars for c in sorted(joined.get(a, set()) & joined.get(b, set()))]
 
 
 def _jpeg(frame: np.ndarray) -> str:
@@ -100,7 +80,6 @@ views = []
 for i in args.clips:
     whole = CachedClip.from_dict(torch.load(files[i], weights_only=False))
     video = np.load(Path(args.frames).expanduser() / f"{whole.seq_id}.npy")                # (T, r, r, 3)
-    depth = torch.from_numpy(np.load(Path(args.frames).expanduser() / (whole.seq_id + DEPTH))).float()   # (T, r / 4, r / 4)
     r = video.shape[1]
     for gap, flat in [(g, f) for g in args.gaps for f in args.flats]:
         torch.manual_seed(0)
@@ -109,10 +88,10 @@ for i in args.clips:
         got, _ = _spawned(clip, args.limit, args.asked, gap, torch.ones(T, dtype=torch.bool), torch.randperm(N), flat)
         q, n = _query_frames(got), torch.arange(got.traj.shape[1])
         at = (got.query_uv / torch.tensor([got.hw[1], got.hw[0]]) * r).long().clamp(0, r - 1)
-        way = _facings(got, _facing(got, depth), _turns(clip))
+        bars = _bars(got, clip)
         views.append({
-            "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {int((q == 0).sum())} in the first frame",
-            "faces": [_skin(got.traj[t].float(), way[t], got.segment, q <= t) for t in range(T)],   # per frame, among the points there by then
+            "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {len(bars)} bars",
+            "bars": bars, "walls": _walls(bars),
             "video": [_jpeg(f) for f in video],
             "xyz": (got.traj.float() * 100).round().int().tolist(),                        # (T, N, 3) cm, the first frame's camera
             "seen": got.visibility.int().tolist(), "born": q.tolist(),
@@ -125,7 +104,7 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Points view</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif;overflow:hidden}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;height:34px}
 canvas{display:block}#video{position:fixed;right:8px;top:58px;width:320px;border:1px solid #555}</style>
 <div id=bar><select id=which></select><label>frame <input id=t type=range min=0 value=0> <span id=tn></span></label>
-<label><input id=colour type=checkbox> colour by object</label><label><input id=faces type=checkbox checked> skin</label>
+<label><input id=colour type=checkbox> colour by object</label><label><input id=faces type=checkbox checked> walls</label><label><input id=bars type=checkbox checked> bars</label>
 <label>point size <input id=size type=range min=1 max=10 value=3></label>
 <span>drag to turn, right-drag to move, wheel to zoom; dim: not seen in this frame</span></div>
 <img id=video title="the clip's video at this frame">
@@ -141,7 +120,8 @@ const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(60, 1, 0.0
 scene.background = new THREE.Color(0x111111);
 const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({vertexColors: true, size: 0.03}));
 const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.DoubleSide}));
-scene.add(mesh, points);
+const bars = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.35}));
+scene.add(mesh, bars, points);
 V.forEach((x, i) => $('which').add(new Option(x.name, i)));
 let v;
 // The clip's points are in the first frame's camera, in cm, x right, y down, z ahead; three.js looks down -z with y up.
@@ -165,8 +145,13 @@ function show() {
   mesh.geometry = new THREE.BufferGeometry();
   mesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(v.xyz[t].flatMap(place), 3));
   mesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(v.xyz[t].flatMap((p, i) => paint(i, 0.8)), 3));
-  mesh.geometry.setIndex(v.faces[t].flat());
+  mesh.geometry.setIndex(v.walls.filter(f => f.every(i => v.born[i] <= t)).flat());
   mesh.visible = $('faces').checked;
+  bars.geometry.dispose();
+  bars.geometry = new THREE.BufferGeometry();
+  bars.geometry.setAttribute('position', new THREE.Float32BufferAttribute(v.xyz[t].flatMap(place), 3));
+  bars.geometry.setIndex(v.bars.filter(f => f.every(i => v.born[i] <= t)).flat());
+  bars.visible = $('bars').checked;
 }
 function pick() {
   v = V[$('which').value];
@@ -179,7 +164,7 @@ function pick() {
 }
 function size() { const w = innerWidth, h = innerHeight - BAR; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
 $('which').onchange = pick;
-['t', 'size', 'colour', 'faces'].forEach(i => $(i).oninput = show);
+['t', 'size', 'colour', 'faces', 'bars'].forEach(i => $(i).oninput = show);
 addEventListener('resize', size);
 size(); pick();
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
