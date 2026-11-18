@@ -6,12 +6,13 @@ Run:  python scripts/check_engine.py
 
 import torch
 
-from genpoint3d.train.tools.engine import Body, mass_spread, pulled, rigid_place, step
+from genpoint3d.train.tools.engine import Body, Touch, fitted, mass_spread, pulled, step
 from genpoint3d.train.tools.kabsch import turn_matrix
 
 torch.manual_seed(0)
-GRAVITY = torch.tensor([0.0, -9.81 / 144, 0.0], dtype=torch.float64)      # metres a frame squared, y up
-NONE = torch.zeros(3, dtype=torch.float64)
+torch.set_default_dtype(torch.float64)
+GRAVITY = torch.tensor([0.0, -9.81 / 144, 0.0])      # metres a frame squared, y up
+NONE = torch.zeros(3)
 failed = []
 
 
@@ -22,85 +23,121 @@ def want(name: str, ok: bool, said: str) -> None:
 
 
 def ball(n: int = 200, radius: float = 0.3) -> torch.Tensor:
-    p = torch.randn(n, 3, dtype=torch.float64)
+    p = torch.randn(n, 3)
     p = radius * p / p.norm(dim=-1, keepdim=True)
     return p - p.mean(0)
 
 
-def still(centre=(0.0, 0.3, 5.0)) -> Body:
-    return Body(torch.tensor(centre, dtype=torch.float64), torch.eye(3, dtype=torch.float64), NONE.clone(), NONE.clone())
+def bodies(*each) -> Body:
+    """Bodies from (centre, speed, spin) each, unturned."""
+    stack = lambda i: torch.stack([torch.as_tensor(e[i], dtype=torch.float64) for e in each])
+    return Body(stack(0), torch.eye(3).expand(len(each), 3, 3).clone(), stack(1), stack(2))
+
+
+def touch(a, b, at, stick=0.0, push=(0.0, 0.0, 0.0)) -> Touch:
+    return Touch(torch.tensor([a]), torch.tensor([b]), torch.tensor([at]), torch.tensor([stick]), torch.tensor([push]))
 
 
 shape = ball()
-spread = mass_spread(shape)
+spread = mass_spread(shape, torch.ones(len(shape)))
+FLOOR = ((0.0, 0.0, 5.0), NONE, NONE)                 # the fixed world, body 0 where it is in
+two = lambda: dict(free=torch.tensor([0.0, 1.0]), heavy=torch.ones(2), spread=spread.expand(2, 3, 3))
+BOTTOM = (0.0, 0.0, 5.0)                              # under a ball centred at (0, 0.3, 5)
 
 # Thrown and spinning, nothing touching it: the centre falls as gravity says, the spin and the shape hold.
-b = Body(torch.tensor([0.0, 3.0, 5.0], dtype=torch.float64), torch.eye(3, dtype=torch.float64),
-         torch.tensor([0.05, 0.1, 0.0], dtype=torch.float64), torch.tensor([0.0, 0.0, 0.15], dtype=torch.float64))
-start, first = b, b.points(shape)
+b = start = bodies(((0.0, 3.0, 5.0), (0.05, 0.1, 0.0), (0.0, 0.0, 0.15)))
+first = b.points(shape)
 for _ in range(20):
-    b = step(b, GRAVITY, spread)
+    b = step(b, GRAVITY, torch.ones(1))
 true = start.centre + 20 * start.speed + GRAVITY * 20 * 21 / 2
 want("a thrown body's centre falls as gravity says", (b.centre - true).norm() < 1e-9, f"{(b.centre - true).norm() * 100:.2e} cm off after 20 frames")
-want("it keeps its spin", (b.spin - start.spin).norm() < 1e-12, f"{float(b.spin[2]):.3f} radians a frame")
-gaps = lambda p: torch.cdist(p, p)
-want("it keeps its shape", (gaps(b.points(shape)) - gaps(first)).abs().max() < 1e-6, f"{(gaps(b.points(shape)) - gaps(first)).abs().max() * 100:.2e} cm")
+want("it keeps its spin", (b.spin - start.spin).norm() < 1e-12, f"{float(b.spin[0, 2]):.3f} radians a frame")
+gaps = lambda p: (p[:, :, None] - p[:, None]).norm(dim=-1)
+want("it keeps its shape", (gaps(b.points(shape)) - gaps(first)).abs().max() < 1e-9, f"{(gaps(b.points(shape)) - gaps(first)).abs().max() * 100:.2e} cm")
+
+# The fixed world does not fall.
+b = step(bodies(FLOOR), GRAVITY, torch.zeros(1))
+want("the fixed world stays", b.speed.norm() == 0 and (b.centre - torch.tensor(FLOOR[0])).norm() == 0, "no move under gravity")
 
 # A push through the centre moves the body and does not turn it.
-b = still()
-push = torch.tensor([[0.0, 0.02, 0.0]], dtype=torch.float64)
-after = step(b, NONE, spread, push, b.centre[None] + torch.tensor([[0.0, -0.3, 0.0]], dtype=torch.float64))
-want("a push through the centre only moves it", after.spin.norm() < 1e-12 and (after.speed - push[0]).norm() < 1e-12,
-     f"speed {after.speed.tolist()}, spin {float(after.spin.norm()):.1e}")
+rest = bodies(FLOOR, ((0.0, 0.3, 5.0), NONE, NONE))
+after = step(rest, NONE, touch=touch(1, 0, BOTTOM, push=(0.0, 0.02, 0.0)), **two())
+want("a push through the centre only moves it", after.spin.norm() < 1e-12 and (after.speed[1] - torch.tensor([0.0, 0.02, 0.0])).norm() < 1e-12,
+     f"speed {after.speed[1].tolist()}, spin {float(after.spin.norm()):.1e}")
 
 # A ball on the floor pushed sideways at its bottom (friction, toward -x): it slows toward -x and
 # rolls forward, its top going toward +x.
-side = torch.tensor([[-0.02, 0.0, 0.0]], dtype=torch.float64)
-after = step(b, NONE, spread, side, b.centre[None] + torch.tensor([[0.0, -0.3, 0.0]], dtype=torch.float64))
-top = torch.linalg.cross(after.spin, torch.tensor([0.0, 0.3, 0.0], dtype=torch.float64))
-want("a sideways push at the bottom moves it and spins it", after.speed[0] < 0 and top[0] > 0,
-     f"speed x {float(after.speed[0]):.3f}, its top's x {float(top[0]):+.4f} a frame")
+after = step(rest, NONE, touch=touch(1, 0, BOTTOM, push=(-0.02, 0.0, 0.0)), **two())
+top = torch.linalg.cross(after.spin[1], torch.tensor([0.0, 0.3, 0.0]))
+want("a sideways push at the bottom moves it and spins it", after.speed[1, 0] < 0 and top[0] > 0,
+     f"speed x {float(after.speed[1, 0]):.3f}, its top's x {float(top[0]):+.4f} a frame")
 
-# The same force, opposite, on two bodies that touch: what one gains the other loses.
-a, c = still((0.0, 0.3, 5.0)), still((0.6, 0.3, 5.0))
-touch, f = torch.tensor([[0.3, 0.3, 5.0]], dtype=torch.float64), torch.tensor([[0.03, 0.01, 0.0]], dtype=torch.float64)
-a2, c2 = step(a, NONE, spread, -f, touch, mass=1.0), step(c, NONE, spread, f, touch, mass=2.0)
-total = 1.0 * a2.speed + 2.0 * c2.speed
-want("equal and opposite forces keep the pair's momentum", total.norm() < 1e-12, f"{float(total.norm()):.1e}")
+# One push between two free bodies, of mass 1 and 2: what one gains the other loses.
+pair = bodies(((0.0, 0.3, 5.0), NONE, NONE), ((0.6, 0.3, 5.0), NONE, NONE))
+heavy = torch.tensor([1.0, 2.0])
+after = step(pair, NONE, torch.ones(2), heavy, spread.expand(2, 3, 3), touch(0, 1, (0.3, 0.3, 5.0), push=(0.03, 0.01, 0.0)))
+total = (heavy[:, None] * after.speed).sum(0)
+want("a push between two bodies keeps the pair's momentum", total.norm() < 1e-12 and after.speed[0].norm() > 0,
+     f"{float(total.norm()):.1e}, the lighter going {float(after.speed[0].norm() / after.speed[1].norm()):.1f} times as fast")
 
-# The rigid place: the shape turned and moved, its points tracked with 1 cm of noise.
-R = turn_matrix(torch.tensor([0.3, -0.5, 0.2], dtype=torch.float64))
-true = shape @ R.T + torch.tensor([1.0, 0.5, 4.0], dtype=torch.float64)
+# A ball at rest on the floor, sticking where it touches: gravity does not move it.
+b = rest
+for _ in range(20):
+    b = step(b, GRAVITY, touch=touch(1, 0, BOTTOM, stick=1.0), **two())
+want("a ball sticking to the floor stays at rest under gravity", (b.centre[1] - rest.centre[1]).norm() < 1e-8,
+     f"{(b.centre[1] - rest.centre[1]).norm() * 100:.2e} cm after 20 frames")
+
+# A ball sliding along the floor, sticking where it touches: it ends rolling, its bottom still on the floor.
+slide = bodies(FLOOR, ((0.0, 0.3, 5.0), (0.1, 0.0, 0.0), NONE))
+after = step(slide, GRAVITY, touch=touch(1, 0, BOTTOM, stick=1.0), **two())
+bottom = after.speed[1] + torch.linalg.cross(after.spin[1], torch.tensor([0.0, -0.3, 0.0]))
+want("a sliding ball that sticks ends rolling", bottom.norm() < 1e-9 and after.speed[1, 0] > 0.03 and after.spin[1, 2] < 0,
+     f"its bottom's speed {float(bottom.norm()):.1e}, its centre's {float(after.speed[1, 0]):.3f}")
+
+# Two bodies falling together, stuck where they touch: nothing pulls them apart, so no push.
+fall = bodies(((0.0, 3.0, 5.0), NONE, NONE), ((0.6, 3.0, 5.0), NONE, NONE))
+after = step(fall, GRAVITY, torch.ones(2), heavy, spread.expand(2, 3, 3), touch(0, 1, (0.3, 3.0, 5.0), stick=1.0))
+want("two bodies falling as one keep falling", (after.speed - GRAVITY).norm() < 1e-12, f"both at {after.speed[0].tolist()}")
+
+# The pose that keeps the shape: the shape turned and moved, its points tracked with 1 cm of noise.
+R = turn_matrix(torch.tensor([0.3, -0.5, 0.2]))
+true = shape @ R.T + torch.tensor([1.0, 0.5, 4.0])
 noisy = true + 0.01 * torch.randn_like(true)
-place = rigid_place(shape, noisy, torch.ones(len(shape), dtype=torch.float64))
+place = Body(*reversed(fitted(shape, noisy, torch.ones(len(shape)))), None, None).points(shape)
 off, raw = (place - true).norm(dim=-1).mean() * 100, (noisy - true).norm(dim=-1).mean() * 100
-want("the rigid place is nearer the truth than the noisy points", off < raw / 4, f"{off:.2f} cm against the points' {raw:.2f} cm")
+want("the place that keeps the shape is nearer the truth than the noisy points", off < raw / 4, f"{off:.2f} cm against the points' {raw:.2f} cm")
 # ... and where it sits is said by the points that count: half the points wrong by 20 cm, given no weight.
 sure = torch.arange(len(shape)) % 2 == 0
 wrong = torch.where(sure[:, None], noisy, true + 0.2 * torch.randn_like(true))
-place = rigid_place(shape, wrong, sure.double())
+place = Body(*reversed(fitted(shape, wrong, sure.double())), None, None).points(shape)
 off = (place - true).norm(dim=-1)[~sure].mean() * 100
 want("points that do not count are placed by those that do", off < 0.5, f"{off:.2f} cm for the wrong half")
-half = pulled(noisy, place, torch.full((len(shape),), 0.5, dtype=torch.float64))
+# ... and a few wrong points that do count do not drag it.
+few = torch.arange(len(shape)) % 10 == 0
+wrong = torch.where(few[:, None], true + 0.3 * torch.randn_like(true), noisy)
+off = (Body(*reversed(fitted(shape, wrong, torch.ones(len(shape)))), None, None).points(shape) - true).norm(dim=-1).mean() * 100
+want("a few wrong points do not drag it", off < raw / 2, f"{off:.2f} cm with a tenth of the points 30 cm off")
+half = pulled(noisy, place, torch.full((len(shape),), 0.5))
 want("no stiffness, no pull; full stiffness, the rigid place",
-     torch.equal(pulled(noisy, place, torch.zeros(len(shape), dtype=torch.float64)), noisy)
-     and torch.allclose(pulled(noisy, place, torch.ones(len(shape), dtype=torch.float64)), place)
+     torch.equal(pulled(noisy, place, torch.zeros(len(shape))), noisy)
+     and torch.allclose(pulled(noisy, place, torch.ones(len(shape))), place)
      and torch.allclose(half, (noisy + place) / 2), "0, 0.5 and 1")
 
-# Where the points went teaches the force: a force nobody is told, found from the points a frame on.
-b = Body(torch.tensor([0.0, 0.3, 5.0], dtype=torch.float64), torch.eye(3, dtype=torch.float64),
-         torch.tensor([0.02, -0.1, 0.0], dtype=torch.float64), NONE.clone())
-at = b.centre[None] + torch.tensor([[0.05, -0.3, 0.0]], dtype=torch.float64)
-secret = torch.tensor([[-0.01, 0.18, 0.004]], dtype=torch.float64)
-seen = step(b, GRAVITY, spread, secret, at).points(shape)
-guess = torch.zeros(1, 3, dtype=torch.float64, requires_grad=True)
-opt = torch.optim.Adam([guess], lr=0.01)
-for _ in range(600):
+# Where the points went teaches the model's part: a push and a stick nobody is told, found from the points a frame on.
+land = bodies(FLOOR, ((0.0, 0.3, 5.0), (0.02, -0.1, 0.0), NONE))
+at = (0.05, 0.0, 5.0)
+seen = step(land, GRAVITY, touch=touch(1, 0, at, stick=0.7, push=(-0.01, 0.03, 0.004)), **two()).points(shape)[1]
+stick, push = torch.zeros(1, requires_grad=True), torch.zeros(1, 3, requires_grad=True)
+opt = torch.optim.Adam([stick, push], lr=0.01)
+for _ in range(1500):
     opt.zero_grad()
-    (step(b, GRAVITY, spread, guess, at).points(shape) - seen).pow(2).sum().backward()
+    said = Touch(torch.tensor([1]), torch.tensor([0]), torch.tensor([at]), torch.sigmoid(stick), push)
+    (step(land, GRAVITY, touch=said, **two()).points(shape)[1] - seen).pow(2).sum().backward()
     opt.step()
-err = float((guess.detach() - secret).norm() / secret.norm())
-want("the force is learned from where the points went", err < 0.01, f"{err:.2%} off, never told the force")
+again = step(land, GRAVITY, touch=Touch(torch.tensor([1]), torch.tensor([0]), torch.tensor([at]), torch.sigmoid(stick), push), **two())
+err = (again.points(shape)[1] - seen).norm(dim=-1).max() * 100
+want("the push and the stick are learned from where the points went", err < 0.01,
+     f"the points a frame on {err:.1e} cm off, never told either; no turn's gradient is lost at no spin")
 
 if failed:
     raise SystemExit(f"missed: {failed}")

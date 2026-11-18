@@ -1,17 +1,20 @@
-"""The fixed parts of a physics engine; the forces and the stiffness are the model's to say."""
+"""The fixed parts of a physics engine; what a camera cannot tell it, the model says."""
 
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
-from genpoint3d.train.tools.kabsch import kabsch, turn_matrix
+from genpoint3d.train.tools.kabsch import robust_kabsch, turn_matrix
+
+# Refits of a body's pose, each point counting less the further it sat from the last fit.
+REFITS = 3
 
 
 @dataclass
 class Body:
-    """A rigid body: where its centre of gravity is (..., 3), how it is turned
-    (..., 3, 3), and its speed and spin (..., 3), a frame."""
+    """Rigid bodies: where each one's centre of gravity is (K, 3), how it is
+    turned (K, 3, 3), and its speed and spin (K, 3), a frame."""
     centre: torch.Tensor
     turn: torch.Tensor
     speed: torch.Tensor
@@ -22,35 +25,70 @@ class Body:
         return (self.turn[..., None, :, :] @ shape[..., None])[..., 0] + self.centre[..., None, :]
 
 
-def mass_spread(shape: torch.Tensor) -> torch.Tensor:
-    """(..., 3, 3) a body's inertia for each unit of mass, its mass spread evenly over its points `shape`."""
+@dataclass
+class Touch:
+    """Where two bodies touch: body `a` and body `b` (P,) long, the place
+    (P, 3), how far the two stick there (P,), 1 being that they move as one at
+    that place, and a push on `a`, taken from `b` (P, 3)."""
+    a: torch.Tensor
+    b: torch.Tensor
+    at: torch.Tensor
+    stick: torch.Tensor
+    push: torch.Tensor
+
+
+def mass_spread(shape: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """(..., 3, 3) a body's inertia for each unit of mass, its mass spread
+    over its points `shape` (..., N, 3) by `weight` (..., N)."""
     eye = torch.eye(3, dtype=shape.dtype, device=shape.device)
-    return ((shape * shape).sum(-1)[..., None, None] * eye - shape[..., :, None] * shape[..., None, :]).mean(-3)
+    each = (shape * shape).sum(-1)[..., None, None] * eye - shape[..., :, None] * shape[..., None, :]
+    return (weight[..., None, None] * each).sum(-3) / weight.sum(-1).clamp_min(1e-6)[..., None, None]
 
 
-def step(body: Body, gravity: torch.Tensor, spread: torch.Tensor, force: Optional[torch.Tensor] = None,
-         at: Optional[torch.Tensor] = None, mass: float = 1.0) -> Body:
-    """The body a frame on. Gravity and each force (..., K, 3), acting at the
-    place `at` (..., K, 3), change its speed (the force over its mass) and its
-    spin (the force's lever about the centre, over its inertia, mass times
-    `spread`); then it moves and turns as it now goes."""
-    speed, spin = body.speed + gravity, body.spin
-    if force is not None:
-        speed = speed + force.sum(-2) / mass
-        lever = torch.linalg.cross(at - body.centre[..., None, :], force).sum(-2)
-        inertia = mass * body.turn @ spread @ body.turn.transpose(-1, -2)
-        spin = spin + torch.linalg.solve(inertia, lever[..., None])[..., 0]
+def _cross_matrix(r: torch.Tensor) -> torch.Tensor:
+    """(..., 3, 3) the matrix X of `r` (..., 3) with X v = r x v."""
+    x, y, z = r.unbind(-1)
+    zero = torch.zeros_like(x)
+    return torch.stack([zero, -z, y, z, zero, -x, -y, x, zero], -1).view(*r.shape[:-1], 3, 3)
+
+
+def step(body: Body, gravity: torch.Tensor, free: torch.Tensor, heavy: Optional[torch.Tensor] = None,
+         spread: Optional[torch.Tensor] = None, touch: Optional[Touch] = None) -> Body:
+    """The bodies a frame on. Each goes as it went and gains gravity's speed,
+    as far as it is `free` (K,) to move: 0 is the fixed world, which nothing
+    moves. Then, one touching pair after another, the two are pushed, equal
+    and opposite: as hard as makes them move as one at the place they touch,
+    times `stick`, plus `push`. A push changes a body's speed by itself over
+    the body's mass (`heavy` (K,)), and its spin by its lever about the centre
+    over the body's inertia (the mass times `spread` (K, 3, 3), unturned)."""
+    speed, spin = free[:, None] * (body.speed + gravity), free[:, None] * body.spin
+    if touch is not None:
+        eye = torch.eye(3, dtype=speed.dtype, device=speed.device)
+        give = free / heavy
+        inertia = torch.linalg.inv(body.turn @ spread @ body.turn.transpose(-1, -2))
+        for a, b, at, stick, push in zip(touch.a.tolist(), touch.b.tolist(), touch.at, touch.stick, touch.push):
+            ra, rb = at - body.centre[a], at - body.centre[b]
+            Xa, Xb = _cross_matrix(ra), _cross_matrix(rb)
+            # How a push changes the two's speed past each other at the place.
+            yields = give[a] * (eye - Xa @ inertia[a] @ Xa) + give[b] * (eye - Xb @ inertia[b] @ Xb)
+            slide = speed[a] + torch.linalg.cross(spin[a], ra) - speed[b] - torch.linalg.cross(spin[b], rb)
+            J = push - stick * torch.linalg.solve(yields + 1e-9 * eye, slide)
+            one = lambda k: torch.nn.functional.one_hot(torch.tensor(k, device=speed.device), len(speed)).to(speed.dtype)[:, None]
+            speed = speed + one(a) * give[a] * J - one(b) * give[b] * J
+            spin = (spin + one(a) * give[a] * (inertia[a] @ torch.linalg.cross(ra, J))
+                    - one(b) * give[b] * (inertia[b] @ torch.linalg.cross(rb, J)))
     return Body(body.centre + speed, turn_matrix(spin) @ body.turn, speed, spin)
 
 
-def rigid_place(shape: torch.Tensor, pos: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """(..., N, 3) where each point must be for its group to keep its shape:
-    `shape` (..., N, 3) carried onto the points `pos` as well as it goes, each
-    point counting by `weight` (..., N)."""
-    R, ms, md, _ = kabsch(weight, shape, pos)
-    return (R[..., None, :, :] @ (shape - ms[..., None, :])[..., None])[..., 0] + md[..., None, :]
+def fitted(shape: torch.Tensor, pos: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The pose that best keeps a body's shape on its points: the turn (...,
+    3, 3) and centre (..., 3) that carry `shape` (..., N, 3) onto `pos`, each
+    point counting by `weight` (..., N), a few wrong points not dragging it."""
+    R, ms, md, _ = robust_kabsch(weight, shape, pos, REFITS)
+    return R, md - (R @ ms[..., None])[..., 0]
 
 
 def pulled(pos: torch.Tensor, place: torch.Tensor, stiff: torch.Tensor) -> torch.Tensor:
-    """Each point pulled toward its rigid place as strongly as its group is stiff (..., N): 1 a rigid body, 0 no pull."""
+    """Each point pulled toward the place that keeps its body's shape, as
+    strongly as the model says it is stiff (..., N): 1 a rigid body, 0 no pull."""
     return pos + stiff[..., None] * (place - pos)

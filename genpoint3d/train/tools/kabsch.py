@@ -38,15 +38,14 @@ def turn_vector(R: torch.Tensor) -> torch.Tensor:
 
 def turn_matrix(v: torch.Tensor) -> torch.Tensor:
     """(..., 3, 3) the turn about the axis of `v` (..., 3) by its length
-    (radians): Rodrigues' formula, `turn_vector`'s inverse."""
-    angle = v.norm(dim=-1, keepdim=True)
-    k = v / angle.clamp_min(1e-12)
-    x, y, z = k.unbind(-1)
+    (radians): Rodrigues' formula, `turn_vector`'s inverse, smooth through no turn."""
+    x, y, z = v.unbind(-1)
     zero = torch.zeros_like(x)
-    K = torch.stack([zero, -z, y, z, zero, -x, -y, x, zero], -1).view(*v.shape[:-1], 3, 3)
-    s, c = torch.sin(angle)[..., None], torch.cos(angle)[..., None]
-    eye = torch.eye(3, dtype=v.dtype, device=v.device).expand_as(K)
-    return eye + s * K + (1 - c) * (K @ K)
+    V = torch.stack([zero, -z, y, z, zero, -x, -y, x, zero], -1).view(*v.shape[:-1], 3, 3)
+    angle = (v * v).sum(-1).add(1e-30).sqrt()[..., None, None]
+    # sin(a) / a and (1 - cos(a)) / a^2, both finite at a = 0.
+    s, c = torch.sinc(angle / torch.pi), 0.5 * torch.sinc(angle / (2 * torch.pi)).pow(2)
+    return torch.eye(3, dtype=v.dtype, device=v.device) + s * V + c * (V @ V)
 
 
 def misfit(R: torch.Tensor, ms: torch.Tensor, md: torch.Tensor, src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
