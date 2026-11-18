@@ -68,11 +68,11 @@ def _facings(got: CachedClip, facing: torch.Tensor, turns: dict) -> torch.Tensor
     return (turn @ turn[_query_frames(got), torch.arange(len(facing))].transpose(1, 2) @ facing[:, :, None])[..., 0]
 
 
-def _skin(pos: torch.Tensor, way: torch.Tensor, body: torch.Tensor) -> list:
-    """The faces (F, 3) joining points at `pos` (N, 3) facing `way` (N, 3) of bodies `body` (N,): each point
-    with its NEAR nearest of its body that face alike, laid on the flat its facing gives and joined there."""
+def _skin(pos: torch.Tensor, way: torch.Tensor, body: torch.Tensor, there: torch.Tensor) -> list:
+    """The faces (F, 3) joining the points `there` (N,) at `pos` (N, 3) facing `way` (N, 3) of bodies `body` (N,):
+    each point with its NEAR nearest of its body that face alike, laid on the flat its facing gives and joined there."""
     apart = torch.cdist(pos, pos)
-    apart[~((body[:, None] == body[None]) & (way @ way.T > ALIKE))] = float("inf")
+    apart[~((body[:, None] == body[None]) & (way @ way.T > ALIKE) & there[:, None] & there[None])] = float("inf")
     near, who = apart.topk(min(NEAR + 1, len(pos)), largest=False)
     faces = set()
     for i in range(len(pos)):
@@ -112,7 +112,7 @@ for i in args.clips:
         way = _facings(got, _facing(got, depth), _turns(clip))
         views.append({
             "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {int((q == 0).sum())} in the first frame",
-            "faces": _skin(got.traj[-1].float(), way[-1], got.segment),                     # bodies are stiff: joined once, in the last frame
+            "faces": [_skin(got.traj[t].float(), way[t], got.segment, q <= t) for t in range(T)],   # per frame, among the points there by then
             "video": [_jpeg(f) for f in video],
             "xyz": (got.traj.float() * 100).round().int().tolist(),                        # (T, N, 3) cm, the first frame's camera
             "seen": got.visibility.int().tolist(), "born": q.tolist(),
@@ -165,7 +165,7 @@ function show() {
   mesh.geometry = new THREE.BufferGeometry();
   mesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(v.xyz[t].flatMap(place), 3));
   mesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(v.xyz[t].flatMap((p, i) => paint(i, 0.8)), 3));
-  mesh.geometry.setIndex(v.faces.filter(f => f.every(i => v.born[i] <= t)).flat());
+  mesh.geometry.setIndex(v.faces[t].flat());
   mesh.visible = $('faces').checked;
 }
 function pick() {
