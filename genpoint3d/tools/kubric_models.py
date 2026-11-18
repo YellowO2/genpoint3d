@@ -2,6 +2,7 @@
 
 import io
 import tarfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -18,7 +19,7 @@ def fetch(name: str, home: Path) -> Path:
     at = home / name
     if not (at / WHOLE).exists():
         at.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(STORE.format(name)) as r, tarfile.open(fileobj=io.BytesIO(r.read())) as tar:
+        with urllib.request.urlopen(STORE.format(urllib.parse.quote(name))) as r, tarfile.open(fileobj=io.BytesIO(r.read())) as tar:
             for m in tar.getmembers():
                 if m.isfile():
                     (at / Path(m.name).name).write_bytes(tar.extractfile(m).read())
