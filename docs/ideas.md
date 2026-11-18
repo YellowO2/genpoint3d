@@ -14,6 +14,8 @@ The model is offered these to learn to use; nothing is enforced on its answer.
 
 ## Later
 
+- The engine finds where bodies touch by itself, from each body's whole shape (the model's guess of the unseen side too); until then the model says where two touch.
+- Asleep bodies skipped as a game engine skips them: one at rest or fixed costs nothing; one moving unseen keeps being stepped, without the image.
 - Points as the vertices of a body's shape, as a game's collision mesh: one added only where the seen surface is not already explained by the body's points, so a flat floor needs few.
 - Rigid parts within an object (limbs).
 - The model says a body's properties once and the engine works out the forces.
