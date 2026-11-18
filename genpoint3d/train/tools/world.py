@@ -1,5 +1,6 @@
 """The stored world of one clip: its points and the rigid bodies they are on, kept once, played for any frame."""
 
+from functools import wraps
 from typing import Optional
 
 import torch
@@ -7,6 +8,15 @@ import torch
 from genpoint3d.train.tools.engine import Body, Touch, fitted, mass_spread, step
 from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS, turn_matrix, turn_vector
 from genpoint3d.train.tools.likeness import SAME, likeness
+
+
+def _exact(method):
+    """`method` in fp32 whatever autocast its caller runs under: bf16 holds a place to about a part in 256."""
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with torch.autocast(device_type=self.pos.device.type, enabled=False):
+            return method(self, *args, **kwargs)
+    return run
 
 
 class World:
@@ -52,6 +62,7 @@ class World:
         ok = count >= MIN_POSE_POINTS
         return torch.where(ok[:, None, None], turn, self.turn[t]), torch.where(ok[:, None], centre, self.centre[t]), count
 
+    @_exact
     def rigid(self, t: int, pos: torch.Tensor, seen: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(N, 3) the place that keeps each point's body's shape in frame `t` (its own `pos` for a point on no
         body), and (N,) how many of the body's points are seen behind it."""
@@ -62,6 +73,7 @@ class World:
         there = (turn[k] @ self.place[..., None])[..., 0] + centre[k]
         return torch.where(on[:, None], there, pos), count[k] * on
 
+    @_exact
     @torch.no_grad()
     def store(self, t: int, pos: torch.Tensor, seen: torch.Tensor, groups: torch.Tensor, tips: torch.Tensor) -> None:
         """Frame `t` as it is seen: the points at `pos` (N, 3), each body's pose from those believed seen
@@ -153,6 +165,7 @@ class World:
         self.centre += (self.turn @ off[None, :, :, None])[..., 0]
         self.place -= off[k] * (self.body >= 0)[:, None]
 
+    @_exact
     def touching(self, t: int, reach: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """The pairs of points that may be where two bodies touch in frame `t`: each point with the nearest
         point of another body, within the point's `reach` (N,). Two (C,) lists of points, the first on the
@@ -168,6 +181,7 @@ class World:
         pairs = torch.unique(torch.stack([torch.where(swap, m, n), torch.where(swap, n, m)], 1), dim=0)
         return pairs[:, 0], pairs[:, 1]
 
+    @_exact
     def sliding(self, t: int, n: torch.Tensor, m: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Midway between each pair of points `n`, `m` (C,) in frame `t`, (C, 3), and how the two's bodies go
         past each other there, as they now go, (C, 3)."""
@@ -175,6 +189,7 @@ class World:
         goes = lambda k: self.speed[k] + torch.linalg.cross(self.spin[k], at - self.centre[t, k])
         return at, goes(self.body[n]) - goes(self.body[m])
 
+    @_exact
     def ahead(self, t: int, gravity: torch.Tensor, free: Optional[torch.Tensor] = None,
               heavy: Optional[torch.Tensor] = None, touch: Optional[Touch] = None) -> torch.Tensor:
         """(N, 3) where the engine puts every point in frame `t` + 1, written there as the world's until that
