@@ -1,42 +1,23 @@
 # Ideas
 
-One line each. Now: decided, being built. Later: not yet. Ruled out: tried, with the result in runs.md.
+## The design
 
-## Now
+1. The world is the memory: bodies and their points are stored once, at their place.
+2. Each frame, physics predicts and seeing corrects that one stored world.
+3. The network turns what it sees into the world (points, bodies, how stiff, each body's whole shape as a guess) and says the forces between bodies that touch.
+4. The engine does what is exact: gravity, inertia, a force into motion, a stiff body keeping its shape, keeping what is out of view.
+5. Any frame, past or future, is the stored world played, by each body's record of how it moved.
 
-- The model is a learned physics engine: the engine's parts are ours to reference (rigid bodies, contacts, joints, motors, a step of gravity and inertia); what an engine calculates from known shapes and masses, the model says. Mechanisms for it to learn to use, not rules enforced on its answer.
-- Rigid place: a point is pulled toward the place that keeps its group's shape, as strongly as the model says the group is stiff (not enforced: a soft body gets no pull).
-- Contact force: where two rigid bodies touch, the model says the force between them, a push or a pull (one vector at the touching point, equal and opposite on the two); fixed physics turns it into each body's change of speed and spin about its centre of gravity, and its points follow. Inertia and gravity are given. Two things colliding and two limbs at a joint are the same case.
+The network is offered these to learn to use; nothing is enforced on its answer.
 
 ## Later
 
-- Rigid parts within an object, split by motion (limbs); on Kubric every object is one part.
-- Groups trained through the rigid alignment, as RAFT-3D.
-- Confidence as CoTracker3's: the chance the guess is within a threshold of the truth.
-- Forecast stepped one frame at a time, as GNS.
-- The turn of a tumbling object in free flight, learned.
+- Rigid parts within an object (limbs).
+- The network says a body's properties once and the engine works out the forces.
 - Merging a returned surface's old point with its new one.
-- Mass as a learned object property: our generator must set density first.
-- V-JEPA 2 beside DINOv3 for object properties, if DINOv3 cannot predict them.
-- SAM 3 masks as an appearance input on real video.
-- Noisy-depth training with a random depth-scale error, so gravity can correct the scale.
-- Real video's frame rate in the gravity strength; frame-rate variety in training.
-- Camera roll in our renders, only if finding down is poor on rolled real video.
+- Mass as a learned property.
+- Confidence as CoTracker3's.
+- SAM 3 masks and V-JEPA 2 as extra inputs.
+- Noisy depth and real frame rates in training.
 - More data: PointOdyssey, SynthVerse, soft bodies.
-- Model size and where spatial attention goes: never chosen.
-- The world is the memory: the points and bodies are stored once at their place, as a game engine keeps a level; each frame physics steps what moves, the model corrects only what the camera sees, and the rest is saved and costs nothing until seen again. Near-only attention (`--patch`) is built but never used in a run.
-- Each frame, physics predicts and seeing corrects one representation: bodies (shape, each point at its place on the body), each body's path and the forces behind it. No frame is refined; any frame, past or future, is the representation played.
-- The whole body as a guess: the model says a body's full shape, unseen side included, corrected as more of it is seen; the engine's centre of gravity and mass spread come from it.
 - A long run once the design settles.
-
-## Ruled out
-
-- Physics carried by an object centre found by the model: a centre cannot be found from one side, and floors have none.
-- Blending the guess with the rigid place by a learned trust (`--fit-blend`): broke training.
-- Telling the model how far its mates sit from their rigid place (`--fit-left`): no gain.
-- A pairwise motion check as an attention bias: no gain.
-- A point's template refreshed to its latest look: worse.
-- More forward rounds (ffffbb): no gain.
-- DINOv3 or EntitySAM groups: worse than the model's own.
-- The matcher on a fixed 9 m ruler: worse.
-- Caching cross-attention keys and values: slower.
