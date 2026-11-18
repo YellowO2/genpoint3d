@@ -25,9 +25,9 @@ class FineFinder(nn.Module):
     """The CNN and the neighbourhood comparisons. The CNN runs once per step
     without a graph (`encode`) and again a clip at a time to carry the
     gradient back (`replay`); the comparison is checkpointed in pieces of
-    `chunk` points."""
+    `chunk` points in a frame."""
 
-    def __init__(self, neigh: int = 32, levels: int = 4, feat_dim: int = 128, chunk: int = 256) -> None:
+    def __init__(self, neigh: int = 32, levels: int = 4, feat_dim: int = 128, chunk: int = 4096) -> None:
         super().__init__()
         self.neigh, self.levels, self.chunk = neigh, levels, chunk
         # Against the template and against the frame before, levels each.
@@ -78,11 +78,12 @@ class FineFinder(nn.Module):
 
         returns (B, T, N, out_dim) for the T frames after the first
         """
-        # Pieces of at most `chunk` points, whole clips together while they fit:
-        # each point's comparison is its own, so the pieces change nothing.
+        # Pieces of at most `chunk` points in a frame, whole clips together while
+        # they fit: each point's comparison is its own, so the pieces change nothing.
         out = []
         N = uv.shape[2]
-        clips, points = max(1, self.chunk // N), min(N, self.chunk)
+        room = max(1, self.chunk // (uv.shape[1] - 1))
+        clips, points = max(1, room // N), min(N, room)
         for i in range(0, fmap.shape[0], clips):
             c = slice(i, i + clips)
             row = []
@@ -146,27 +147,28 @@ class FineFinder(nn.Module):
             at = (q - (s - 1) / 2) / s
             grid = 2 * at / at.new_tensor([wl - 1, hl - 1]) - 1             # (b, N, 2)
 
-            def support(f0, x0, far0):
-                """The template in one map, (b, C, hl, wl) features and (b, P, 3)
-                positions: the K seen cells nearest each query point, led by the
-                query's own feature sampled where it is. (b, N, k + 1, C), (b, N, k, 3)."""
-                with torch.no_grad():
-                    near0 = (torch.cdist(pos0, x0) + far0[:, None]).topk(k, dim=-1, largest=False).indices
-                sf, sx = pick(f0.flatten(2).transpose(1, 2), near0), pick(x0, near0)
-                sv = pick((far0 == 0)[..., None].float(), near0)
-                own = F.grid_sample(f0.float(), grid[:, :, None], align_corners=True)[..., 0].transpose(1, 2)
-                return torch.cat([own[:, :, None].to(sf.dtype), sf], dim=2), sx, torch.cat([torch.ones_like(sv[:, :, :1]), sv], 2)
-
-            # Each point's template from its own frame: the support built in
-            # every query frame there is, each point keeping its own.
-            sup_f = sup_x = sup_seen = None
-            for t in query_t.unique().tolist():
-                sf, sx, sv = support(pool(fmap0[:, t]), pick_xyz(xyz0[:, t]).flatten(2).transpose(1, 2),
-                                     hide(ok0[:, t], s))
-                m = (query_t == t)[:, :, None, None]
-                sup_f = sf if sup_f is None else torch.where(m, sf, sup_f)
-                sup_x = sx if sup_x is None else torch.where(m, sx, sup_x)
-                sup_seen = sv if sup_seen is None else torch.where(m, sv, sup_seen)
+            # Each point's template from the frame it is given in: the K seen cells
+            # nearest it there, led by its own feature sampled where it is.
+            Tq = fmap0.shape[1]
+            f0 = pool(fmap0.flatten(0, 1))                                         # (b Tq, C, hl, wl)
+            cells0 = f0.flatten(2).transpose(1, 2).reshape(b, Tq * hl * wl, C)
+            x0 = pick_xyz(xyz0.flatten(0, 1)).flatten(2).transpose(1, 2).reshape(b, Tq * hl * wl, 3)
+            far0 = hide(ok0, s)                                                    # (b, Tq, P)
+            mine = query_t[:, :, None] * (hl * wl) + torch.arange(hl * wl, device=pos.device)   # (b, N, P) its frame's cells
+            with torch.no_grad():
+                apart = (x0.gather(1, mine.flatten(1)[..., None].expand(-1, -1, 3)).view(b, N, hl * wl, 3)
+                         - pos0[:, :, None]).norm(dim=-1)
+                apart = apart + far0.gather(1, query_t[:, :, None].expand(-1, -1, hl * wl))
+                near0 = mine.gather(2, apart.topk(k, dim=-1, largest=False).indices)            # (b, N, k) in the clip's cells
+            sup_f, sup_x = pick(cells0, near0), pick(x0, near0)
+            sup_seen = pick((far0.flatten(1) == 0)[..., None].float(), near0)
+            # Sampled in the point's own frame: the clip's maps as a stack, the frame the third axis.
+            depth = 2 * query_t.float() / max(Tq - 1, 1) - 1
+            where = torch.cat([grid, depth[..., None]], -1)[:, :, None, None]                    # (b, N, 1, 1, 3)
+            stack = f0.reshape(b, Tq, C, hl, wl).transpose(1, 2).float()
+            own = F.grid_sample(stack, where, align_corners=True)[..., 0, 0].transpose(1, 2)     # (b, N, C)
+            sup_f = torch.cat([own[:, :, None].to(sup_f.dtype), sup_f], dim=2)
+            sup_seen = torch.cat([torch.ones_like(sup_seen[:, :, :1]), sup_seen], 2)
             # Normalised after the sampling and the pooling, as TAPIP3D has it.
             sup_f, cur_f = self.in_norm(sup_f), self.in_norm(cur_f)
             sup_off = torch.cat([torch.zeros_like(sup_x[:, :, :1]), sup_x - pos0[:, :, None]], dim=2)
