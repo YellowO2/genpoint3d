@@ -65,7 +65,9 @@ for clip in args.clips:
     bodies = []
     for k, name in enumerate(d["asset"].tolist()):
         corners, walls, colour = model(name)
-        bodies.append({"name": name, "corners": (np.array(corners) * float(d["scale"][k])).round(4).tolist(), "walls": walls, "colour": colour,
+        corners = np.array(corners)
+        corners *= float(d["scale"][k]) / (corners.max(0) - corners.min(0)).max()           # Kubric's scale is the object's longest side, metres
+        bodies.append({"name": name, "corners": corners.round(4).tolist(), "walls": walls, "colour": colour,
                        "place": d["positions"][k].round(4).tolist(), "turn": d["quaternions"][k].round(5).tolist()})   # (T, 3), (T, 4) w first
     points = sum(len(b["corners"]) for b in bodies)
     views.append({"name": f"clip {clip}: {len(bodies)} objects, {points} points", "bodies": bodies,
@@ -92,7 +94,7 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(40, 1, 0.05, 500), controls = new OrbitControls(camera, renderer.domElement);
 camera.up.set(0, 0, 1);                                                    // Kubric's world: z up, the floor at z = 0
 scene.background = new THREE.Color(0x111111);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.6));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 2.4));
 const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 sun.position.set(3, -4, 8);
 scene.add(sun);
@@ -113,7 +115,7 @@ function pick() {
     shape.setIndex(b.walls.flat());
     shape.computeVertexNormals();
     const walls = new THREE.Mesh(shape, new THREE.MeshLambertMaterial({color: new THREE.Color().setRGB(b.colour[0] / 255, b.colour[1] / 255, b.colour[2] / 255, THREE.SRGBColorSpace), flatShading: true, side: THREE.DoubleSide}));
-    const bars = new THREE.LineSegments(new THREE.WireframeGeometry(shape), new THREE.LineBasicMaterial({color: 0x000000, transparent: true, opacity: 0.45}));
+    const bars = new THREE.LineSegments(new THREE.WireframeGeometry(shape), new THREE.LineBasicMaterial({color: 0x000000, transparent: true, opacity: 0.2}));
     scene.add(walls, bars);
     return {walls, bars, b};
   });
