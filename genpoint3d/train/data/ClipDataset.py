@@ -201,10 +201,11 @@ def _query_frames(clip: CachedClip) -> torch.Tensor:
 
 
 def _spawned(clip: CachedClip, num_points: int, ask: int, gap: float, whole: torch.Tensor,
-             order: torch.Tensor) -> tuple[CachedClip, torch.Tensor]:
+             order: torch.Tensor, flat: float = 0.0) -> tuple[CachedClip, torch.Tensor]:
     """The clip with its first `ask` points in `order` asked and more added
     (`add_points`) up to `num_points`, the clip's other tracks standing in
-    for them; and (N,) which are asked."""
+    for them; and (N,) which are asked. With `flat` metres, surface an
+    object's points already explain within it takes none."""
     T, N = clip.visibility.shape
     q = _query_frames(clip)
     order = order[whole[q][order]]
@@ -232,7 +233,13 @@ def _spawned(clip: CachedClip, num_points: int, ask: int, gap: float, whole: tor
         on[[k for t0, k in born if t0 <= t and vis[t, k]]] = True
         return uv[t, on]
 
-    born = add_points(torch.nonzero(whole)[:, 0].tolist(), num_points - len(asked), candidates, covering)
+    def surface(t, born):
+        c, on = candidates(t, born)[1], there[t] & vis[t]
+        on[[k for t0, k in born if t0 <= t and vis[t, k]]] = True
+        return clip.traj[t, c].float(), clip.segment[c], clip.traj[t, on].float(), clip.segment[on]
+
+    born = add_points(torch.nonzero(whole)[:, 0].tolist(), num_points - len(asked), candidates, covering,
+                      surface if flat else None, flat)
     keep, _ = torch.sort(torch.cat([asked, torch.tensor([k for _, k in born], dtype=torch.long)]))
     is_asked = torch.zeros(N, dtype=torch.bool)
     is_asked[asked] = True

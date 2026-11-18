@@ -2,7 +2,7 @@
 
 import torch
 
-from genpoint3d.train.tools.farthest_first import GAP, UNIT, add_points, spacing
+from genpoint3d.train.tools.farthest_first import GAP, UNIT, add_points, on_patch, spacing
 
 F, W, CELLS = 560.0, 512, 128
 cell = (torch.arange(CELLS) + 0.5) / CELLS * W
@@ -59,6 +59,35 @@ want(f"next to nothing is added from {near:.2f} m in (cells are 4 px, so a few s
 print("the camera comes closer to a wall covered only coarsely")
 n = added([(0.0, 8.0), (0.0, 4.0)])
 want("the finer pieces now told apart get points", n[1] > 0, f"{n}")
+
+def vertices(bulge: float, bodies: int = 1) -> int:
+    """Points one frame adds on a wall 8 m away that bows `bulge` metres toward the camera at its middle,
+    split left to right into `bodies` bodies, with the flat-patch rule at 1 cm."""
+    z = 8.0 - bulge * (1 - ((PX[:, 0] - W / 2) / (W / 2)) ** 2)
+    pos = torch.cat([(PX - W / 2) * z[:, None] / F, z[:, None]], -1)
+    body = (PX[:, 0] * bodies / W).long()
+    picked = []
+
+    def candidates(t, born):
+        return PX, torch.arange(len(PX)), spacing(z, F, W, GAP)
+
+    def surface(t, born):
+        i = torch.tensor([k for _, k in born], dtype=torch.long)
+        return pos, body, pos[i], body[i]
+
+    return len(add_points([0], 10 ** 6, candidates, lambda t, born: PX[[k for _, k in born]], surface, 0.01))
+
+
+print("points as the vertices of a shape: a point only where the body's points do not already span the surface")
+n = vertices(0.0)
+want("a flat wall takes three", n == 3, f"{n} points")
+n2 = vertices(0.0, bodies=2)
+want("two flat bodies take three or four each (three may fall in a line)", 6 <= n2 <= 8, f"{n2} points")
+bowed = vertices(0.5)
+want("a bowed wall takes many more, and fewer than every piece", 3 * n < bowed < 250, f"{bowed} points")
+line = torch.tensor([[0.0, 0, 0], [1, 0, 0], [2, 0, 0]])
+off = on_patch(torch.tensor([[1.0, 0.5, 0], [1.5, 0, 0]]), torch.zeros(2), line, torch.zeros(3), 0.01).tolist()
+want("three points in a line span only the line", off == [False, True], f"off the line {off[0]}, on it {off[1]}")
 
 if failed:
     raise SystemExit(f"{len(failed)} failed: {', '.join(failed)}")
