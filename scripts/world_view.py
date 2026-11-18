@@ -2,7 +2,8 @@
 what the stored world should come to be. Each object is its own low-poly shape,
 all sides, the one Kubric's physics engine used (a Google Scanned Object's
 collision mesh): its corners the points, its edges the bars, its faces the
-walls, placed as Kubric had it in every frame. No model.
+walls, placed as Kubric had it in every frame, at a few levels of detail: an
+object's corners that fall in one cell of a grid across it become one. No model.
 
   python scripts/world_view.py --objects OBJECTS --frames FRAMES --assets DIR --clips 000040 --out world_view.html
 
@@ -27,6 +28,7 @@ p.add_argument("--objects", required=True)
 p.add_argument("--frames", required=True)
 p.add_argument("--assets", required=True)
 p.add_argument("--clips", nargs="+", required=True)
+p.add_argument("--cells", type=int, nargs="+", default=[0, 12, 8, 5], help="cells across an object's longest side; 0 for Kubric's own shape")
 p.add_argument("--out", default="world_view.html")
 args = p.parse_args()
 assets = Path(args.assets).expanduser()
@@ -53,6 +55,20 @@ def model(name: str) -> tuple[list, list, list]:
     return corners, walls, colour.round().astype(int).tolist()
 
 
+def thinned(corners: np.ndarray, walls: list, cells: int) -> tuple[np.ndarray, list]:
+    """The shape with its corners in one cell of a grid, `cells` across its longest side, made one (their middle),
+    and the walls left with three different corners."""
+    if not cells:
+        return corners, walls
+    low = corners.min(0)
+    cell = np.floor((corners - low) / ((corners.max(0) - low).max() / cells + 1e-9)).astype(int)
+    _, first, one = np.unique(cell, axis=0, return_index=True, return_inverse=True)
+    one = one.reshape(-1)
+    middle = np.stack([np.bincount(one, corners[:, k]) for k in range(3)], 1) / np.bincount(one)[:, None]
+    kept = {tuple(sorted(f)): f for f in one[np.array(walls)].tolist() if len(set(f)) == 3}
+    return middle, list(kept.values())
+
+
 def jpeg(frame: np.ndarray) -> str:
     out = io.BytesIO()
     Image.fromarray(frame).save(out, "JPEG", quality=80)
@@ -62,19 +78,22 @@ def jpeg(frame: np.ndarray) -> str:
 views = []
 for clip in args.clips:
     d = np.load(Path(args.objects).expanduser() / f"{clip}.npz")
-    bodies = []
-    for k, name in enumerate(d["asset"].tolist()):
-        corners, walls, colour = model(name)
-        corners = np.array(corners)
-        corners *= float(d["scale"][k]) / (corners.max(0) - corners.min(0)).max()           # Kubric's scale is the object's longest side, metres
-        bodies.append({"name": name, "corners": corners.round(4).tolist(), "walls": walls, "colour": colour,
-                       "place": d["positions"][k].round(4).tolist(), "turn": d["quaternions"][k].round(5).tolist()})   # (T, 3), (T, 4) w first
-    points = sum(len(b["corners"]) for b in bodies)
-    views.append({"name": f"clip {clip}: {len(bodies)} objects, {points} points", "bodies": bodies,
-                  "camera": d["camera_positions"].round(4).tolist(), "camera_turn": d["camera_quaternions"].round(5).tolist(),
-                  "fov": float(np.degrees(2 * np.arctan(float(d["sensor_width"]) / 2 / float(d["focal_length"])))),
-                  "video": [jpeg(f) for f in np.load(Path(args.frames).expanduser() / f"{clip}.npy")]})
-    print(views[-1]["name"], "; points an object:", sorted(len(b["corners"]) for b in bodies), flush=True)
+    video, first = [jpeg(f) for f in np.load(Path(args.frames).expanduser() / f"{clip}.npy")], len(views)
+    for cells in args.cells:
+        bodies = []
+        for k, name in enumerate(d["asset"].tolist()):
+            corners, walls, colour = model(name)
+            corners = np.array(corners)
+            corners *= float(d["scale"][k]) / (corners.max(0) - corners.min(0)).max()       # Kubric's scale is the object's longest side, metres
+            corners, walls = thinned(corners, walls, cells)
+            bodies.append({"name": name, "corners": corners.round(4).tolist(), "walls": walls, "colour": colour,
+                           "place": d["positions"][k].round(4).tolist(), "turn": d["quaternions"][k].round(5).tolist()})   # (T, 3), (T, 4) w first
+        count = sorted(len(b["corners"]) for b in bodies)
+        views.append({"name": f"clip {clip}, {f'{cells} cells across' if cells else 'as Kubric has it'}: {len(bodies)} objects, {sum(count)} points",
+                      "bodies": bodies, "camera": d["camera_positions"].round(4).tolist(), "camera_turn": d["camera_quaternions"].round(5).tolist(),
+                      "fov": float(np.degrees(2 * np.arctan(float(d["sensor_width"]) / 2 / float(d["focal_length"])))),
+                      "video": first if len(views) > first else video})                    # one copy of the video, shared by the levels
+        print(views[-1]["name"], "; points an object: median", int(np.median(count)), "from", count[0], "to", count[-1], flush=True)
 
 PAGE = """<!doctype html><meta charset=utf-8><title>World view</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif;overflow:hidden}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;height:34px}
@@ -110,7 +129,8 @@ let v, made = [];
 function pick() {
   made.forEach(m => { scene.remove(m.walls, m.bars); m.walls.geometry.dispose(); m.bars.geometry.dispose(); });
   v = V[$('which').value];
-  $('t').max = v.video.length - 1;
+  v.frames = typeof v.video == 'number' ? V[v.video].video : v.video;
+  $('t').max = v.frames.length - 1;
   made = v.bodies.map(b => {
     const shape = new THREE.BufferGeometry();
     shape.setAttribute('position', new THREE.Float32BufferAttribute(b.corners.flat(), 3));
@@ -127,7 +147,7 @@ function pick() {
 function show() {
   const t = +$('t').value;
   $('tn').textContent = t;
-  $('video').src = 'data:image/jpeg;base64,' + v.video[t];
+  $('video').src = 'data:image/jpeg;base64,' + v.frames[t];
   for (const m of made) for (const o of [m.walls, m.bars]) {
     o.position.set(...m.b.place[t]);
     o.quaternion.set(m.b.turn[t][1], m.b.turn[t][2], m.b.turn[t][3], m.b.turn[t][0]);
