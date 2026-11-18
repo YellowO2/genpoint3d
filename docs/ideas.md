@@ -20,6 +20,7 @@ Not built yet: the whole shape (only its centre of gravity is); until it is, the
 - The model's range, as a game's simulation distance: a body farther than it from the camera is neither stepped nor looked at; it stays stored as it was until the camera comes near again.
 - Points as the vertices of a body's shape, as a game's collision mesh: one added only where the seen surface is not already explained by the body's points, so a flat floor needs few.
 - Rigid parts within an object (limbs), as a robot simulator has them: a joint is two parts always held together at one place, and the model says how hard each joint turns (a turning push, not yet in the engine).
+- The stored world rendered back into the video and compared with it, as CycleGAN's cycle: the model then learns by itself how many vertices and what physics the scene needs to come out the same. After the point loss is right.
 - Confidence as CoTracker3's.
 - SAM 3 masks and V-JEPA 2 as extra inputs.
 - Noisy depth and real frame rates in training.
