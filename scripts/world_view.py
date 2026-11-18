@@ -14,14 +14,12 @@ import argparse
 import base64
 import io
 import json
-import tarfile
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-STORE = "https://storage.googleapis.com/kubric-public/assets/GSO/{}.tar.gz"
+from genpoint3d.tools.kubric_models import colour, shape, thinned
 
 p = argparse.ArgumentParser()
 p.add_argument("--objects", required=True)
@@ -32,41 +30,6 @@ p.add_argument("--cells", type=int, nargs="+", default=[8, 0, 12, 5], help="cell
 p.add_argument("--out", default="world_view.html")
 args = p.parse_args()
 assets = Path(args.assets).expanduser()
-
-
-def model(name: str) -> tuple[list, list, list]:
-    """A model's corners (V, 3) in metres, its walls (F, 3) and its colour, the mean of its texture."""
-    home = assets / name
-    if not home.exists():
-        home.mkdir(parents=True)
-        with urllib.request.urlopen(STORE.format(name)) as r, tarfile.open(fileobj=io.BytesIO(r.read())) as tar:
-            for m in tar.getmembers():
-                if m.isfile() and Path(m.name).name in ("collision_geometry.obj", "texture.png"):
-                    (home / Path(m.name).name).write_bytes(tar.extractfile(m).read())
-    corners, walls = [], []
-    for line in (home / "collision_geometry.obj").read_text().splitlines():
-        part = line.split()
-        if part[:1] == ["v"]:
-            corners.append([float(x) for x in part[1:4]])
-        elif part[:1] == ["f"]:
-            i = [int(x.split("/")[0]) - 1 for x in part[1:]]
-            walls += [[i[0], i[k], i[k + 1]] for k in range(1, len(i) - 1)]
-    colour = np.asarray(Image.open(home / "texture.png").convert("RGB").resize((16, 16))).reshape(-1, 3).mean(0)
-    return corners, walls, colour.round().astype(int).tolist()
-
-
-def thinned(corners: np.ndarray, walls: list, cells: int) -> tuple[np.ndarray, list]:
-    """The shape with its corners in one cell of a grid, `cells` across its longest side, made one (their middle),
-    and the walls left with three different corners."""
-    if not cells:
-        return corners, walls
-    low = corners.min(0)
-    cell = np.floor((corners - low) / ((corners.max(0) - low).max() / cells + 1e-9)).astype(int)
-    _, first, one = np.unique(cell, axis=0, return_index=True, return_inverse=True)
-    one = one.reshape(-1)
-    middle = np.stack([np.bincount(one, corners[:, k]) for k in range(3)], 1) / np.bincount(one)[:, None]
-    kept = {tuple(sorted(f)): f for f in one[np.array(walls)].tolist() if len(set(f)) == 3}
-    return middle, list(kept.values())
 
 
 def jpeg(frame: np.ndarray) -> str:
@@ -82,11 +45,8 @@ for clip in args.clips:
     for cells in args.cells:
         bodies = []
         for k, name in enumerate(d["asset"].tolist()):
-            corners, walls, colour = model(name)
-            corners = np.array(corners)
-            corners *= float(d["scale"][k]) / (corners.max(0) - corners.min(0)).max()       # Kubric's scale is the object's longest side, metres
-            corners, walls = thinned(corners, walls, cells)
-            bodies.append({"name": name, "corners": corners.round(4).tolist(), "walls": walls, "colour": colour,
+            corners, walls = thinned(*shape(name, assets, float(d["scale"][k])), cells)
+            bodies.append({"name": name, "corners": corners.round(4).tolist(), "walls": walls, "colour": colour(name, assets),
                            "place": d["positions"][k].round(4).tolist(), "turn": d["quaternions"][k].round(5).tolist()})   # (T, 3), (T, 4) w first
         count = sorted(len(b["corners"]) for b in bodies)
         views.append({"name": f"clip {clip}, {f'{cells} cells across' if cells else 'as Kubric has it'}: {len(bodies)} objects, {sum(count)} points",
