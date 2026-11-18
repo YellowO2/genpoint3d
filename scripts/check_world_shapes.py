@@ -27,7 +27,27 @@ p.add_argument("--clips", type=int, default=40)
 args = p.parse_args()
 
 FLIP = np.diag([1.0, -1.0, -1.0])  # Blender's axes to OpenCV's
-ON = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1], [.5, .5, 0], [.5, 0, .5], [0, .5, .5], [1 / 3, 1 / 3, 1 / 3]])  # places on a wall
+
+
+def off_walls(p: torch.Tensor, wall: torch.Tensor) -> torch.Tensor:
+    """(P,) how far each place `p` (P, 3) is from the nearest of the walls (F, 3, 3), each a triangle."""
+    a, b, c = wall[:, 0], wall[:, 1], wall[:, 2]
+    out = []
+    for q in p.split(1000):
+        r = q[:, None] - a[None]                                                           # (P, F, 3)
+        e0, e1 = (b - a)[None], (c - a)[None]
+        d00, d01, d11, d20, d21 = (e0 * e0).sum(-1), (e0 * e1).sum(-1), (e1 * e1).sum(-1), (r * e0).sum(-1), (r * e1).sum(-1)
+        den = (d00 * d11 - d01 * d01).clamp_min(1e-18)
+        v, w = (d11 * d20 - d01 * d21) / den, (d00 * d21 - d01 * d20) / den               # where it falls on the wall's flat
+        normal = torch.nn.functional.normalize(torch.linalg.cross(b - a, c - a), dim=-1)
+        flat = (r * normal[None]).sum(-1).abs()
+        edge = torch.full_like(flat, float("inf"))
+        for s, e in ((a, b), (b, c), (c, a)):
+            along = (((q[:, None] - s[None]) * (e - s)[None]).sum(-1) / ((e - s) ** 2).sum(-1).clamp_min(1e-18)[None]).clamp(0, 1)
+            edge = torch.minimum(edge, (q[:, None] - s[None] - along[..., None] * (e - s)[None]).norm(dim=-1))
+        out.append(torch.where((v >= 0) & (w >= 0) & (v + w <= 1), flat, edge).min(1).values)
+    return torch.cat(out)
+
 
 files = sorted(Path(args.cache).expanduser().glob("*.pt"))
 files = files[:: max(len(files) // args.clips, 1)][: args.clips]
@@ -47,11 +67,10 @@ for f in files:
         if not mine.any():
             continue
         corners, walls = shape(name, Path(args.assets).expanduser(), float(o["scale"][k]))
-        surface = np.einsum("pc,fcx->fpx", ON, corners[np.array(walls)]).reshape(-1, 3)                  # the walls' corners, edges and middles
         turn = quat_to_rot(o["quaternions"][k].astype(np.float64))                                         # (T, 3, 3) the object's to the world's
-        world = np.einsum("tij,sj->tsi", turn, surface) + o["positions"][k][:, None]                      # (T, S, 3)
-        cam0 = torch.from_numpy(((world - at0) @ turn0) @ FLIP.T)                                         # the first frame's camera, as the cache has it
-        d = torch.cdist(traj[:, mine], cam0).min(-1).values                                               # (T, n)
+        world = (traj[:, mine].numpy() @ FLIP) @ turn0.T + at0                                            # (T, n, 3) the tracks, out of the first frame's camera
+        local = np.einsum("tji,tnj->tni", turn, world - o["positions"][k][:, None])                       # in the object's own frame, where its shape is
+        d = off_walls(torch.from_numpy(local).flatten(0, 1), torch.from_numpy(corners[np.array(walls)])).view(local.shape[:2])   # (T, n)
         here.append(d.flatten())
         share.append((d / float(o["scale"][k])).flatten())
     if here:
