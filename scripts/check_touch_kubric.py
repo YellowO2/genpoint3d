@@ -1,7 +1,7 @@
 """Whether our engine's touch (`engine.step` with a `Touch`) can say what Kubric's own physics does where an
 object is on the floor: MOVi-F's true object poses again. For an object-frame that is not flying (our plain step
 over 0.5 cm off), the best touch with the floor is searched for: where on the floor under the object, how far
-the two stick there, and how wide the object's mass is spread (its shape is not in the data). Then the pose a
+the floor holds it and grips it there, and how wide the object's mass is spread (its shape is not in the data). Then the pose a
 frame on with that touch, against the true one. Near nothing left: the engine can say Kubric's touches and only
 the settings are the model's to learn. Much left: the engine's touch is missing something no training gives.
 
@@ -59,15 +59,17 @@ body = Body(torch.cat([torch.zeros(1, 3), c1[pick]]), torch.cat([torch.eye(3)[No
             torch.cat([torch.zeros(1, 3), turn_vector(R1 @ R0.transpose(-1, -2))[pick]]))
 free = torch.cat([torch.zeros(1), torch.ones(M)])
 height = c1[pick, 2].clamp_min(0.02)
-where, stick, wide = torch.zeros(M, 2, requires_grad=True), torch.full((M,), 2.0, requires_grad=True), torch.zeros(M, requires_grad=True)
-opt = torch.optim.Adam([where, stick, wide], lr=0.05)
+where, wide = torch.zeros(M, 2, requires_grad=True), torch.zeros(M, requires_grad=True)
+hold, grip = torch.full((M,), 2.0, requires_grad=True), torch.full((M,), 2.0, requires_grad=True)
+opt = torch.optim.Adam([where, hold, grip, wide], lr=0.05)
 
 
 def stepped() -> Body:
-    """The objects a frame on, each touching the floor at its searched place, sticking as searched."""
+    """The objects a frame on, each touching the floor at its searched place, held and gripped as searched."""
     at = torch.cat([c1[pick, :2] + where * height[:, None], torch.zeros(M, 1)], -1)
     spread = torch.cat([torch.ones(1), 0.4 * (height * torch.exp(wide)) ** 2])[:, None, None] * torch.eye(3)
-    touch = Touch(torch.arange(1, M + 1), torch.zeros(M, dtype=torch.long), at, torch.sigmoid(stick), torch.zeros(M, 3))
+    touch = Touch(torch.arange(1, M + 1), torch.zeros(M, dtype=torch.long), at, torch.tensor([0.0, 0.0, 1.0]).expand(M, 3),
+                  torch.sigmoid(hold), torch.sigmoid(grip), torch.zeros(M, 3))
     return step(body, fall, free, torch.ones(M + 1), spread, touch)
 
 
@@ -79,7 +81,7 @@ for i in range(300):
     loss.backward()
     opt.step()
     if i % 50 == 0:
-        print(f"  search {i}: {float(loss):.4f}", flush=True)
+        print(f"  search {i}: {loss.item():.4f}", flush=True)
 with torch.no_grad():
     b = stepped()
 cm, deg = ((b.centre[1:] - c2[pick]).norm(dim=-1) * 100,

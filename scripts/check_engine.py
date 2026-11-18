@@ -34,8 +34,12 @@ def bodies(*each) -> Body:
     return Body(stack(0), torch.eye(3).expand(len(each), 3, 3).clone(), stack(1), stack(2))
 
 
-def touch(a, b, at, stick=0.0, push=(0.0, 0.0, 0.0)) -> Touch:
-    return Touch(torch.tensor([a]), torch.tensor([b]), torch.tensor([at]), torch.tensor([stick]), torch.tensor([push]))
+UP = (0.0, 1.0, 0.0)
+
+
+def touch(a, b, at, hold=0.0, grip=0.0, push=(0.0, 0.0, 0.0), into=UP) -> Touch:
+    return Touch(torch.tensor([a]), torch.tensor([b]), torch.tensor([at]), torch.tensor([into]), torch.tensor([hold]),
+                 torch.tensor([grip]), torch.tensor([push]))
 
 
 shape = ball()
@@ -80,23 +84,28 @@ total = (heavy[:, None] * after.speed).sum(0)
 want("a push between two bodies keeps the pair's momentum", total.norm() < 1e-12 and after.speed[0].norm() > 0,
      f"{float(total.norm()):.1e}, the lighter going {float(after.speed[0].norm() / after.speed[1].norm()):.1f} times as fast")
 
-# A ball at rest on the floor, sticking where it touches: gravity does not move it.
+# A ball at rest on the floor, held and gripped where it touches: gravity does not move it.
 b = rest
 for _ in range(20):
-    b = step(b, GRAVITY, touch=touch(1, 0, BOTTOM, stick=1.0), **two())
-want("a ball sticking to the floor stays at rest under gravity", (b.centre[1] - rest.centre[1]).norm() < 1e-8,
+    b = step(b, GRAVITY, touch=touch(1, 0, BOTTOM, hold=1.0, grip=1.0), **two())
+want("a ball the floor holds and grips stays at rest under gravity", (b.centre[1] - rest.centre[1]).norm() < 1e-8,
      f"{(b.centre[1] - rest.centre[1]).norm() * 100:.2e} cm after 20 frames")
 
-# A ball sliding along the floor, sticking where it touches: it ends rolling, its bottom still on the floor.
+# A ball sliding along the floor, held and gripped where it touches: it ends rolling, its bottom still on the floor.
 slide = bodies(FLOOR, ((0.0, 0.3, 5.0), (0.1, 0.0, 0.0), NONE))
-after = step(slide, GRAVITY, touch=touch(1, 0, BOTTOM, stick=1.0), **two())
+after = step(slide, GRAVITY, touch=touch(1, 0, BOTTOM, hold=1.0, grip=1.0), **two())
 bottom = after.speed[1] + torch.linalg.cross(after.spin[1], torch.tensor([0.0, -0.3, 0.0]))
-want("a sliding ball that sticks ends rolling", bottom.norm() < 1e-9 and after.speed[1, 0] > 0.03 and after.spin[1, 2] < 0,
+want("a sliding ball that is gripped ends rolling", bottom.norm() < 1e-9 and after.speed[1, 0] > 0.03 and after.spin[1, 2] < 0,
      f"its bottom's speed {float(bottom.norm()):.1e}, its centre's {float(after.speed[1, 0]):.3f}")
+
+# The same ball held by the floor but not gripped (ice): it does not sink, and slides on as it was, unturned.
+after = step(slide, GRAVITY, touch=touch(1, 0, BOTTOM, hold=1.0), **two())
+want("a ball held but not gripped slides on", abs(float(after.speed[1, 1])) < 1e-9 and abs(float(after.speed[1, 0]) - 0.1) < 1e-9
+     and after.spin.norm() < 1e-9, f"speed {[round(v, 4) for v in after.speed[1].tolist()]}, spin {float(after.spin.norm()):.1e}")
 
 # Two bodies falling together, stuck where they touch: nothing pulls them apart, so no push.
 fall = bodies(((0.0, 3.0, 5.0), NONE, NONE), ((0.6, 3.0, 5.0), NONE, NONE))
-after = step(fall, GRAVITY, torch.ones(2), heavy, spread.expand(2, 3, 3), touch(0, 1, (0.3, 3.0, 5.0), stick=1.0))
+after = step(fall, GRAVITY, torch.ones(2), heavy, spread.expand(2, 3, 3), touch(0, 1, (0.3, 3.0, 5.0), hold=1.0, grip=1.0, into=(1.0, 0.0, 0.0)))
 want("two bodies falling as one keep falling", (after.speed - GRAVITY).norm() < 1e-12, f"both at {after.speed[0].tolist()}")
 
 # The pose that keeps the shape: the shape turned and moved, its points tracked with 1 cm of noise.
@@ -123,21 +132,21 @@ want("no stiffness, no pull; full stiffness, the rigid place",
      and torch.allclose(pulled(noisy, place, torch.ones(len(shape))), place)
      and torch.allclose(half, (noisy + place) / 2), "0, 0.5 and 1")
 
-# Where the points went teaches the model's part: a push and a stick nobody is told, found from the points a frame on.
+# Where the points went teaches the model's part: a touch nobody is told, found from the points a frame on.
 land = bodies(FLOOR, ((0.0, 0.3, 5.0), (0.02, -0.1, 0.0), NONE))
 at = (0.05, 0.0, 5.0)
-seen = step(land, GRAVITY, touch=touch(1, 0, at, stick=0.7, push=(-0.01, 0.03, 0.004)), **two()).points(shape)[1]
-stick, push = torch.zeros(1, requires_grad=True), torch.zeros(1, 3, requires_grad=True)
-opt = torch.optim.Adam([stick, push], lr=0.01)
-for _ in range(1500):
+seen = step(land, GRAVITY, touch=touch(1, 0, at, hold=0.9, grip=0.4, push=(-0.01, 0.0, 0.004)), **two()).points(shape)[1]
+hold, grip, push = torch.zeros(1, requires_grad=True), torch.zeros(1, requires_grad=True), torch.zeros(1, 3, requires_grad=True)
+opt = torch.optim.Adam([hold, grip, push], lr=0.02)
+said = lambda: Touch(torch.tensor([1]), torch.tensor([0]), torch.tensor([at]), torch.tensor([UP]), torch.sigmoid(hold),
+                     torch.sigmoid(grip), push)
+for _ in range(4000):
     opt.zero_grad()
-    said = Touch(torch.tensor([1]), torch.tensor([0]), torch.tensor([at]), torch.sigmoid(stick), push)
-    (step(land, GRAVITY, touch=said, **two()).points(shape)[1] - seen).pow(2).sum().backward()
+    (step(land, GRAVITY, touch=said(), **two()).points(shape)[1] - seen).pow(2).sum().backward()
     opt.step()
-again = step(land, GRAVITY, touch=Touch(torch.tensor([1]), torch.tensor([0]), torch.tensor([at]), torch.sigmoid(stick), push), **two())
-err = (again.points(shape)[1] - seen).norm(dim=-1).max() * 100
-want("the push and the stick are learned from where the points went", err < 0.01,
-     f"the points a frame on {err:.1e} cm off, never told either; no turn's gradient is lost at no spin")
+err = (step(land, GRAVITY, touch=said(), **two()).points(shape)[1] - seen).norm(dim=-1).max() * 100
+want("the touch is learned from where the points went", err < 0.01,
+     f"the points a frame on {err:.1e} cm off, never told the hold, the grip or the push; no turn's gradient is lost at no spin")
 
 if failed:
     raise SystemExit(f"missed: {failed}")

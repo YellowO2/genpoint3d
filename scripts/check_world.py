@@ -91,13 +91,13 @@ for t in range(14):
 before, after = cm(blind.pos[6:14, ball], true[6:14, ball]), cm(world.pos[6:14, ball], true[6:14, ball])
 want("a body seen again has its unseen frames put right", after < before / 3, f"{before:.0f} cm off before it is seen again, {after:.0f} cm after")
 
-# A ball at rest on the floor, unseen from frame 4 on: it stays if the model says it sticks to the floor, and falls through if not.
+# A ball at rest on the floor, unseen from frame 4 on: it stays if the model says the floor holds and grips it, and falls through if not.
 rest, label, centres = clip(speed=(0.0, 0.0, 0.0), spin=(0.0, 0.0, 0.0), height=0.3)
 rest[:] = rest[0]
 centres[:] = centres[0]
-on_floor = lambda w, t: Touch(w.body[-1:], w.body[:1], centres[t][None] - torch.tensor([[0.0, 0.3, 0.0]]), torch.ones(1), torch.zeros(1, 3))
+on_floor = lambda w, t: Touch(w.body[-1:], w.body[:1], centres[t][None] - torch.tensor([[0.0, 0.3, 0.0]]), torch.tensor([[0.0, 1.0, 0.0]]), torch.ones(1), torch.ones(1), torch.zeros(1, 3))
 world = watch(rest, label, centres, every, range(4, T), touch=on_floor)
-want("a ball that sticks to the floor stays on it unseen", cm(world.pos[4:], rest[4:]) < 0.1, f"{cm(world.pos[4:], rest[4:]):.1e} cm off after 20 frames unseen")
+want("a ball the floor holds and grips stays on it unseen", cm(world.pos[4:], rest[4:]) < 0.1, f"{cm(world.pos[4:], rest[4:]):.1e} cm off after 20 frames unseen")
 world = watch(rest, label, centres, every, range(4, T))
 want("with nothing said, it falls through", cm(world.pos[4:], rest[4:]) > 100, f"{cm(world.pos[4:], rest[4:]):.0f} cm")
 n, m = world.touching(3, torch.full((N,), 0.5))

@@ -11,7 +11,8 @@
                   group vector (which body it is on), an arrow to its body's
                   centre of gravity, how stiffly its body holds it, how free
                   its body is to move and how heavy; per pair of bodies that
-                  may touch: where, how far they stick there, and a push
+                  may touch: where, the way from one into the other, how far they hold and
+                  grip there, and a push
 """
 
 from dataclasses import dataclass
@@ -99,11 +100,13 @@ class WorldModel(nn.Module):
         self.group_out = nn.Linear(dim, group_dim)
         self.centre_out = zero_init(nn.Linear(dim, 3, bias=False))
         self.stiff = zero_init(nn.Linear(dim, 1, bias=False), almost=False)
+        # Every body starts fixed: nothing moves unless it is shown to.
         self.body_out = zero_init(nn.Linear(dim, 2), almost=False)
+        nn.init.constant_(self.body_out.bias[:1], -3.0)
         # A pair of points that may be where two bodies touch: how much it is, and what it says of the touch;
-        # then for the two bodies, how far they stick there and a push.
+        # then for the two bodies, the way from one into the other, how far they hold and grip there, and a push.
         self.pair = nn.Sequential(nn.Linear(2 * dim + 3 * 99, dim), nn.GELU(), nn.Linear(dim, dim + 1))
-        self.touch_out = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), zero_init(nn.Linear(dim, 4), almost=False))
+        self.touch_out = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), zero_init(nn.Linear(dim, 8), almost=False))
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -216,8 +219,9 @@ class WorldModel(nn.Module):
         """Where bodies touch, from the pairs of points that may be it: points `n` and `m` (C,) of `h` (N, D),
         on bodies `a` and `b` (C,), `apart` (C, 3) from one to the other, the two bodies going `slide` (C, 3)
         past each other there, at the place `at` (C, 3); `fall` (3,) gravity a frame squared. For each two
-        bodies, one touch: the place its pairs say, each by how much it counts, how far the two stick there,
-        and a push, in gravity's size. None with no pair."""
+        bodies, one touch: the place its pairs say, each by how much it counts, the way from one into the
+        other (straight down unless it says so), how far the two hold and grip there, and a push, in gravity's
+        size. None with no pair."""
         if not len(n):
             return None
         with torch.autocast(device_type=h.device.type, enabled=False):
@@ -231,4 +235,6 @@ class WorldModel(nn.Module):
         pooled = torch.zeros(P, out.shape[1] - 1, device=h.device).index_add(0, which, w[:, None] * out[:, 1:])
         place = torch.zeros(P, 3, device=h.device).index_add(0, which, w[:, None] * at.float())
         said = self.touch_out(pooled.to(h.dtype)).float()
-        return Touch(two[:, 0], two[:, 1], place, torch.sigmoid(said[:, 0]), said[:, 1:] * fall.float().norm())
+        size = fall.float().norm()
+        into = F.normalize(said[:, 5:] + fall.float() / size.clamp_min(1e-12), dim=-1)
+        return Touch(two[:, 0], two[:, 1], place, into, torch.sigmoid(said[:, 0]), torch.sigmoid(said[:, 1]), said[:, 2:5] * size)
