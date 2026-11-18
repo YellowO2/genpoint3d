@@ -2,7 +2,7 @@
 # Every old Kubric clip's objects from its MOVi-F twin (scripts/movi_objects.py), then each
 # point's object and centre written into the raw clips and the caches (scripts/label_old_kubric.py).
 #
-#   qsub -v "CACHES=cache/kubric_dense cache/kubric_more_dense" scripts/movi_objects.pbs
+#   qsub -v "CACHES=cache/kubric_dense cache/kubric_more_dense" scripts/movi_objects.pbs      (ONLY_OBJECTS=1: the objects alone, nothing written into clips or caches)
 #
 #PBS -N movi_objects
 #PBS -l select=1:ncpus=16:mem=64gb
@@ -24,9 +24,11 @@ for k in $(seq 0 14); do
   python scripts/movi_objects.py --root $R --shards $(( k * 69 )) $(( k == 14 ? 1024 : (k + 1) * 69 )) --old $ROOT/kubric --out $ROOT/movi_objects &
 done
 wait
-deactivate
-source $ROOT/venvs/fyp/bin/activate
-echo "$(ls $ROOT/movi_objects | wc -l) of $(ls $ROOT/kubric | wc -l) old clips have a twin"
-python scripts/label_old_kubric.py --old $ROOT/kubric --objects $ROOT/movi_objects --write --caches $(for c in ${CACHES:-}; do echo $ROOT/$c; done)
-python scripts/one_clip_per_video.py --objects $ROOT/movi_objects --out $ROOT/cache_left_out --caches $(for c in ${CACHES:-}; do echo $ROOT/$c; done)
+if [ -z "${ONLY_OBJECTS:-}" ]; then
+  deactivate
+  source $ROOT/venvs/fyp/bin/activate
+  echo "$(ls $ROOT/movi_objects | wc -l) of $(ls $ROOT/kubric | wc -l) old clips have a twin"
+  python scripts/label_old_kubric.py --old $ROOT/kubric --objects $ROOT/movi_objects --write --caches $(for c in ${CACHES:-}; do echo $ROOT/$c; done)
+  python scripts/one_clip_per_video.py --objects $ROOT/movi_objects --out $ROOT/cache_left_out --caches $(for c in ${CACHES:-}; do echo $ROOT/$c; done)
+fi
 echo "=== MOVI OBJECTS DONE ==="
