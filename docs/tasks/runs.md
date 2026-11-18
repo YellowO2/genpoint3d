@@ -873,3 +873,4 @@ From a review of the lean code against the design:
    scores in use are kept (26 a clip).
 
 These change what fyT and fzN predict; no run of the fixed design exists yet.
+| vertices_rule_counts | Points as the vertices of a shape, with no model: a point is added only where its body's four nearest seen points do not already span the surface as a flat patch (farthest_first.on_patch). 60 clips of kubric_dense_own, gap 2.5%, limit 4,000, 256 asked, picked as training picks (scripts/count_points.py) | Off: 1,361 points a clip, 65% on the background, an object's points median 22, 8% of objects under 4, surface left out 0.6%. Patch within 0.5 cm: 581, 32%, median 20, 9%, 0.2%. Within 1 cm: 562, 33%, median 20, 9%, 0.1%. Within 2 cm: 536, 35%, median 19, 9%, 0.1% | | a clip needs 0.4 of the points: the background's go, the objects keep theirs; the distance hardly matters, 1 cm taken; most of the background's left are the 256 asked |
