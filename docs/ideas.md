@@ -24,7 +24,7 @@ One line each. Now: decided, being built. Later: not yet. Ruled out: tried, with
 - Camera roll in our renders, only if finding down is poor on rolled real video.
 - More data: PointOdyssey, SynthVerse, soft bodies.
 - Model size and where spatial attention goes: never chosen.
-- Many points: the heavy thinking between bodies, a point attending only to its own body and those near it; bodies out of view carried by the physics step alone.
+- Many points: a point attending only to those near it is built (`--patch`) but never used in a run; beyond it, the thinking between bodies, and bodies out of view carried by the physics step alone.
 - A long run once the design settles.
 
 ## Ruled out
