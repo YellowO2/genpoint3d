@@ -53,7 +53,14 @@ for ex in tfds.as_numpy(tf.data.TFRecordDataset(files).map(features.deserialize_
     d = ((olds - thumb(Image.fromarray(ex["video"][0]))) ** 2).mean(1)
     for j in np.nonzero(d < args.threshold)[0]:
         twins += 1
+        inst, cam = ex["instances"], ex["camera"]
+        # What each object is: its model (a Google Scanned Object), size and the engine's numbers for it; and the camera.
         np.savez_compressed(out / f"{ids[j]}.npz", seg=ex["segmentations"][..., 0].astype(np.uint8),
-                            positions=ex["instances"]["positions"], quaternions=ex["instances"]["quaternions"],
+                            positions=inst["positions"], quaternions=inst["quaternions"],
+                            asset=np.array([a.decode() for a in inst["asset_id"]]), scale=inst["scale"],
+                            mass=inst["mass"], friction=inst["friction"], restitution=inst["restitution"],
+                            camera_positions=cam["positions"], camera_quaternions=cam["quaternions"],
+                            focal_length=cam["focal_length"], sensor_width=cam["sensor_width"],
                             video=int(ex["metadata"]["video_name"]), distance=d[j])
+        print(f"clip {ids[j]}: video {int(ex['metadata']['video_name'])}, {len(inst['asset_id'])} objects", flush=True)
 print(f"=== shards {args.shards}: {videos} videos, {twins} old clips given objects ===", flush=True)
