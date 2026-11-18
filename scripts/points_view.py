@@ -1,7 +1,7 @@
 """The points the adding rule gives a clip, to turn and look at (each point in its
 pixel's colour, the clip's video beside it), at a few gaps and flat-patch distances: can the
 scene be told from them? Each body's points seen in a frame are joined into
-faces, as a game's mesh, where the frame shows surface at the face's depth. Picked as training picks them
+faces, as a game's mesh, unless the frame sees through the face. Picked as training picks them
 (`ClipDataset._spawned`), with no model.
 
   python scripts/points_view.py --cache CACHE --frames FRAMES --clips 0 40 --gaps 0.025 --flats 0 0.01 --out points_view.html
@@ -72,11 +72,11 @@ for i in args.clips:
                     face = i[torch.from_numpy(Delaunay(px[i].numpy()).simplices).long()]   # (F, 3)
                 except QhullError:
                     continue
-                # A face is drawn if the frame shows surface at its middle, at the face's depth there.
+                # A face is drawn unless the frame sees through its middle to something farther; one hidden behind a nearer thing stays.
                 mid, deep = px[face].mean(1) / torch.tensor([got.hw[1], got.hw[0]]), 1 / (1 / z[face]).mean(1)   # depth is straight in 1 / z
                 cell = (mid * torch.tensor([depth.shape[2], depth.shape[1]])).long()
                 shown = depth[t, cell[:, 1].clamp(0, depth.shape[1] - 1), cell[:, 0].clamp(0, depth.shape[2] - 1)]
-                faces[-1] += face[(shown - deep).abs() < SURFACE_TOL * shown].tolist()
+                faces[-1] += face[shown - deep < SURFACE_TOL * shown].tolist()
         views.append({
             "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {int((q == 0).sum())} in the first frame",
             "faces": faces, "video": [_jpeg(f) for f in video],
