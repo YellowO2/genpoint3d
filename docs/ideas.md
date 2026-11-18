@@ -24,7 +24,7 @@ One line each. Now: decided, being built. Later: not yet. Ruled out: tried, with
 - Camera roll in our renders, only if finding down is poor on rolled real video.
 - More data: PointOdyssey, SynthVerse, soft bodies.
 - Model size and where spatial attention goes: never chosen.
-- Many points: a point attending only to those near it is built (`--patch`) but never used in a run; beyond it, the thinking between bodies, and bodies out of view carried by the physics step alone.
+- The world is the memory: the points and bodies are stored once at their place, as a game engine keeps a level; each frame physics steps what moves, the model corrects only what the camera sees, and the rest is saved and costs nothing until seen again. Near-only attention (`--patch`) is built but never used in a run.
 - A long run once the design settles.
 
 ## Ruled out
