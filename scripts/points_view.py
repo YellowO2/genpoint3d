@@ -1,7 +1,7 @@
 """The points the adding rule gives a clip, to turn and look at (each point in its
 pixel's colour, the clip's video beside it), at a few gaps and flat-patch distances: can the
 scene be told from them? Each body's points seen in a frame are joined into
-faces, as a game's mesh, where the body's seen surface lies on the face. Picked as training picks them
+faces, as a game's mesh, where the frame shows surface at the face's depth. Picked as training picks them
 (`ClipDataset._spawned`), with no model.
 
   python scripts/points_view.py --cache CACHE --frames FRAMES --clips 0 40 --gaps 0.025 --flats 0 0.01 --out points_view.html
@@ -19,7 +19,8 @@ from PIL import Image
 from scipy.spatial import Delaunay, QhullError
 
 from genpoint3d.CachedClip import CachedClip
-from genpoint3d.train.data.ClipDataset import _near, _query_frames, _spawned
+from genpoint3d.train.data.ClipDataset import DEPTH, _near, _query_frames, _spawned
+from genpoint3d.train.tools.farthest_first import SURFACE_TOL
 
 p = argparse.ArgumentParser()
 p.add_argument("--cache", required=True)
@@ -32,14 +33,11 @@ p.add_argument("--asked", type=int, default=256)
 p.add_argument("--out", default="points_view.html")
 args = p.parse_args()
 
-FACE = 0.02  # metres the seen surface inside a face may lie off it
-
-
-def _pixels(clip: CachedClip, t: int) -> torch.Tensor:
-    """(N, 2) where frame `t`'s camera sees the clip's points."""
+def _pixels(clip: CachedClip, t: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """(N, 2) where frame `t`'s camera sees the clip's points, and (N,) how deep."""
     P = torch.cat([clip.traj[t].float(), torch.ones(clip.traj.shape[1], 1)], -1)
     pix = (clip.intrinsics[t].float() @ (clip.extrinsics[t].float()[:3] @ P.T)).T
-    return pix[:, :2] / pix[:, 2:].clamp_min(1e-6)
+    return pix[:, :2] / pix[:, 2:].clamp_min(1e-6), pix[:, 2]
 
 
 def _jpeg(frame: np.ndarray) -> str:
@@ -53,6 +51,7 @@ views = []
 for i in args.clips:
     whole = CachedClip.from_dict(torch.load(files[i], weights_only=False))
     video = np.load(Path(args.frames).expanduser() / f"{whole.seq_id}.npy")                # (T, r, r, 3)
+    depth = torch.from_numpy(np.load(Path(args.frames).expanduser() / (whole.seq_id + DEPTH))).float()   # (T, r / 4, r / 4)
     r = video.shape[1]
     for gap, flat in [(g, f) for g in args.gaps for f in args.flats]:
         torch.manual_seed(0)
@@ -64,24 +63,20 @@ for i in args.clips:
         faces = []                                                                         # per frame, (F, 3) points
         for t in range(T):
             faces.append([])
-            px, px_all = _pixels(got, t), _pixels(clip, t)
+            px, z = _pixels(got, t)
             for k in got.segment.unique().tolist():
-                i = torch.nonzero((got.segment == k) & got.visibility[t].bool() & (q <= t))[:, 0].numpy()
-                d = torch.nonzero((clip.segment == k) & clip.visibility[t].bool())[:, 0]
-                if len(i) < 3 or not len(d):
+                i = torch.nonzero((got.segment == k) & got.visibility[t].bool() & (q <= t))[:, 0]
+                if len(i) < 3:
                     continue
                 try:
-                    mesh = Delaunay(px[i].numpy())
+                    face = i[torch.from_numpy(Delaunay(px[i].numpy()).simplices).long()]   # (F, 3)
                 except QhullError:
                     continue
-                # A face is drawn if the body's surface seen inside it lies on it.
-                inside = torch.from_numpy(mesh.find_simplex(px_all[d].numpy()))
-                corner = got.traj[t, i].float()[torch.from_numpy(mesh.simplices).long()]   # (F, 3, 3)
-                normal = torch.nn.functional.normalize(torch.linalg.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0]), dim=-1)
-                d, inside = d[inside >= 0], inside[inside >= 0]
-                off = ((clip.traj[t, d].float() - corner[inside, 0]) * normal[inside]).sum(-1).abs()
-                keep = [f for f in inside.unique().tolist() if off[inside == f].median() <= FACE]
-                faces[-1] += i[mesh.simplices[keep]].tolist()
+                # A face is drawn if the frame shows surface at its middle, at the face's depth there.
+                mid, deep = px[face].mean(1) / torch.tensor([got.hw[1], got.hw[0]]), z[face].mean(1)
+                cell = (mid * torch.tensor([depth.shape[2], depth.shape[1]])).long()
+                shown = depth[t, cell[:, 1].clamp(0, depth.shape[1] - 1), cell[:, 0].clamp(0, depth.shape[2] - 1)]
+                faces[-1] += face[(shown - deep).abs() < SURFACE_TOL * shown].tolist()
         views.append({
             "name": f"clip {whole.seq_id}, gap {gap:g}, flat {flat * 100:g} cm: {len(q)} points, {int((q == 0).sum())} in the first frame",
             "faces": faces, "video": [_jpeg(f) for f in video],
