@@ -73,7 +73,7 @@ for i in args.clips:
                 except QhullError:
                     continue
                 # A face is drawn if the frame shows surface at its middle, at the face's depth there.
-                mid, deep = px[face].mean(1) / torch.tensor([got.hw[1], got.hw[0]]), z[face].mean(1)
+                mid, deep = px[face].mean(1) / torch.tensor([got.hw[1], got.hw[0]]), 1 / (1 / z[face]).mean(1)   # depth is straight in 1 / z
                 cell = (mid * torch.tensor([depth.shape[2], depth.shape[1]])).long()
                 shown = depth[t, cell[:, 1].clamp(0, depth.shape[1] - 1), cell[:, 0].clamp(0, depth.shape[2] - 1)]
                 faces[-1] += face[(shown - deep).abs() < SURFACE_TOL * shown].tolist()
