@@ -166,7 +166,7 @@ radius = float(model.renderer.cfg.radius)
 ask = (torch.stack(torch.meshgrid(*[torch.arange(GRID)] * 3, indexing="ij"), -1).float().view(-1, 3) + 0.5) / GRID * 2 * radius - radius
 
 out, rng = Path(args.out).expanduser(), np.random.default_rng(0)
-out.mkdir(parents=True, exist_ok=True)
+(out / "said").mkdir(parents=True, exist_ok=True)
 files = [f for f in sorted(Path(args.objects).expanduser().glob("*.npz")) if (Path(args.frames).expanduser() / f.stem / "frames").exists()]
 files = files[:: max(len(files) // args.clips, 1)][: args.clips]
 rows, shown, small, empty, seconds = [], [], 0, 0, []
@@ -204,12 +204,15 @@ for f in files:
             if device == "cuda":
                 torch.cuda.synchronize()
             seconds.append(time.time() - began)
+            # What TripoSR said, kept: its 3D block of features, and where in its box there is object.
+            torch.save({"clip": f.stem, "object": k, "asset": name, "frame": t, "code": code.half().cpu(), "solid": solid.cpu(), "radius": radius},
+                       out / "said" / f"{f.stem}_{k:02d}.pt")
             said = skin(solid)
             if len(said) < 50:
                 empty += 1
                 continue
             m = measure(cam, front, said[torch.randperm(len(said))[:POINTS]], longest)
-        rows.append({**m, "seen": seen, "pixels": int(mine.sum())})
+        rows.append({**m, "seen": seen, "pixels": int(mine.sum()), "clip": f.stem, "object": k})
         print(f"clip {f.stem} object {k} {name[:30]}: {seen:.0%} of its facing side seen, {int(mine.sum())} pixels; front {m['front'] * CELLS:.2f} cells, "
               f"back {m['back'] * CELLS:.2f}, nothing imagined {m['nothing'] * CELLS:.2f}, made up {m['made_up'] * CELLS:.2f}; start {m['start']}", flush=True)
 
