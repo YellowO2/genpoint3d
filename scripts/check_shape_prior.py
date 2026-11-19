@@ -155,7 +155,8 @@ if args.made_up:
     made_up()
     sys.exit()
 
-sys.modules["torchmcubes"] = types.SimpleNamespace(marching_cubes=None)     # TripoSR's surface drawing, not used here
+for unused in ("torchmcubes", "imageio", "rembg"):                          # TripoSR's surface drawing, video saving and background removing, not used here
+    sys.modules[unused] = types.SimpleNamespace(marching_cubes=None)
 sys.path.insert(0, str(Path(args.triposr).expanduser()))
 sys.path.append(str(Path(args.triposr).expanduser() / "deps"))             # what its code imports and the environment lacks, last so the environment's own win
 from tsr.system import TSR  # noqa: E402
