@@ -8,6 +8,7 @@ across). No model of ours.
 
   python scripts/check_shape_prior.py --objects OBJECTS --frames RAW --assets DIR --triposr TRIPOSR --clips 40 --out DIR
   python scripts/check_shape_prior.py --made-up        the measure itself on shapes with a known answer
+  python scripts/check_shape_prior.py --objects OBJECTS --frames RAW --assets DIR --out DIR --view 002503_05     a page to turn, of objects the first run kept
 """
 
 import argparse
@@ -142,6 +143,19 @@ def picture(frame: np.ndarray, mine: np.ndarray) -> Image.Image:
     return Image.fromarray(out).resize((512, 512), Image.BICUBIC)
 
 
+def true_shape(o, k: int, t: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+    """Object k of a clip's objects `o` at frame t, in that frame's camera (z ahead): POINTS places on its true
+    surface, whether each faces the camera, and its corners and walls."""
+    corners, walls = shape(str(o["asset"][k]), Path(args.assets).expanduser(), float(o["scale"][k]), FINE)
+
+    def seen_from(local: np.ndarray) -> np.ndarray:
+        world = local @ quat_to_rot(o["quaternions"][k][t:t + 1].astype(np.float64))[0].T + o["positions"][k][t]
+        return ((world - o["camera_positions"][t]) @ quat_to_rot(o["camera_quaternions"][t:t + 1].astype(np.float64))[0]) @ FLIP.T
+
+    cam = seen_from(surface(corners, walls, POINTS + MANY, rng))
+    return cam[:POINTS], facing(cam[:POINTS], cam[POINTS:], float(o["scale"][k])), seen_from(corners), walls
+
+
 p = argparse.ArgumentParser()
 p.add_argument("--made-up", action="store_true")
 p.add_argument("--objects")
@@ -150,9 +164,97 @@ p.add_argument("--assets")
 p.add_argument("--triposr", help="a copy of github.com/VAST-AI-Research/TripoSR")
 p.add_argument("--clips", type=int, default=40)
 p.add_argument("--out", default="shape_prior")
+p.add_argument("--view", nargs="+", metavar="CLIP_OBJECT", help="a page of these kept objects (as OUT/said names them), TripoSR's shape on the true one")
 args = p.parse_args()
 if args.made_up:
     made_up()
+    sys.exit()
+
+if args.view:
+    import base64
+    import io
+    import json
+
+    from genpoint3d.tools.kubric_models import thinned
+
+    out, rng, views = Path(args.out).expanduser(), np.random.default_rng(0), []
+    for item in args.view:
+        kept = torch.load(out / "said" / f"{item}.pt", weights_only=False)
+        o, k, t = np.load(Path(args.objects).expanduser() / f"{kept['clip']}.npz"), kept["object"], kept["frame"]
+        cam, front, corners, walls = true_shape(o, k, t, rng)
+        said = skin(kept["solid"])
+        m = measure(cam, front, said[torch.randperm(len(said))[:POINTS]], float(o["scale"][k]))
+        moved = laid(said[torch.randperm(len(said))[:POINTS]], torch.from_numpy(cam).float())[0]
+        frame = np.asarray(Image.open(Path(args.frames).expanduser() / kept["clip"] / "frames" / f"{t:03d}.png").convert("RGB"))
+        mine = np.asarray(Image.fromarray((o["seg"][t] == k + 1).astype(np.uint8) * 255).resize(frame.shape[1::-1], Image.NEAREST)) > 0
+        jpg = io.BytesIO()
+        picture(frame, mine).resize((256, 256)).save(jpg, "JPEG", quality=85)
+        corners, walls = thinned(corners, walls, 40)                                        # lighter to draw, the same to the eye
+        views.append({"name": f"clip {kept['clip']} object {k}, {kept['asset'][:32]}: front {m['front'] * CELLS:.2f} cells, back {m['back'] * CELLS:.2f}, nothing imagined {m['nothing'] * CELLS:.2f}",
+                      "corners": corners.round(4).tolist(), "walls": walls, "said": moved.numpy().round(4).tolist(),
+                      "true": cam.round(4).tolist(), "front": front.astype(int).tolist(), "picture": base64.b64encode(jpg.getvalue()).decode()})
+        print(views[-1]["name"], flush=True)
+    PAGE = """<!doctype html><meta charset=utf-8><title>Shape prior</title>
+<style>body{margin:0;background:#111;color:#ddd;font:14px sans-serif;overflow:hidden}#bar{padding:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;height:58px}
+canvas{display:block}#picture{position:fixed;right:8px;top:82px;width:256px;border:1px solid #555}.k{display:inline-block;width:10px;height:10px;margin-right:4px}</style>
+<div id=bar><select id=which></select>
+<label><input id=shape type=checkbox checked> <span class=k style=background:#9aa></span>the true shape</label>
+<label><input id=said type=checkbox checked> <span class=k style=background:#ff8a1f></span>what TripoSR said</label>
+<label><input id=sides type=checkbox> the true surface, <span class=k style=background:#4c4></span>facing the camera <span class=k style=background:#48f></span>facing away</label>
+<button id=cam>the picture's camera</button><span>drag to turn, wheel to zoom</span></div>
+<img id=picture title="what TripoSR was given">
+<script type=importmap>{"imports":{"three":"https://unpkg.com/three@0.178.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.178.0/examples/jsm/"}}</script>
+<script type=module>
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+const V = __DATA__, $ = i => document.getElementById(i), BAR = 74;
+const renderer = new THREE.WebGLRenderer({antialias: true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(30, 1, 0.01, 500), controls = new OrbitControls(camera, renderer.domElement);
+scene.background = new THREE.Color(0x111111);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(2, 4, 3);
+scene.add(sun);
+// The places are in the picture's camera, x right, y down, z ahead; three.js looks down -z with y up.
+const place = p => [p[0], -p[1], -p[2]];
+V.forEach((x, i) => $('which').add(new Option(x.name, i)));
+let made = [], mid, far;
+function dots(places, colours, size) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(places.flatMap(place), 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(colours.flat(), 3));
+  return new THREE.Points(g, new THREE.PointsMaterial({vertexColors: true, size}));
+}
+function pick() {
+  made.forEach(m => { scene.remove(m); m.geometry.dispose(); });
+  const v = V[$('which').value], g = new THREE.BufferGeometry();
+  $('picture').src = 'data:image/jpeg;base64,' + v.picture;
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v.corners.flatMap(place), 3));
+  g.setIndex(v.walls.flat());
+  g.computeVertexNormals();
+  g.computeBoundingSphere();
+  mid = g.boundingSphere.center.clone(); far = g.boundingSphere.radius;
+  const shape = new THREE.Mesh(g, new THREE.MeshLambertMaterial({color: 0x99aaaa, flatShading: true, side: THREE.DoubleSide, transparent: true, opacity: 0.75}));
+  const said = dots(v.said, v.said.map(() => [1, 0.54, 0.12]), far / 40);
+  const sides = dots(v.true, v.front.map(f => f ? [0.3, 0.8, 0.3] : [0.3, 0.55, 1]), far / 40);
+  made = [shape, said, sides];
+  scene.add(...made);
+  look(); show();
+}
+function show() { made[0].visible = $('shape').checked; made[1].visible = $('said').checked; made[2].visible = $('sides').checked; }
+function look() { camera.position.copy(mid).multiplyScalar(1 - 4.5 * far / mid.length()); controls.target.copy(mid); size(); controls.update(); }
+function size() { const w = innerWidth, h = innerHeight - BAR; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+$('which').onchange = pick;
+$('cam').onclick = look;
+['shape', 'said', 'sides'].forEach(i => $(i).oninput = show);
+addEventListener('resize', size);
+size(); pick();
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>"""
+    (out / "shape_prior_view.html").write_text(PAGE.replace("__DATA__", json.dumps(views, separators=(",", ":"))))
+    print(f"written {out / 'shape_prior_view.html'}")
     sys.exit()
 
 for unused in ("torchmcubes", "imageio", "rembg"):                          # TripoSR's surface drawing, video saving and background removing, not used here
@@ -218,11 +320,7 @@ for f in files:
             small += 1
             continue
         longest = float(o["scale"][k])
-        true = surface(*shape(name, Path(args.assets).expanduser(), longest, FINE), POINTS + MANY, rng)
-        world = true @ quat_to_rot(o["quaternions"][k][t:t + 1].astype(np.float64))[0].T + o["positions"][k][t]
-        cam = ((world - o["camera_positions"][t]) @ quat_to_rot(o["camera_quaternions"][t:t + 1].astype(np.float64))[0]) @ FLIP.T
-        cam, whole = cam[:POINTS], cam[POINTS:]
-        front = facing(cam, whole, longest)
+        cam, front = true_shape(o, k, t, rng)[:2]
         px = cam[front, :2] / cam[front, 2:] * float(o["focal_length"]) / float(o["sensor_width"]) * W + np.array([W, H]) / 2
         inside = (px >= 0).all(1) & (px[:, 0] < W) & (px[:, 1] < H)
         seen = float((o["seg"][t][px[inside, 1].astype(int), px[inside, 0].astype(int)] == k + 1).sum() / max(len(px), 1))   # of its facing side, the share in the picture
