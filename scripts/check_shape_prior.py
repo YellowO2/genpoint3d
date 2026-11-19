@@ -157,6 +157,7 @@ if args.made_up:
 
 sys.modules["torchmcubes"] = types.SimpleNamespace(marching_cubes=None)     # TripoSR's surface drawing, not used here
 sys.path.insert(0, str(Path(args.triposr).expanduser()))
+sys.path.append(str(Path(args.triposr).expanduser() / "deps"))             # what its code imports and the environment lacks, last so the environment's own win
 from tsr.system import TSR  # noqa: E402
 
 device = "cuda" if torch.cuda.is_available() else "cpu"

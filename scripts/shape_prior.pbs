@@ -21,8 +21,8 @@ source $ROOT/venvs/fyp/bin/activate
 [ -d $ROOT/TripoSR ] || git clone -q --depth 1 https://github.com/VAST-AI-Research/TripoSR $ROOT/TripoSR
 # What TripoSR's model code imports, kept beside it, away from the project's own environment.
 [ -d $ROOT/TripoSR/deps ] || pip install -q --target $ROOT/TripoSR/deps omegaconf einops trimesh
-python -c "import transformers, huggingface_hub" || pip install -q --target $ROOT/TripoSR/deps transformers huggingface_hub
-export PYTHONPATH=$ROOT/TripoSR/deps:${PYTHONPATH:-} HF_HOME=$ROOT/hf
+python -c "import transformers, huggingface_hub" 2>/dev/null || [ -d $ROOT/TripoSR/deps/transformers ] || pip install -q --target $ROOT/TripoSR/deps transformers huggingface_hub
+export HF_HOME=$ROOT/hf
 python scripts/check_shape_prior.py --made-up
 python scripts/check_shape_prior.py --objects $ROOT/movi_objects --frames $ROOT/kubric --assets $ROOT/gso --triposr $ROOT/TripoSR \
   --clips ${CLIPS:-40} --out $ROOT/shape_prior 2>&1 | grep -v "Warn\|warn"
