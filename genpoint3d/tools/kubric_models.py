@@ -11,7 +11,8 @@ from PIL import Image
 
 STORE = "https://storage.googleapis.com/kubric-public/assets/GSO/{}.tar.gz"
 WHOLE = ".whole"                  # written once every file of a model is there
-SHAPE = "collision_geometry.obj"  # the low-poly shape Kubric's physics engine used; visual_geometry.obj is the fine one
+SHAPE = "collision_geometry.obj"  # the low-poly shape Kubric's physics engine used
+FINE = "visual_geometry.obj"      # the fine one, the surface the video shows
 
 
 def fetch(name: str, home: Path) -> Path:
@@ -27,10 +28,10 @@ def fetch(name: str, home: Path) -> Path:
     return at
 
 
-def shape(name: str, home: Path, longest: float) -> tuple[np.ndarray, list]:
+def shape(name: str, home: Path, longest: float, file: str = SHAPE) -> tuple[np.ndarray, list]:
     """A model's corners (V, 3) in metres and its walls (F, 3), sized as Kubric sizes it: `longest` its longest side."""
     corners, walls = [], []
-    for line in (fetch(name, home) / SHAPE).read_text().splitlines():
+    for line in (fetch(name, home) / file).read_text().splitlines():
         part = line.split()
         if part[:1] == ["v"]:
             corners.append([float(x) for x in part[1:4]])
