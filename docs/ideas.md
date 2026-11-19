@@ -23,6 +23,7 @@ Not built yet: the bars and the unseen side (only a body's centre of gravity is)
 - The stored world rendered back into the video and compared with it, as CycleGAN's cycle: the model then learns by itself how many vertices and what physics the scene needs to come out the same. After the point loss is right.
 - A body's look (a texture on its walls): a point's one colour is too little to tell the scene from the stored world drawn (outputs/points_view.html).
 - A ready shape model as a second tool beside the engine: it proposes a body's whole shape from the points and views seen so far, the model corrects it. Best fit found: ShapeR (takes sparse 3D points and several posed views, gives the shape at true size and place); single-picture reference: TRELLIS (best on Kubric's own objects in an outside benchmark), SAM 3D Objects (32 GB). Its guess can be scored against Kubric's true shapes first. Closest whole design to ours: ReconPhys (video to points with springs, mass, stiffness and friction, taught by rendering back).
+- Speed, when we need it: search the current research on speeding up first. One seen: Spark3R (arXiv 2605.06270), attention over many frames up to 28 times faster with no retraining, by merging alike tokens that ask and dropping tokens that are asked.
 - Confidence as CoTracker3's.
 - SAM 3 masks and V-JEPA 2 as extra inputs.
 - Noisy depth and real frame rates in training.
