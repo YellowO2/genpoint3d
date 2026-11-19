@@ -162,12 +162,45 @@ sys.path.append(str(Path(args.triposr).expanduser() / "deps"))             # wha
 from tsr.system import TSR  # noqa: E402
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = TSR.from_pretrained("stabilityai/TripoSR", config_name="config.yaml", weight_name="model.ckpt").to(device).eval()
+# TSR.from_pretrained, with the image network's weights renamed: TripoSR's file has them under the names of the
+# transformers library of its day, ours names the same layers anew.
+from huggingface_hub import hf_hub_download  # noqa: E402
+from omegaconf import OmegaConf  # noqa: E402
+
+RENAMED = {"attention.attention.query": "attention.q_proj", "attention.attention.key": "attention.k_proj", "attention.attention.value": "attention.v_proj",
+           "attention.output.dense": "attention.o_proj", "intermediate.dense": "mlp.fc1", "output.dense": "mlp.fc2"}
+config = OmegaConf.load(hf_hub_download("stabilityai/TripoSR", "config.yaml"))
+OmegaConf.resolve(config)
+model = TSR(config)
+weights = torch.load(hf_hub_download("stabilityai/TripoSR", "model.ckpt"), map_location="cpu")
+if not any(".encoder.layer." in k for k in model.state_dict()):
+    for k in [k for k in weights if ".encoder.layer." in k]:
+        new = k.replace(".encoder.layer.", ".layers.")
+        for was, now in RENAMED.items():
+            if f".{was}." in new:
+                new = new.replace(f".{was}.", f".{now}.")
+                break
+        weights[new] = weights.pop(k)
+model.load_state_dict(weights)
+model = model.to(device).eval()
 radius = float(model.renderer.cfg.radius)
 ask = (torch.stack(torch.meshgrid(*[torch.arange(GRID)] * 3, indexing="ij"), -1).float().view(-1, 3) + 0.5) / GRID * 2 * radius - radius
 
 out, rng = Path(args.out).expanduser(), np.random.default_rng(0)
 (out / "said").mkdir(parents=True, exist_ok=True)
+
+# TripoSR on its own example, to see that it runs here as made: the picture, then its shape's shadow along each axis.
+example = Image.open(Path(args.triposr).expanduser() / "examples" / "chair.png").convert("RGBA")
+flat = np.asarray(example, np.float32) / 255
+example = Image.fromarray(((flat[..., :3] * flat[..., 3:] + (1 - flat[..., 3:]) * 0.5) * 255).astype(np.uint8))
+with torch.no_grad():
+    solid = model.renderer.query_triplane(model.decoder, ask.to(device), model([example], device=device)[0])["density_act"].view(GRID, GRID, GRID) > SOLID
+strip = [example.resize((192, 192))] + [Image.fromarray((solid.any(a).cpu().numpy() * 255).astype(np.uint8)).resize((192, 192), Image.NEAREST).convert("RGB") for a in range(3)]
+sheet = Image.new("RGB", (192 * 4, 192))
+for i, im in enumerate(strip):
+    sheet.paste(im, (192 * i, 0))
+sheet.save(out / "example.png")
+print(f"TripoSR's own example: {int(solid.sum())} of {GRID ** 3} places solid", flush=True)
 files = [f for f in sorted(Path(args.objects).expanduser().glob("*.npz")) if (Path(args.frames).expanduser() / f.stem / "frames").exists()]
 files = files[:: max(len(files) // args.clips, 1)][: args.clips]
 rows, shown, small, empty, seconds = [], [], 0, 0, []
