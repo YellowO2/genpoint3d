@@ -1,7 +1,9 @@
 """The 3D models Kubric's clips are made of (Google Scanned Objects), kept whole in one directory."""
 
 import io
+import math
 import tarfile
+from functools import lru_cache
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -44,6 +46,14 @@ def shape(name: str, home: Path, longest: float, file: str = SHAPE) -> tuple[np.
     return corners * longest / (corners.max(0) - corners.min(0)).max(), walls
 
 
+def things(o, home: Path) -> np.ndarray:
+    """(O, 7) what Kubric says of each of a clip's objects `o`: the log of its mass (kg), its grip (friction), its
+    bounce (restitution), the log of its longest side (metres), and its colour, red, green and blue from 0 to 1."""
+    return np.array([[math.log(float(o["mass"][k])), float(o["friction"][k]), float(o["restitution"][k]), math.log(float(o["scale"][k])),
+                      *(c / 255 for c in colour(name, home))] for k, name in enumerate(o["asset"].tolist())], dtype=np.float32).reshape(-1, 7)
+
+
+@lru_cache(maxsize=None)
 def colour(name: str, home: Path) -> list:
     """A model's one colour, the mean of its texture."""
     return np.asarray(Image.open(fetch(name, home) / "texture.png").convert("RGB").resize((16, 16))).reshape(-1, 3).mean(0).round().astype(int).tolist()

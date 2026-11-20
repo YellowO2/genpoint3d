@@ -4,15 +4,15 @@
 
 A model that imagines the world with a physics engine as its tool: it keeps the world stored as an engine's, the engine plays it, and the model corrects it as it sees more. Whatever a physics engine does, the engine here does.
 
-1. The world is stored once: bodies, each with its points, the bars between them, mass, stiffness and a record of how it moved. A bar joins two nearby points of a body: three make a wall, so the bars are the body's whole shape, and each is the engine's constraint holding the two points apart as they are (stiff bars a stiff body, bars that give a soft one).
+1. The world is stored once: bodies, each with its points (as a game's mesh: the few its shape needs), the bars between them, one description of what it is, and a record of how it moved; and the camera. From it the video could be drawn again. A bar joins two nearby points of a body: three make a wall, so the bars are the body's whole shape, and each is the engine's constraint holding the two points apart as they are (stiff bars a stiff body, bars that give a soft one).
 2. Each frame, the engine predicts and the model corrects the stored world from what it sees: where things are, and what each body is.
-3. The model imagines each body whole the moment it first sees it: all its points, the unseen side too, the bars between them, and what it is (what kind of thing, its look, fixed or free, how heavy, how stiff; of a living thing also its own push). All of it is a guess it keeps correcting: a point is moved when what is seen says it is elsewhere, and one is added only where nothing was imagined.
+3. The model imagines each body whole the moment it first sees it: its description (what kind of thing, its look, fixed or free, how heavy, how stiff; of a living thing also its own push), and from the description all its points, the unseen side too, and the bars between them. All of it is a guess it keeps correcting every frame: the description as more is seen, a point when what is seen says it is elsewhere, and a point is added only where nothing was imagined.
 4. The engine does the rest: gravity, inertia, finding where bodies touch, the push that stops them there, a stiff body keeping its shape, keeping what is out of view.
 5. Any frame, past or future, is the stored world played.
 
 The model is offered these to learn to use; nothing is enforced on its answer.
 
-Not built yet: the bars and the unseen side (only a body's centre of gravity is); until they are, the model says where two bodies touch and how far they hold and grip there.
+Not built yet: the bars, the model choosing its own points, and the light the video is drawn with; until the bars are, the model says where two bodies touch and how far they hold and grip there.
 
 ## Later
 

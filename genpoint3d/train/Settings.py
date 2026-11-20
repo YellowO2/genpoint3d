@@ -99,6 +99,9 @@ class Settings(argparse.Namespace):
         p.add_argument("--assets", default=None, help="the objects' 3D models (scripts/fetch_models.py)")
         p.add_argument("--imagine-loss", type=float, default=1.0,
                        help="with --imagine, the imagined points' errors beside the clip's own points'")
+        p.add_argument("--known-loss", type=float, default=1.0,
+                       help="with --imagine, what each body's description says of its object (mass, grip, bounce, size, "
+                            "colour) against what Kubric says")
         # Refinement
         p.add_argument("--window", type=int, default=16, help="frames per window")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")

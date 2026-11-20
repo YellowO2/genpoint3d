@@ -1,4 +1,4 @@
-"""Check the stored world's shapes: is each object whole, the side never seen too?"""
+"""Check the stored world's bodies: is each object whole, the side never seen too, and does its description know what it is?"""
 
 import torch
 
@@ -8,7 +8,7 @@ from genpoint3d.train.tools.world import World
 EARLY, LATE = 4, 4   # the first and last frames with an image a clip is scored over, for what seeing more does
 
 
-def shape_scores(b: dict, world: World, view: torch.Tensor) -> dict:
+def shape_scores(b: dict, world: World, view: torch.Tensor, said: torch.Tensor) -> dict:
     """Per clip (1,) values, by name; empty for a clip with no answer (`mesh`).
 
     Each of an object's true corners against the nearest point the world has
@@ -24,6 +24,14 @@ def shape_scores(b: dict, world: World, view: torch.Tensor) -> dict:
     shape_front       the corners some frame sees
     shape_made_up     each imagined point from its object's nearest corner
     imagined          imagined points in the clip
+
+    And what each body's description says of its object after the clip (`said`
+    (K, 7), `WorldModel.known`) against what Kubric says, a mean over the
+    bodies formed about one of the clip's own points on an object:
+
+    known_mass        how many times off its mass is (1: right)
+    known_size        ... its longest side
+    known_colour      how far off its colour is, a mean over red, green and blue from 0 to 1
     """
     mesh, of, seen = b["mesh"][0].float(), b["mesh_body"][0], b["mesh_seen"][0]
     if not mesh.shape[1]:
@@ -61,4 +69,9 @@ def shape_scores(b: dict, world: World, view: torch.Tensor) -> dict:
     nan = torch.tensor(float("nan"), device=mesh.device)
     out = {k: (torch.stack(v).mean() if v else nan)[None] for k, v in sums.items()}
     out["imagined"] = world.imagined.sum()[None].float()
+    thing = torch.where(world.seed < own, segment[world.seed.clamp_max(own - 1)], -1)
+    ok = (thing >= 1) & (thing <= b["things"].shape[1])
+    off = (said.float() - b["things"][0].float()[(thing - 1).clamp_min(0)]).abs()[ok] if ok.any() else None
+    for name, cols, as_times in (("known_mass", slice(0, 1), True), ("known_size", slice(3, 4), True), ("known_colour", slice(4, 7), False)):
+        out[name] = (nan if off is None else off[:, cols].exp().mean() if as_times else off[:, cols].mean())[None]
     return out

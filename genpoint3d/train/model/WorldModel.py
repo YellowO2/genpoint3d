@@ -9,11 +9,16 @@
                   nearest each, x depth
     heads         per point: a correction to its place, whether it is seen, a
                   group vector (which body it is on), an arrow to its body's
-                  centre of gravity, how stiffly its body holds it, how free
-                  its body is to move and how heavy; per pair of bodies that
-                  may touch: where, the way from one into the other, how far they hold and
-                  grip there, and a push; per body first seen: the whole of its
-                  points as it imagines them, all sides (`imagine`)
+                  centre of gravity, how stiffly its body holds it; per pair
+                  of bodies that may touch: where, the way from one into the
+                  other, how far they hold and grip there, and a push
+    bodies        each body has one description, what the model knows it to
+                  be: kept in the stored world, put right each frame from the
+                  body's points (`describe`) and told to each of them. What a
+                  body is comes from it alone: how free it is to move and how
+                  heavy (`of_body`), the whole of its points as it imagines
+                  them, all sides (`imagine`), and what Kubric says of the
+                  object, its mass, grip, bounce, size and colour (`known`)
 """
 
 from dataclasses import dataclass
@@ -41,9 +46,12 @@ class Said:
     down: torch.Tensor      # (B, 3) which way is down, a unit vector
     arrow: torch.Tensor     # (B, N, 3) from the guess to its body's centre of gravity, in the guess's units
     stiff: torch.Tensor     # (B, N) how stiffly its body holds it: 1 a rigid body, 0 not at all
-    free: torch.Tensor      # (B, N) how free its body is to move: 0 the fixed world
-    heavy: torch.Tensor     # (B, N) its body's mass, beside the others'
     h: torch.Tensor         # (B, N, D) what it knows of the point, for `touches`
+
+
+# What Kubric says of an object, said back from its body's description: the log of its mass (kg), its grip
+# (friction), its bounce (restitution), the log of its longest side (metres), its colour (red, green, blue, 0 to 1).
+KNOWN = 7
 
 
 class WorldModel(nn.Module):
@@ -101,9 +109,13 @@ class WorldModel(nn.Module):
         self.group_out = nn.Linear(dim, group_dim)
         self.centre_out = zero_init(nn.Linear(dim, 3, bias=False))
         self.stiff = zero_init(nn.Linear(dim, 1, bias=False), almost=False)
+        # A body's description: put right from the mean of what the model knows of its points, told to each.
+        self.what_cell = nn.GRUCell(dim, dim)
+        self.what_in = zero_init(nn.Linear(dim, dim, bias=False), almost=False)
         # Every body starts fixed: nothing moves unless it is shown to.
-        self.body_out = zero_init(nn.Linear(dim, 2), almost=False)
-        nn.init.constant_(self.body_out.bias[:1], -3.0)
+        self.of_body_out = zero_init(nn.Linear(dim, 2), almost=False)
+        nn.init.constant_(self.of_body_out.bias[:1], -3.0)
+        self.known_out = nn.Linear(dim, KNOWN)
         # A pair of points that may be where two bodies touch: how much it is, and what it says of the touch;
         # then for the two bodies, the way from one into the other, how far they hold and grip there, and a push.
         # What a body imagines of itself (`imagine`): up to `slots` points, each starting from its own place
@@ -112,9 +124,8 @@ class WorldModel(nn.Module):
         if slots:
             self.slot = nn.Parameter(torch.randn(slots, dim) * 0.02)
             self.slot_home = nn.Parameter(F.normalize(torch.randn(slots, 3), dim=-1))
-            self.slot_at = FourierEmbedding(3, dim, std=2.0)
-            self.slot_read = CrossBlock(dim, num_heads, mlp_mult, dim)
-            self.slot_out = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), zero_init(nn.Linear(dim, 4), almost=False))
+            self.slot_out = nn.Sequential(nn.Linear(2 * dim, dim), nn.GELU(), nn.Linear(dim, dim), nn.GELU(),
+                                          zero_init(nn.Linear(dim, 4), almost=False))
             # A point imagined, not given by a frame: it has no look to be found by.
             self.imagined_in = nn.Parameter(torch.zeros(dim))
         self.pair = nn.Sequential(nn.Linear(2 * dim + 3 * 99, dim), nn.GELU(), nn.Linear(dim, dim + 1))
@@ -132,7 +143,7 @@ class WorldModel(nn.Module):
                 fine_proj: torch.Tensor, fine_xyz: torch.Tensor, query_t: torch.Tensor, gravity: torch.Tensor,
                 down: torch.Tensor, down_known: torch.Tensor, visual_mask: torch.Tensor, vis_prev: torch.Tensor,
                 group_prev: torch.Tensor, group_known: torch.Tensor, rigid: torch.Tensor,
-                imagined: torch.Tensor) -> Said:
+                imagined: torch.Tensor, what: torch.Tensor) -> Said:
         """
         x            (B, N, 3)       the guess in frame `t`, displacement / traj_scale
         before       (B, N, 3)       the guess in the frame before
@@ -155,6 +166,7 @@ class WorldModel(nn.Module):
         rigid        (B, N, 4)       from the guess to the place that keeps its body's shape, and its support
         imagined     (B, N) bool     the points a body imagined of itself: no frame gave them, so the matcher
                      has nothing of theirs to find
+        what         (B, N, D)       each point's body's description as stored, zeros on no body
         """
         B, N, _ = x.shape
         dev = x.device
@@ -209,7 +221,7 @@ class WorldModel(nn.Module):
             belief = torch.sigmoid(vis_prev.float()) - 0.5
         h = h + self.motion_proj(motion.to(h.dtype)) + self.fine_tok(fine).to(h.dtype) + self.rigid_in(r.to(h.dtype))
         h = h + (self.feedback_scale * belief[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
-        h = h + (query_t == t)[..., None] * self.query_in.to(h.dtype)
+        h = h + (query_t == t)[..., None] * self.query_in.to(h.dtype) + self.what_in(what.to(h.dtype))
         if self.slots:
             h = h + imagined[..., None] * self.imagined_in.to(h.dtype)
         v = group_prev.float() * group_known[..., None]
@@ -226,22 +238,33 @@ class WorldModel(nn.Module):
             h = cross(h, cond, ctx, window=window)
 
         h = self.out_norm(h)
-        body = self.body_out(h).float()
         return Said(step=self.place(h), logits=self.vis_out(h)[..., 0], groups=self.group_out(h).float(),
                     down=F.normalize(self.down_out(h.float().mean(1)), dim=-1), arrow=self.centre_out(h),
-                    stiff=self.stiff(h)[..., 0].float(), free=torch.sigmoid(body[..., 0]), heavy=torch.exp(body[..., 1]),
-                    h=h)
+                    stiff=self.stiff(h)[..., 0].float(), h=h)
 
-    def imagine(self, h: torch.Tensor, at: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """A body's whole set of points as imagined from the ones seen of it: `h` (n, D) what the model knows
-        of those, `at` (n, 3) where each is from the body's centre, in the body's size. (M, 3) where each
-        imagined point is from the centre, in the body's size, and (M,) logits: is there such a point."""
+    def describe(self, h: torch.Tensor, member: torch.Tensor, old: torch.Tensor) -> torch.Tensor:
+        """Each body's description put right from one frame: `h` (n, D) what the model knows of the frame's
+        points, `member` (K, n) how much each is each body's, `old` (K, D) the descriptions as stored (zeros
+        for a body just found). (K, D), a body with no point in the frame keeping its own. In fp32."""
+        total = member.sum(-1, keepdim=True)
+        mean = (member.float() @ h.float()) / total.clamp_min(1e-6)
         with torch.autocast(device_type=h.device.type, enabled=False):
-            where = self.slot_at(at.float())
-        seen = (h + where.to(h.dtype))[None]
-        x = self.slot[None].to(h.dtype)
-        x = self.slot_read(x, x, seen, window=torch.zeros(1, self.slots, len(h), device=h.device))
-        out = self.slot_out(x[0]).float()
+            return torch.where(total > 0, self.what_cell(mean, old.float()), old.float())
+
+    def of_body(self, what: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """From the bodies' descriptions (K, D): (K,) how free each is to move, 0 the fixed world, and (K,) its
+        mass beside the others'."""
+        out = self.of_body_out(what).float()
+        return torch.sigmoid(out[:, 0]), torch.exp(out[:, 1])
+
+    def known(self, what: torch.Tensor) -> torch.Tensor:
+        """(K, KNOWN) what Kubric says of each body's object, from its description (K, D)."""
+        return self.known_out(what).float()
+
+    def imagine(self, what: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """A body's whole set of points, all sides, as its description `what` (D,) has it: (M, 3) where each is
+        from the body's centre, in the body's size, and (M,) logits: is there such a point."""
+        out = self.slot_out(torch.cat([self.slot, what.to(self.slot.dtype).expand_as(self.slot)], -1)).float()
         return self.slot_home.float() + out[:, :3], out[:, 3]
 
     def touches(self, h: torch.Tensor, n: torch.Tensor, m: torch.Tensor, a: torch.Tensor, b: torch.Tensor,

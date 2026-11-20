@@ -49,7 +49,7 @@ class Predictor:
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, fine, vm)[1]))
         loss, out = self._track(b, fine, vm, add)
         # The stored world's shapes, on every point it has: before the helpers are dropped.
-        shape = shape_scores(b, out["world"], vm) if "world" in out and "mesh" in b else {}
+        shape = shape_scores(b, out["world"], vm, model.known(out["what"])) if "world" in out and "mesh" in b else {}
         b, out = _asked_only(b, out)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],

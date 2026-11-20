@@ -133,7 +133,7 @@ b["traj"][:, :, :3] = b["traj"][:, :, :1]                 # three points that mo
 b["segment"] = torch.tensor([[0, 0, 0, 1, 1, 1]])
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
 dead = [n for n, p in m.named_parameters() if (p.grad is None or p.grad.abs().sum() == 0)
-        and not n.startswith(("pair", "touch_out"))]            # the touches' weights: checked below, on bodies that touch
+        and not n.startswith(("pair", "touch_out", "what", "known", "of_body"))]   # the touches' and the bodies' weights: checked below, where there are bodies
 bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
 print(f"world: loss {losses.method:.4f} vis {losses.visibility:.4f}, params without gradient: {dead}, "
       f"with a non-finite one: {len(bad)} {bad[:3]} (want 0)")
@@ -203,7 +203,7 @@ from genpoint3d.train.tools.imagine import Answer
 from genpoint3d.train.tools.track import track_loss
 
 corners = torch.randn(4, 3) * 0.2 + torch.tensor([0, 0, 3.0])
-hit = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long)).match(
+hit = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7)).match(
     0, 0, torch.cat([corners[[2, 0, 3, 1]] + 0.01, torch.full((2, 3), 9.0)]))
 print(f"imagine: six imagined points, four at the answer's corners shuffled: kept {hit[0].tolist()} as corners {hit[1].tolist()} "
       f"(want [0, 1, 2, 3] as [2, 0, 3, 1])")
@@ -215,16 +215,16 @@ with torch.no_grad():
 b = batch()
 b["segment"] = torch.ones(B, N, dtype=torch.long)
 b["mesh"] = (corners[None] + torch.randn(T, 1, 3) * 0.05)[None]
-b["mesh_body"], b["mesh_seen"] = torch.ones(B, 4, dtype=torch.long), torch.rand(B, T, 4) > 0.5
-s.imagine, s.imagine_loss = 6, 1.0
+b["mesh_body"], b["mesh_seen"], b["things"] = torch.ones(B, 4, dtype=torch.long), torch.rand(B, T, 4) > 0.5, torch.randn(B, 1, 7)
+s.imagine, s.imagine_loss, s.known_loss = 6, 1.0, 1.0
 m.train()
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
-dead = [n for n, p in m.named_parameters() if n.startswith(("slot", "imagined_in")) and (p.grad is None or p.grad.abs().sum() == 0)]
+dead = [n for n, p in m.named_parameters() if n.startswith(("slot", "imagined_in", "what", "known", "of_body")) and (p.grad is None or p.grad.abs().sum() == 0)]
 bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
 print(f"  loss {losses.method:.4f}; the imagining weights without gradient: {dead} (want none), with a non-finite one: {len(bad)} (want 0)")
 bd = to_device(b, torch.device("cpu"))
 fi = fine_inputs(m, bd)
-answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0])
+answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0], bd["things"][0])
 with torch.no_grad():
     out = track_loss(m, bd["traj"], bd["anchor"], mask=bd["visibility"], rounds=2, answer=answer, imagine_weight=1.0, context=bd["context"],
                      visual_mask=whole, id_card=bd["id_card"], patch_xyz=bd["patch_xyz"], **fi)[1]
@@ -233,7 +233,7 @@ print(f"  the world has {int(w.imagined.sum())} imagined points (want 4) on body
       f"{answer.corner.tolist()}; the clip's own tracks {tuple(out['tracks'].shape)} (want {(B, T, N, 3)})")
 from genpoint3d.train.score.shape_scores import shape_scores
 
-print("  the shapes' scores: " + ", ".join(f"{k} {float(v):.2f}" for k, v in shape_scores(bd, w, whole).items()))
+print("  the shapes' scores: " + ", ".join(f"{k} {float(v):.2f}" for k, v in shape_scores(bd, w, whole, m.known(out["what"])).items()))
 m.eval()
 run = Tracker(m, bd["anchor"], T, 2, dict(context=bd["context"], visual_mask=whole, id_card=bd["id_card"], patch_xyz=bd["patch_xyz"], **fi))
 with torch.no_grad():
