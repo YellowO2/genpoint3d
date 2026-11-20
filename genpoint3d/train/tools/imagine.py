@@ -19,12 +19,15 @@ class Answer:
     segment  (N,)       each of the clip's own points' object, 0 the background, -1 unknown
     things   (O, KNOWN) what Kubric says of each object (`WorldModel.KNOWN`), object 1 first
     moves    (O,)       the objects known free to move; the floor (object 0) is fixed
+    bars     (E, 2)     the corners joined by a bar
     """
 
     def __init__(self, mesh: torch.Tensor, body: torch.Tensor, seen: torch.Tensor, segment: torch.Tensor,
-                 things: torch.Tensor, moves: torch.Tensor) -> None:
+                 things: torch.Tensor, moves: torch.Tensor, bars: torch.Tensor) -> None:
         self.mesh, self.body, self.seen, self.segment, self.things = mesh.float(), body, seen, segment, things.float()
         self.moves = moves
+        V = max(len(body), 1)
+        self.bar_keys = torch.cat([bars[:, 0] * V + bars[:, 1], bars[:, 1] * V + bars[:, 0]]) if len(bars) else bars.new_zeros(0)
         # Each imagined point's corner, in the order the points are imagined, and the objects imagined so far.
         self.corner = torch.zeros(0, dtype=torch.long, device=mesh.device)
         self.claimed: set[int] = set()
@@ -59,6 +62,10 @@ class Answer:
         on = (thing >= 1) & (thing <= len(self.moves))
         moving[on] = self.moves[thing[on] - 1]
         return moving.float(), (thing == 0) | moving
+
+    def joined(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """(P,) whether corners `a` and `b` (P,) are joined by a bar."""
+        return torch.isin(a * max(len(self.body), 1) + b, self.bar_keys)
 
     def at(self, t: int, n: int) -> torch.Tensor:
         """(n, 3) where the first `n` imagined points truly are in frame `t`."""

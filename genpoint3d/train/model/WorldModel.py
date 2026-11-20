@@ -21,8 +21,9 @@
                   body's points (`describe`) and told to each of them. What a
                   body is comes from it alone: how free it is to move and how
                   heavy (`of_body`), the whole of its points as it imagines
-                  them, all sides (`imagine`), and what Kubric says of the
-                  object, its mass, grip, bounce, size and colour (`known`)
+                  them, all sides (`imagine`), which of those are joined by a
+                  bar (`bars`), and what Kubric says of the object, its mass,
+                  grip, bounce, size and colour (`known`)
 """
 
 from dataclasses import dataclass
@@ -128,8 +129,10 @@ class WorldModel(nn.Module):
         if slots:
             self.slot = nn.Parameter(torch.randn(slots, dim) * 0.02)
             self.slot_home = nn.Parameter(F.normalize(torch.randn(slots, 3), dim=-1))
-            self.slot_out = nn.Sequential(nn.Linear(2 * dim, dim), nn.GELU(), nn.Linear(dim, dim), nn.GELU(),
-                                          zero_init(nn.Linear(dim, 4), almost=False))
+            self.slot_mid = nn.Sequential(nn.Linear(2 * dim, dim), nn.GELU(), nn.Linear(dim, dim), nn.GELU())
+            self.slot_out = zero_init(nn.Linear(dim, 4), almost=False)
+            # Two imagined points joined or not: from both (alike either way round) and how far apart they are.
+            self.bar_out = nn.Sequential(nn.Linear(2 * dim + 99, dim), nn.GELU(), nn.Linear(dim, 1))
             # A point imagined, not given by a frame: it has no look to be found by.
             self.imagined_in = nn.Parameter(torch.zeros(dim))
         self.pair = nn.Sequential(nn.Linear(2 * dim + 3 * 99, dim), nn.GELU(), nn.Linear(dim, dim + 1))
@@ -266,11 +269,21 @@ class WorldModel(nn.Module):
         """(K, KNOWN) what Kubric says of each body's object, from its description (K, D)."""
         return self.known_out(what).float()
 
-    def imagine(self, what: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def imagine(self, what: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """A body's whole set of points, all sides, as its description `what` (D,) has it: (M, 3) where each is
-        from the body's centre, in the body's size, and (M,) logits: is there such a point."""
-        out = self.slot_out(torch.cat([self.slot, what.to(self.slot.dtype).expand_as(self.slot)], -1)).float()
-        return self.slot_home.float() + out[:, :3], out[:, 3]
+        from the body's centre, in the body's size, (M,) logits: is there such a point, and (M, D) what the
+        model knows of each, for `bars`."""
+        x = self.slot_mid(torch.cat([self.slot, what.to(self.slot.dtype).expand_as(self.slot)], -1))
+        out = self.slot_out(x).float()
+        return self.slot_home.float() + out[:, :3], out[:, 3], x
+
+    def bars(self, x: torch.Tensor, at: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
+        """(P,) logits: is each pair of a body's imagined points `pairs` (P, 2) joined by a bar, from what the
+        model knows of them `x` (M, D) and where they are `at` (M, 3), in the body's size."""
+        a, b = pairs[:, 0], pairs[:, 1]
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            apart = _posenc((at[a] - at[b]).abs().float())
+        return self.bar_out(torch.cat([x[a] + x[b], x[a] * x[b], apart.to(x.dtype)], -1))[:, 0].float()
 
     def touches(self, h: torch.Tensor, n: torch.Tensor, m: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
                 apart: torch.Tensor, slide: torch.Tensor, at: torch.Tensor, fall: torch.Tensor) -> Optional[Touch]:

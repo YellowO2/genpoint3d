@@ -32,6 +32,12 @@ def shape_scores(b: dict, world: World, view: torch.Tensor, said: torch.Tensor) 
     known_mass        how many times off its mass is (1: right)
     known_size        ... its longest side
     known_colour      how far off its colour is, a mean over red, green and blue from 0 to 1
+
+    And the bars the bodies said between their imagined points, in the clip's
+    last frame with an image, each end taken as its object's nearest corner:
+
+    bars_right        the share of bars whose two corners the answer joins
+    bars              bars an imagined point
     """
     mesh, of, seen = b["mesh"][0].float(), b["mesh_body"][0], b["mesh_seen"][0]
     if not mesh.shape[1]:
@@ -69,6 +75,21 @@ def shape_scores(b: dict, world: World, view: torch.Tensor, said: torch.Tensor) 
     nan = torch.tensor(float("nan"), device=mesh.device)
     out = {k: (torch.stack(v).mean() if v else nan)[None] for k, v in sums.items()}
     out["imagined"] = world.imagined.sum()[None].float()
+    last, bars = int(shown[-1]), world.bars
+    if len(bars):
+        V = max(len(of), 1)
+        keys = b["mesh_bars"][0]
+        keys = torch.cat([keys[:, 0] * V + keys[:, 1], keys[:, 1] * V + keys[:, 0]])
+        ends = []
+        for e in (bars[:, 0], bars[:, 1]):
+            mine = of[None] == thing[e][:, None]                                         # (E, V) its object's corners
+            gap = torch.cdist(world.pos[last, e], mesh[last]).masked_fill(~mine, float("inf"))
+            ends.append(torch.where(mine.any(-1), gap.argmin(-1), -1))
+        ok = (ends[0] >= 0) & (ends[1] >= 0) & (ends[0] != ends[1])
+        out["bars_right"] = (ok & torch.isin(ends[0] * V + ends[1], keys)).float().mean()[None]
+    else:
+        out["bars_right"] = nan[None]
+    out["bars"] = (len(bars) / world.imagined.sum().clamp_min(1)).float()[None]
     thing = torch.where(world.seed < own, segment[world.seed.clamp_max(own - 1)], -1)
     ok = (thing >= 1) & (thing <= b["things"].shape[1])
     off = (said.float() - b["things"][0].float()[(thing - 1).clamp_min(0)]).abs()[ok] if ok.any() else None

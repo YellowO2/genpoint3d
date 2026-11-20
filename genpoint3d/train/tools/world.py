@@ -40,8 +40,9 @@ class World:
         self.body = torch.full((N,), -1, dtype=torch.long, device=dev)
         self.place = torch.zeros(N, 3, device=dev)
         self.like = torch.zeros(N, device=dev)
-        # The points a body imagined of itself, not given by any frame.
+        # The points a body imagined of itself, not given by any frame, and the bars joining pairs of them.
         self.imagined = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.bars = torch.zeros(0, 2, dtype=torch.long, device=dev)
         # Each body's pose in every frame, and how it goes in the frame last stored.
         self.turn, self.centre = torch.zeros(T, 0, 3, 3, device=dev), torch.zeros(T, 0, 3, device=dev)
         self.speed, self.spin = torch.zeros(0, 3, device=dev), torch.zeros(0, 3, device=dev)
@@ -62,10 +63,12 @@ class World:
 
     @_exact
     @torch.no_grad()
-    def imagine(self, k: int, at: torch.Tensor, t: int) -> None:
+    def imagine(self, k: int, at: torch.Tensor, t: int, bars: Optional[torch.Tensor] = None) -> None:
         """More points of body `k`, imagined in frame `t` at `at` (M, 3): on it from now, and in every other
-        frame where the body's pose there puts them."""
+        frame where the body's pose there puts them; `bars` (E, 2) the pairs of them joined, by their order."""
         N = len(self.body)
+        if bars is not None:
+            self.bars = torch.cat([self.bars, bars.to(self.bars) + N])
         self.add(at, t)
         new = torch.arange(N, N + len(at), device=at.device)
         self.body[new], self.like[new], self.imagined[new] = k, 1.0, True

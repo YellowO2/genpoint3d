@@ -41,6 +41,8 @@ from genpoint3d.train.tools.world import World
 ROUND_DECAY = 0.8
 # Two bodies may touch where their points are within this many point spacings.
 REACH = 1.5
+# The nearest of a body's imagined points each may be joined to by a bar (a game mesh's corner has about six).
+BAR_NEAR = 8
 
 
 @dataclass
@@ -50,6 +52,8 @@ class Born:
     there: torch.Tensor             # (M,) logits: is there such a point
     kept: torch.Tensor              # (m,) the ones the world then has
     corner: Optional[torch.Tensor]  # (m,) the answer's corner each of those is, with the clip's `Answer`
+    pairs: torch.Tensor             # (P, 2) pairs of them that may be joined: each with its BAR_NEAR nearest
+    joined: torch.Tensor            # (P,) logits: is each pair joined by a bar
 
 
 @dataclass
@@ -194,8 +198,12 @@ class Tracker:
                 centre = w.centre[t, k]
                 way = w.pos[t, idx[mine]] - centre
                 size = way.norm(dim=-1).mean().clamp_min(1e-6)
-            out, there = self.model.imagine(what[k])
+            out, there, x = self.model.imagine(what[k])
             at = centre + out * size
+            near = torch.cdist(out.detach(), out.detach()).topk(min(BAR_NEAR + 1, len(out)), largest=False).indices[:, 1:]
+            pairs = torch.stack([torch.arange(len(out), device=out.device)[:, None].expand_as(near), near], -1).flatten(0, 1)
+            pairs = torch.unique(pairs.sort(-1).values, dim=0)
+            joined = self.model.bars(x, out, pairs)
             if self.answer is None:
                 kept, corner = torch.nonzero(there > 0)[:, 0], None
             else:
@@ -203,11 +211,14 @@ class Tracker:
                 if hit is None:
                     continue
                 kept, corner = hit
-            born.append(Born(at, there, kept, corner))
+            born.append(Born(at, there, kept, corner, pairs, joined))
             if len(kept):
                 new = at[kept].detach()
+                order = torch.full((len(out),), -1, dtype=torch.long, device=out.device)
+                order[kept] = torch.arange(len(kept), device=out.device)
+                bars = order[pairs[joined > 0]]
                 self._more(t, new, torch.zeros(len(kept), self.cond["id_card"].shape[-1], device=new.device))
-                w.imagine(k, new, t)
+                w.imagine(k, new, t, bars[(bars >= 0).all(-1)])
         return born
 
     def _as_body(self) -> None:
@@ -282,6 +293,14 @@ class Tracker:
                     if m.slots:
                         born = self._imagined(t, now, idx)
                 yield Look(t, i, alive, *look, ahead, born, known, seed, free)
+
+
+def _balanced(logits: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
+    """Binary cross-entropy of `logits` against `true` (both (P,)), the true and the false averaged apart: a
+    mesh's few bars do not drown in the many pairs that are not."""
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(logits, true, reduction="none")
+    on = true > 0
+    return (bce[on].mean() if on.any() else bce.new_zeros(())) / 2 + (bce[~on].mean() if (~on).any() else bce.new_zeros(())) / 2
 
 
 def track_loss(
@@ -383,6 +402,11 @@ def track_loss(
                 loss = loss + imagine_weight * torch.nn.functional.binary_cross_entropy_with_logits(b.there, true)
                 if len(b.kept):
                     loss = loss + imagine_weight * (b.at[b.kept] - answer.mesh[r.t, b.corner]).norm(dim=-1).mean() / model.traj_scale
+                corner = torch.full((len(b.at),), -1, dtype=torch.long, device=b.at.device)
+                corner[b.kept] = b.corner
+                ends = corner[b.pairs]
+                bar = ((ends >= 0).all(-1) & answer.joined(ends[:, 0], ends[:, 1])).float()
+                loss = loss + imagine_weight * _balanced(b.joined, bar)
         if known_weight and answer is not None and every.known is not None and len(every.seed):
             true, ok = answer.known(every.seed)
             if ok.any():

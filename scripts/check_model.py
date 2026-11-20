@@ -215,11 +215,12 @@ from genpoint3d.train.tools.imagine import Answer
 from genpoint3d.train.tools.track import track_loss
 
 corners = torch.randn(4, 3) * 0.2 + torch.tensor([0, 0, 3.0])
-one = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7), torch.ones(1, dtype=torch.bool))
+one = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7), torch.ones(1, dtype=torch.bool), torch.tensor([[0, 1], [1, 2]]))
 hit = one.match(0, 0, torch.cat([corners[[2, 0, 3, 1]] + 0.01, torch.full((2, 3), 9.0)]))
 print(f"imagine: six imagined points, four at the answer's corners shuffled: kept {hit[0].tolist()} as corners {hit[1].tolist()} "
       f"(want [0, 1, 2, 3] as [2, 0, 3, 1])")
-print(f"  a second body on the same object, a piece of it: {len(one.match(1, 0, corners + 0.01)[0])} true points (want 0)")
+print(f"  a second body on the same object, a piece of it: {len(one.match(1, 0, corners + 0.01)[0])} true points (want 0); "
+      f"corners joined, 1-0, 2-1, 0-2: {one.joined(torch.tensor([1, 2, 0]), torch.tensor([0, 1, 2])).tolist()} (want [True, True, False])")
 from genpoint3d.tools.kubric_models import FLIP, floor, turns
 
 o = {"camera_quaternions": torch.tensor([[0.9, 0.3, -0.2, 0.25]]).numpy(), "camera_positions": torch.tensor([[1.0, -6.0, 3.0]]).numpy()}
@@ -239,21 +240,23 @@ b["segment"] = torch.ones(B, N, dtype=torch.long)
 b["mesh"] = (corners[None] + torch.randn(T, 1, 3) * 0.05)[None]
 b["mesh_body"], b["mesh_seen"], b["things"] = torch.ones(B, 4, dtype=torch.long), torch.rand(B, T, 4) > 0.5, torch.randn(B, 1, 7)
 b["moves"] = torch.ones(B, 1, dtype=torch.bool)
+b["mesh_bars"] = torch.tensor([[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]])           # four corners, every two joined
 s.imagine, s.imagine_loss, s.known_loss = 6, 1.0, 1.0
 m.train()
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
-dead = [n for n, p in m.named_parameters() if n.startswith(("slot", "imagined_in", "what", "known", "of_body")) and (p.grad is None or p.grad.abs().sum() == 0)]
+dead = [n for n, p in m.named_parameters() if n.startswith(("slot", "bar_out", "imagined_in", "what", "known", "of_body")) and (p.grad is None or p.grad.abs().sum() == 0)]
 bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
 print(f"  loss {losses.method:.4f}; the imagining weights without gradient: {dead} (want none), with a non-finite one: {len(bad)} (want 0)")
 bd = to_device(b, torch.device("cpu"))
 fi = fine_inputs(m, bd)
-answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0], bd["things"][0], bd["moves"][0])
+answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0], bd["things"][0], bd["moves"][0], bd["mesh_bars"][0])
 with torch.no_grad():
     out = track_loss(m, bd["traj"], bd["anchor"], mask=bd["visibility"], rounds=2, answer=answer, imagine_weight=1.0, context=bd["context"],
                      visual_mask=whole, id_card=bd["id_card"], patch_xyz=bd["patch_xyz"], **fi)[1]
 w = out["world"]
 print(f"  the world has {int(w.imagined.sum())} imagined points (want 4) on body {w.body[w.imagined].tolist()}, each a corner "
-      f"{answer.corner.tolist()}; the clip's own tracks {tuple(out['tracks'].shape)} (want {(B, T, N, 3)})")
+      f"{answer.corner.tolist()}, {len(w.bars)} bars among them (at most 6, each between two of them: "
+      f"{bool(w.imagined[w.bars].all()) if len(w.bars) else True}); the clip's own tracks {tuple(out['tracks'].shape)} (want {(B, T, N, 3)})")
 from genpoint3d.train.score.shape_scores import shape_scores
 
 print("  the shapes' scores: " + ", ".join(f"{k} {float(v):.2f}" for k, v in shape_scores(bd, w, whole, m.known(out["what"])).items()))
