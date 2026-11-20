@@ -3,10 +3,12 @@
     tokens        each point the world has: where the engine put it, how it
                   moved since the frame before, and the CNN matcher's
                   comparison of its surroundings with its template
-    conditioning  where the point was given, the round and the matcher, one
-                  vector per point. A point is a place on a body, not a thing:
-                  what it is is its body's description; the look of its spot
-                  is the matcher's alone, to find the spot again
+    conditioning  where the point was given, the round, the look of its spot
+                  (its DINOv3 id card) and the matcher, one vector per point. A
+                  point is a place on a body, not a thing: what it is is its
+                  body's description; the look of its spot is to find the spot
+                  again and to tell which body it is on (without it half the
+                  points of an object go to other bodies, look_back)
     blocks        attention between the points, and to the DINOv3 patches
                   nearest each, x depth
     heads         per point: a correction to its place, whether it is seen, a
@@ -72,6 +74,7 @@ class WorldModel(nn.Module):
         self.frame_proj = nn.Linear(feat_dim, dim, bias=False)
         self.patch_pos = FourierEmbedding(3, dim)
         self.anchor_emb = FourierEmbedding(3, dim)
+        self.id_feature_proj = nn.Linear(feat_dim, dim, bias=False)
         self.time_emb = FourierEmbedding(1, dim)
         self.cond_mlp = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
 
@@ -151,8 +154,8 @@ class WorldModel(nn.Module):
         k            (B,)            the round clock in [0, 1]
         anchor       (B, N, 3)       each point where it is given, scene-normalised
         context      (B, Tc, P, F)   DINOv3 patches of the whole clip
-        id_card      (B, N, F)       DINOv3 feature where each point is given: not read (to go once tracking
-                     without it is measured)
+        id_card      (B, N, F)       DINOv3 feature where each point is given: the look of its spot (zeros
+                     for an imagined point)
         patch_xyz    (B, Tc, P, 3)   each patch's 3D position, anchor's space
         fine_map     (B, Tc, C, h, w) the CNN's maps (`FineFinder.encode`)
         fine_proj    (B, Tc, 3, 4)   anchor's space -> the image, per frame
@@ -206,7 +209,7 @@ class WorldModel(nn.Module):
         fine = fine * ~imagined[..., None]
 
         cond = self.time_emb(k[:, None, None].expand(B, 1, 1)) + self.anchor_emb(anchor)
-        cond = cond + self.fine_cond(fine).to(cond.dtype)
+        cond = cond + self.id_feature_proj(id_card) + self.fine_cond(fine).to(cond.dtype)
         told = self.gravity_in(gravity[:, None].to(cond.dtype)) + torch.where(
             down_known[:, None], self.down_in(down.to(cond.dtype)), self.down_unknown.to(cond.dtype))
         cond = self.cond_mlp(cond + told[:, None])                                        # (B, N, C)
