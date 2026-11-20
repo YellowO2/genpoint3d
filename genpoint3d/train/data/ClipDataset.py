@@ -136,7 +136,7 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
-        mesh, mesh_body, mesh_bars, mesh_seen, known = _answer(clip, self.objects, self.assets, self.slots, depth)
+        mesh, mesh_body, mesh_bars, mesh_seen, said_of = _answer(clip, self.objects, self.assets, self.slots, depth)
         # Features stay fp16 until `to_device`.
         ctx = clip.context
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
@@ -173,7 +173,7 @@ class ClipDataset(Dataset):
             # each one's object (V,) as `segment`, the bars (E, 2) between them, and (T, V) the corners seen.
             "mesh": n.apply(mesh), "mesh_body": mesh_body, "mesh_bars": mesh_bars, "mesh_seen": mesh_seen,
             # (O, 7) what Kubric says of each object (`kubric_models.things`), object 1 first.
-            "things": known,
+            "things": said_of,
         }
 
     @staticmethod
