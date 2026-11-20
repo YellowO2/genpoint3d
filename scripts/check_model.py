@@ -166,17 +166,29 @@ def world_tracks(b: dict, view: torch.Tensor) -> torch.Tensor:
                  patch_xyz=b["patch_xyz"], **fine_inputs(m, b))[0]
 
 
+from genpoint3d.train.tools.world import World
+
 m.eval()
 view = torch.ones(B, T, 2, 2, dtype=torch.bool)
 view[:, 5:8] = False
-first = world_tracks(b, view)
-gap = (first - world_tracks(changed(b, slice(5, 8)), view)).abs().max().item()
-# A frame once seen is not gone back over: only a point's frames from before it was given change later, with its body.
-late = (first - world_tracks(changed(b, slice(9, None)), view)).abs().amax(-1)[0, :9]                # (9, N)
-since = torch.arange(9)[:, None] >= b["query_t"][0][None]
+gap = (world_tracks(b, view) - world_tracks(changed(b, slice(5, 8)), view)).abs().max().item()
+# A frame once seen is not gone back over: the past changes later only with a body, as a point's frames from
+# before it was given, or as the frames a body was not seen in, put right when it is seen again (in either run).
+redone, put_right = [], World._put_right
+def spy(self, t, turn, centre, backed):
+    for k in torch.nonzero(backed & (self.backed < t - 1) & (self.first < t - 1))[:, 0].tolist():
+        redone.append((self.body == k, int(self.backed[k]) + 1, t))
+    return put_right(self, t, turn, centre, backed)
+World._put_right = spy
+late = (world_tracks(b, view) - world_tracks(changed(b, slice(9, None)), view)).abs().amax(-1)[0, :9]   # (9, N)
+World._put_right = put_right
+by_body = torch.zeros(9, N, dtype=torch.bool)
+for mine, a, z in redone:
+    by_body[a:min(z, 9), mine[:N]] = True
+since = (torch.arange(9)[:, None] >= b["query_t"][0][None]) & ~by_body
 print(f"  change anywhere when the frames of a gap (5-7) change: {gap:.2e} (want 0); when the frames from 9 on "
       f"change, in frames 0-8: {late[since].max().item():.2e} from when a point is given (want 0), "
-      f"{late[~since].max().item():.2e} before it is (its body's past)")
+      f"{late[~since].max().item():.2e} with its body (before it is given, or its body put right when seen again)")
 
 # What the model says of two bodies that touch reaches the engine's next frame: a ball on a floor, made up.
 from genpoint3d.train.tools.world import World

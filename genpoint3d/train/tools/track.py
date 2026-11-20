@@ -5,10 +5,11 @@ round correcting its last guess, and pulling each point toward the place that
 keeps its body's shape as strongly as it says the body is stiff. What it ends
 on is stored (`World.store`), and the engine writes the next frame from it and
 from what the model says of the bodies: which are free to move, how heavy, and
-where they touch (`World.ahead`). A frame without its image is looked at the
-same way: the model sees nothing there, and the engine's frame stands unless
-the model knows better. Nothing goes back over a frame: the past changes only
-through the world's bodies.
+where they touch (`World.ahead`). A frame with none of its image (a forecast,
+a gap) is the engine's alone: nothing is looked at, said or taught there, and
+the model is not called; the touches use what the model last knew of each
+point. A frame with part of its image is looked at as any other. Nothing goes
+back over a frame: the past changes only through the world's bodies.
 
 Each body has one description, what the model knows it to be, kept with the
 world: put right after every frame from the body's points and told to each of
@@ -98,8 +99,9 @@ class Tracker:
         self.groups = torch.zeros(1, N, model.group_out.out_features, device=anchor.device)
         self.known = torch.zeros(1, N, dtype=torch.bool, device=anchor.device)
         self.arrow = torch.zeros(1, T, N, 3, device=anchor.device)
-        # Each body's description, as last put right.
+        # Each body's description, as last put right, and what the model last knew of each point.
         self.what = torch.zeros(0, model.dim, device=anchor.device)
+        self.h = torch.zeros(N, model.dim, device=anchor.device)
         self.rays = _rays(self.cond, anchor)
         # Which way is down: as told, else as the model last said once it has.
         self.told = cond["down_known"]
@@ -136,9 +138,10 @@ class Tracker:
         self.what = what.detach()
         return what
 
-    def _ahead(self, t: int, said, idx: torch.Tensor, what: torch.Tensor) -> torch.Tensor:
+    def _ahead(self, t: int, h: torch.Tensor, idx: torch.Tensor, what: torch.Tensor) -> torch.Tensor:
         """(N, 3) the engine's frame `t` + 1 as a guess, from the world as stored and what the model says of
-        its bodies: each one's freedom and mass, from its description `what` (K, D), and where they touch."""
+        its bodies: each one's freedom and mass, from its description `what` (K, D), and where they touch,
+        from what it knows of the points `idx`, `h` (n, D)."""
         w = self.world
         free = heavy = touch = None
         if len(w.seed):
@@ -147,7 +150,7 @@ class Tracker:
             local = torch.full((len(w.body),), -1, dtype=torch.long, device=idx.device)
             local[idx] = torch.arange(len(idx), device=idx.device)
             at, slide = w.sliding(t, n, m)
-            touch = self.model.touches(said.h[0], local[n], local[m], w.body[n], w.body[m], w.pos[t, m] - w.pos[t, n],
+            touch = self.model.touches(h, local[n], local[m], w.body[n], w.body[m], w.pos[t, m] - w.pos[t, n],
                                        slide, at, self._fall())
         return self._guess(w.ahead(t, self._fall(), free, heavy, touch))
 
@@ -163,6 +166,7 @@ class Tracker:
         c["id_card"], c["query_t"] = torch.cat([c["id_card"], card.to(c["id_card"].dtype)], 1), torch.cat([c["query_t"], here], 1)
         self.vis, self.arrow = more(self.vis, 2), more(self.arrow, 2)
         self.groups, self.known = more(self.groups), more(self.known)
+        self.h = more(self.h[None])[0]
 
     def _added(self, t: int) -> None:
         """The points `add` gives for frame `t`, put after the clip's others: each given there. It is shown the
@@ -222,6 +226,12 @@ class Tracker:
             idx = torch.nonzero(alive)[:, 0]
             if not len(idx):
                 continue
+            if not view[0, t].any():
+                # None of the frame's image: the engine's alone, the model not called.
+                if t + 1 < self.T:
+                    with torch.no_grad():
+                        self._ahead(t, self.h[idx], idx, self.what)
+                continue
             anchor = self.anchor[:, idx]
             # What the world has of the frame: the engine's, or a point just given where it is given.
             start = self._guess(w.pos[t])
@@ -262,11 +272,12 @@ class Tracker:
                         said.down, full(said.arrow))
                 if i == self.rounds - 1:
                     self.vis[:, t, idx], self.arrow[:, t, idx] = logits, said.arrow.detach().float()
+                    self.h[idx] = said.h[0].detach().float()
                     w.store(t, placed(g.detach()), seen, self.groups[0], placed(g.detach() + said.arrow.detach()))
                     now = self._described(said, idx)
                     known, seed = m.known(now), w.seed.clone()
                     if t + 1 < self.T:
-                        ahead = self._ahead(t, said, idx, now)[None]
+                        ahead = self._ahead(t, said.h[0], idx, now)[None]
                     if m.slots:
                         born = self._imagined(t, now, idx)
                 yield Look(t, i, alive, *look, ahead, born, known, seed)
