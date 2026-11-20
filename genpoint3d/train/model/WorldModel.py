@@ -72,6 +72,7 @@ class WorldModel(nn.Module):
         self.frame_proj = nn.Linear(feat_dim, dim, bias=False)
         self.patch_pos = FourierEmbedding(3, dim)
         self.anchor_emb = FourierEmbedding(3, dim)
+        self.id_feature_proj = nn.Linear(feat_dim, dim, bias=False)
         self.time_emb = FourierEmbedding(1, dim)
         self.cond_mlp = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
 
@@ -206,7 +207,7 @@ class WorldModel(nn.Module):
         fine = fine * ~imagined[..., None]
 
         cond = self.time_emb(k[:, None, None].expand(B, 1, 1)) + self.anchor_emb(anchor)
-        cond = cond + self.fine_cond(fine).to(cond.dtype)
+        cond = cond + self.id_feature_proj(id_card) + self.fine_cond(fine).to(cond.dtype)
         told = self.gravity_in(gravity[:, None].to(cond.dtype)) + torch.where(
             down_known[:, None], self.down_in(down.to(cond.dtype)), self.down_unknown.to(cond.dtype))
         cond = self.cond_mlp(cond + told[:, None])                                        # (B, N, C)
