@@ -27,7 +27,7 @@ files = sorted(Path(args.cache).expanduser().glob("*.pt"))
 files = files[:: max(len(files) // args.clips, 1)][: args.clips]
 data = ClipDataset(files, 10 ** 6, resample=False, frames=Path(args.frames).expanduser(), objects=Path(args.objects).expanduser(),
                    assets=Path(args.assets).expanduser(), slots=args.slots)
-off, count, seen, never, bars = [], [], [], [], []
+off, count, seen, never, bars, level = [], [], [], [], [], []
 for i, f in enumerate(files):
     b = data[i]
     mesh, of, shown = b["mesh"], b["mesh_body"], b["mesh_seen"]
@@ -36,12 +36,18 @@ for i, f in enumerate(files):
         continue
     pos = b["traj"] * b["norm_traj_scale"] + b["norm_offset"]                    # (T, N, 3) the clip's unit, as the answer
     here = []
-    for o in of.unique().tolist():
+    for o in of[of > 0].unique().tolist():
         mine, own = of == o, b["segment"] == o
         count.append(int(mine.sum()))
         if own.any():
             size = torch.cdist(mesh[0, mine], mesh[0, mine]).max()
             here.append((torch.cdist(pos[:, own], mesh[:, mine]).min(-1).values / size).flatten())
+    flat = of == 0
+    if flat.any():
+        a0, a1, a2 = mesh[0, flat][0], mesh[0, flat][1], mesh[0, flat][3]
+        up = torch.nn.functional.normalize(torch.linalg.cross(a1 - a0, a2 - a0), dim=0)
+        ground = pos[:, b["segment"] == 0].reshape(-1, 3)
+        level.append(((ground - a0) @ up).abs() * float(b["norm_scale"]))        # metres
     seen.append(shown.float().mean())
     never.append((~shown.any(0)).float().mean())
     bars.append(len(b["mesh_bars"]) / len(of))
@@ -55,3 +61,6 @@ print(f"=== {len(seen)} clips: corners an object, median {int(count.median())}, 
       f"object's nearest corner: median {float(off.median()):.3f} of the object's size, 90% under {float(off.quantile(0.9)):.3f}, "
       f"99% under {float(off.quantile(0.99)):.3f}; a frame sees {float(torch.stack(seen).mean()):.0%} of the corners, "
       f"{float(torch.stack(never).mean()):.0%} are never seen ===", flush=True)
+level = torch.cat(level)
+print(f"=== the floor's points from the floor's four corners' plane, cm: median {float(level.median()) * 100:.1f}, 90% under "
+      f"{float(level.quantile(0.9)) * 100:.1f} (the floor is flat: a few cm is depth's own) ===", flush=True)

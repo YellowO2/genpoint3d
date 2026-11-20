@@ -215,10 +215,20 @@ from genpoint3d.train.tools.imagine import Answer
 from genpoint3d.train.tools.track import track_loss
 
 corners = torch.randn(4, 3) * 0.2 + torch.tensor([0, 0, 3.0])
-hit = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7)).match(
-    0, 0, torch.cat([corners[[2, 0, 3, 1]] + 0.01, torch.full((2, 3), 9.0)]))
+one = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7), torch.ones(1, dtype=torch.bool))
+hit = one.match(0, 0, torch.cat([corners[[2, 0, 3, 1]] + 0.01, torch.full((2, 3), 9.0)]))
 print(f"imagine: six imagined points, four at the answer's corners shuffled: kept {hit[0].tolist()} as corners {hit[1].tolist()} "
       f"(want [0, 1, 2, 3] as [2, 0, 3, 1])")
+print(f"  a second body on the same object, a piece of it: {len(one.match(1, 0, corners + 0.01)[0])} true points (want 0)")
+from genpoint3d.tools.kubric_models import FLIP, floor, turns
+
+o = {"camera_quaternions": torch.tensor([[0.9, 0.3, -0.2, 0.25]]).numpy(), "camera_positions": torch.tensor([[1.0, -6.0, 3.0]]).numpy()}
+o["camera_quaternions"] /= (o["camera_quaternions"] ** 2).sum() ** 0.5
+on_floor = torch.cat([torch.rand(50, 2).double() * torch.tensor([4.0, 3.0]).double() - 1, torch.zeros(50, 1).double()], -1).numpy()
+turn0, at0 = turns(o["camera_quaternions"][0].astype("float64")), o["camera_positions"][0].astype("float64")
+back = (floor(o, ((on_floor - at0) @ turn0) @ FLIP) @ FLIP) @ turn0.T + at0
+print(f"  the floor's corners from points on it: height {abs(back[:, 2]).max():.1e} (want 0), x from {back[:, 0].min():.2f} to "
+      f"{back[:, 0].max():.2f} (want {on_floor[:, 0].min():.2f} to {on_floor[:, 0].max():.2f})")
 m = WorldModel(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, group_dim=4, patch=4, slots=6)
 with torch.no_grad():
     for p in m.parameters():
@@ -228,6 +238,7 @@ b = batch()
 b["segment"] = torch.ones(B, N, dtype=torch.long)
 b["mesh"] = (corners[None] + torch.randn(T, 1, 3) * 0.05)[None]
 b["mesh_body"], b["mesh_seen"], b["things"] = torch.ones(B, 4, dtype=torch.long), torch.rand(B, T, 4) > 0.5, torch.randn(B, 1, 7)
+b["moves"] = torch.ones(B, 1, dtype=torch.bool)
 s.imagine, s.imagine_loss, s.known_loss = 6, 1.0, 1.0
 m.train()
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
@@ -236,7 +247,7 @@ bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.is
 print(f"  loss {losses.method:.4f}; the imagining weights without gradient: {dead} (want none), with a non-finite one: {len(bad)} (want 0)")
 bd = to_device(b, torch.device("cpu"))
 fi = fine_inputs(m, bd)
-answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0], bd["things"][0])
+answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0], bd["things"][0], bd["moves"][0])
 with torch.no_grad():
     out = track_loss(m, bd["traj"], bd["anchor"], mask=bd["visibility"], rounds=2, answer=answer, imagine_weight=1.0, context=bd["context"],
                      visual_mask=whole, id_card=bd["id_card"], patch_xyz=bd["patch_xyz"], **fi)[1]

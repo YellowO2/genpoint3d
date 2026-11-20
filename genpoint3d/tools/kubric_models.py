@@ -95,6 +95,26 @@ def fewest(corners: np.ndarray, most: int) -> np.ndarray:
     return np.array(kept)
 
 
+MOVED = 0.01   # metres an object's centre must go over a clip to be known free: one that never moves may be fixed
+
+
+def moves(o) -> np.ndarray:
+    """(O,) which of a clip's objects `o` move over it: those known to be free to move (MOVi's objects are all
+    dropped or thrown, but the npz does not say which were fixed)."""
+    p = o["positions"]
+    return (np.linalg.norm(p - p[:, :1], axis=-1).max(1) > MOVED) if len(p) else np.zeros(0, bool)
+
+
+def floor(o, ground: np.ndarray) -> np.ndarray:
+    """(4, 3) the floor as a game's flat body: the corners of the rectangle on Kubric's floor (z = 0) that holds
+    `ground` (P, 3), the clip's floor points in metres seen from its first frame's camera, in that camera."""
+    turn0, at0 = turns(o["camera_quaternions"][0].astype(np.float64)), o["camera_positions"][0].astype(np.float64)
+    world = (ground.astype(np.float64) @ FLIP) @ turn0.T + at0
+    (x0, y0), (x1, y1) = world[:, :2].min(0), world[:, :2].max(0)
+    corners = np.array([[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]])
+    return ((corners - at0) @ turn0) @ FLIP
+
+
 def answer(o, home: Path, cells: int, most: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """What a clip's stored world should come to be: every object's low-poly shape, all sides, placed by Kubric's
     pose in every frame and seen from the first frame's camera (a cached clip's frame), in metres. `o` is the

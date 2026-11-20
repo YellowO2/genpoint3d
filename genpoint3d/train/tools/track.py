@@ -67,12 +67,13 @@ class Look:
     born: list                      # what each body first found in the frame imagined, after its last round
     known: Optional[torch.Tensor] = None   # (K, KNOWN) what the bodies' descriptions say of their objects, after the frame's last round
     seed: Optional[torch.Tensor] = None    # (K,) the point each of those bodies is formed about
+    free: Optional[torch.Tensor] = None    # (K,) how free each body is to move, from its description
 
     def first(self, n: int) -> "Look":
         """The look at the clip's first `n` points: those it came with, not the ones added since."""
         cut = lambda x: None if x is None else x[:, :n]
         return Look(self.t, self.i, self.alive[:n], cut(self.g), cut(self.logits), cut(self.groups), self.down, cut(self.arrow),
-                    cut(self.ahead), self.born, self.known, self.seed)
+                    cut(self.ahead), self.born, self.known, self.seed, self.free)
 
 
 class Tracker:
@@ -266,7 +267,7 @@ class Tracker:
                 self.groups[:, idx], self.known[:, idx] = said.groups.detach(), True
                 self._as_body()
                 seen = torch.zeros(N, device=dev).index_copy(0, idx, torch.sigmoid(logits[0]) * shown)
-                ahead, born, known, seed = None, [], None, None
+                ahead, born, known, seed, free = None, [], None, None, None
                 full = lambda x: torch.zeros(1, N, *x.shape[2:], device=dev).index_copy(1, idx, x.float())
                 look = (start[None].index_copy(1, idx, g.float()), full(said.logits), self.groups.index_copy(1, idx, said.groups),
                         said.down, full(said.arrow))
@@ -275,12 +276,12 @@ class Tracker:
                     self.h[idx] = said.h[0].detach().float()
                     w.store(t, placed(g.detach()), seen, self.groups[0], placed(g.detach() + said.arrow.detach()))
                     now = self._described(said, idx)
-                    known, seed = m.known(now), w.seed.clone()
+                    known, seed, free = m.known(now), w.seed.clone(), m.of_body(now)[0]
                     if t + 1 < self.T:
                         ahead = self._ahead(t, said.h[0], idx, now)[None]
                     if m.slots:
                         born = self._imagined(t, now, idx)
-                yield Look(t, i, alive, *look, ahead, born, known, seed)
+                yield Look(t, i, alive, *look, ahead, born, known, seed, free)
 
 
 def track_loss(
@@ -329,7 +330,8 @@ def track_loss(
     true point is from its corner and whether each is said to be there; from
     then on, as any point, its place, the engine's next frame and whether it
     is seen. With `known_weight`, what each body's description says of its
-    object (`WorldModel.known`) against what Kubric says of it, after every
+    object (`WorldModel.known`) against what Kubric says of it, and whether it
+    is free to move (`WorldModel.of_body`) where that is known, after every
     frame. The dict also holds
     the tracks, the visibility logits, each point's last group vector, which
     way is down, the arrows, and the arrows' loss alone (in the total)."""
@@ -385,6 +387,9 @@ def track_loss(
             true, ok = answer.known(every.seed)
             if ok.any():
                 loss = loss + known_weight * (every.known - true).abs()[ok].mean()
+            free, ok = answer.free(every.seed)
+            if ok.any():
+                loss = loss + known_weight * torch.nn.functional.binary_cross_entropy(every.free.clamp(1e-4, 1 - 1e-4)[ok], free[ok])
         loss = share * loss
         if backward is not None:
             with torch.autocast(device_type=x1.device.type, enabled=False):

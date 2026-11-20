@@ -44,7 +44,7 @@ def shape_scores(b: dict, world: World, view: torch.Tensor, said: torch.Tensor) 
     thing = torch.where(world.imagined, torch.where(seed < own, segment[seed.clamp_max(own - 1)], -1),
                         torch.cat([segment, torch.full((len(world.body) - own,), -1, device=of.device)]))   # (N,) each point's object
     sums = {k: [] for k in ("shape_back", "shape_back_seen", "shape_back_early", "shape_back_late", "shape_front", "shape_made_up")}
-    for o in of.unique().tolist():
+    for o in of[of > 0].unique().tolist():                                         # the objects, not the floor
         mine, has = of == o, thing == o
         size = torch.cdist(mesh[0, mine], mesh[0, mine]).max().clamp_min(1e-6)
         for t in shown.tolist():
