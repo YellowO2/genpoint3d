@@ -152,8 +152,10 @@ class Tracker:
         self.groups, self.known = more(self.groups), more(self.known)
 
     def _added(self, t: int) -> None:
-        """The points `add` gives for frame `t`, put after the clip's others: each given there."""
-        new = self.add(t, self.world.pos[t], self.world.alive(t))
+        """The points `add` gives for frame `t`, put after the clip's others: each given there. It is shown the
+        points frames gave, not the imagined ones: those have no look, and take none of its room."""
+        real = ~self.world.imagined
+        new = self.add(t, self.world.pos[t][real], self.world.alive(t)[real])
         if new is None:
             return
         self._more(t, *new)
@@ -173,8 +175,8 @@ class Tracker:
                 centre = w.centre[t, k]
                 way = w.pos[t, idx[mine]] - centre
                 size = way.norm(dim=-1).mean().clamp_min(1e-6)
-                out, there = self.model.imagine(said.h[0, mine], way / size)
-                at = centre + out * size
+            out, there = self.model.imagine(said.h[0, mine], way / size)
+            at = centre + out * size
             if self.answer is None:
                 kept, corner = torch.nonzero(there > 0)[:, 0], None
             else:
