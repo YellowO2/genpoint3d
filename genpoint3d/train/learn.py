@@ -9,6 +9,7 @@ from genpoint3d.train.tools.batch import (
     seen_at, to_device,
 )
 from genpoint3d.train.tools.camera import project
+from genpoint3d.train.score.Adder import Adder
 from genpoint3d.train.tools.imagine import Answer
 from genpoint3d.train.tools.regress import regress_loss
 from genpoint3d.train.tools.track import track_loss
@@ -45,8 +46,9 @@ def learn(model, batch: dict, settings, hardware: Hardware) -> Losses:
         extra.update(centre_true=b["centre"], centre_known=b["centre_known"], centre_weight=settings.centre_loss)
     if settings.world and getattr(settings, "imagine", 0):
         # What the clip's stored world should come to be: what its bodies imagine is taught by it.
-        extra.update(answer=Answer(b["mesh"][0], b["mesh_body"][0], b["mesh_seen"][0], b["segment"][0], b["things"][0], b["moves"][0], b["mesh_bars"][0]),
-                     imagine_weight=settings.imagine_loss, known_weight=settings.known_loss)
+        # Points are added where the model says the world needs one, up to --points a clip.
+        extra.update(answer=Answer.of(b), imagine_weight=settings.imagine_loss, known_weight=settings.known_loss,
+                     add=Adder(model, b, fine, vm, settings.points))
     if settings.vis_loss:
         # Where each point truly is in the image, against the quarters seen.
         uv, _ = project(model.lookup_pos(traj.float(), anchor.float()), fine["fine_proj"].float())

@@ -23,17 +23,34 @@ class Answer:
     things   (O, KNOWN) what Kubric says of each object (`WorldModel.KNOWN`), object 1 first
     moves    (O,)       the objects known free to move; the floor (object 0) is fixed
     bars     (E, 2)     the corners joined by a bar
+    turns, places (O + 1, T, 3, 3), (O + 1, T, 3) each object's pose in every frame, the floor first
+    cells    (T, h, w)  the object each depth cell shows, 0 the floor
     """
 
     def __init__(self, mesh: torch.Tensor, body: torch.Tensor, seen: torch.Tensor, segment: torch.Tensor,
-                 things: torch.Tensor, moves: torch.Tensor, bars: torch.Tensor) -> None:
+                 things: torch.Tensor, moves: torch.Tensor, bars: torch.Tensor, turns: torch.Tensor,
+                 places: torch.Tensor, cells: torch.Tensor) -> None:
         self.mesh, self.body, self.seen, self.segment, self.things = mesh.float(), body, seen, segment, things.float()
-        self.moves = moves
+        self.moves, self.turns, self.places, self.cells = moves, turns.float(), places.float(), cells
         V = max(len(body), 1)
         self.bar_keys = torch.cat([bars[:, 0] * V + bars[:, 1], bars[:, 1] * V + bars[:, 0]]) if len(bars) else bars.new_zeros(0)
-        # Each imagined point's corner, in the order the points are imagined, and the objects imagined so far.
-        self.corner = torch.zeros(0, dtype=torch.long, device=mesh.device)
+        # The objects imagined so far.
         self.claimed: set[int] = set()
+
+    @classmethod
+    def of(cls, b: dict) -> "Answer":
+        """The answer of the one clip in batch `b` (`ClipDataset`'s)."""
+        return cls(*(b[k][0] for k in ("mesh", "mesh_body", "mesh_seen", "segment", "things", "moves", "mesh_bars",
+                                        "turns", "places", "cell_object")))
+
+    def track(self, t: int, cells: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
+        """(T, M, 3) where points given in frame `t` at `at` (M, 3), on the depth cells `cells` (M,), truly are
+        in every frame: each moves with the object its cell shows (a point on a rigid object moves exactly as
+        it does; the floor stays)."""
+        thing = self.cells[t].flatten()[cells].clamp(0, len(self.turns) - 1)
+        turn, place = self.turns[thing], self.places[thing]                                   # (M, T, 3, 3), (M, T, 3)
+        local = (turn[:, t].transpose(-1, -2) @ (at.float() - place[:, t])[..., None])          # (M, 3, 1)
+        return ((turn @ local[:, None])[..., 0] + place).transpose(0, 1)
 
     def match(self, seed: int, t: int, at: torch.Tensor) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
         """A body imagines points at `at` (M, 3) in frame `t`; `seed` is the point the body is formed about.
@@ -46,9 +63,7 @@ class Answer:
         mine = torch.nonzero(self.body == thing)[:, 0] if thing not in self.claimed else self.body[:0]
         self.claimed.add(thing)
         slot, corner = linear_sum_assignment(torch.cdist(at.float(), self.mesh[t, mine]).cpu().numpy())
-        slot, corner = torch.as_tensor(slot, device=at.device), mine[torch.as_tensor(corner, device=at.device)]
-        self.corner = torch.cat([self.corner, corner])
-        return slot, corner
+        return torch.as_tensor(slot, device=at.device), mine[torch.as_tensor(corner, device=at.device)]
 
     def known(self, seed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """What Kubric says of the object of each body formed about the points `seed` (K,): (K, KNOWN), and
@@ -80,10 +95,4 @@ class Answer:
             out[cell_of(uv[inside], h, w)] = True
         return out
 
-    def at(self, t: int, n: int) -> torch.Tensor:
-        """(n, 3) where the first `n` imagined points truly are in frame `t`."""
-        return self.mesh[t, self.corner[:n]]
 
-    def shown(self, t: int, n: int) -> torch.Tensor:
-        """(n,) which of the first `n` imagined points frame `t` truly sees."""
-        return self.seen[t, self.corner[:n]]

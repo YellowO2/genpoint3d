@@ -20,7 +20,7 @@ How it runs:
 
 The model is offered these to learn to use; nothing is enforced on its answer.
 
-Not built yet: the bars, the model choosing its own points, an asked point read off its body's walls, the light. Until the bars are, the model says where two bodies touch and how far they hold and grip there.
+Not built yet: the engine using the bars (they are said and kept, between imagined points), points a frame gives taught as mesh corners in training (the model chooses where to add only at test so far), an asked point read off its body's walls (the same as its place on the body while bodies are rigid), the light. Until the engine uses the bars, the model says where two bodies touch and how far they hold and grip there.
 
 ## Later
 

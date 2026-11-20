@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import id_cards
-from genpoint3d.tools.kubric_models import CELLS, SHAPE_TOL, answer, floor, moves, things
+from genpoint3d.tools.kubric_models import CELLS, SHAPE_TOL, answer, floor, moves, poses, things
 from genpoint3d.NormStats import NormStats
 from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH_SPREAD, RADIUS, REACH, SCENE_SCALE,
                                          TRAJ_SCALE_DISP)
@@ -136,7 +136,7 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
-        mesh, mesh_body, mesh_bars, mesh_seen, said_of, free = _answer(clip, self.objects, self.assets, self.slots, depth)
+        mesh, mesh_body, mesh_bars, mesh_seen, said_of, free, turn, place, cell_object = _answer(clip, self.objects, self.assets, self.slots, depth)
         # Features stay fp16 until `to_device`.
         ctx = clip.context
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
@@ -176,6 +176,9 @@ class ClipDataset(Dataset):
             "things": said_of,
             # (O,) the objects known free to move (`kubric_models.moves`); the floor is fixed.
             "moves": free,
+            # (O + 1, T, 3, 3), (O + 1, T, 3) each object's turn and origin in every frame, the floor first (still),
+            # in the clip's unit (`kubric_models.poses`); (T, h, w) the object each depth cell shows, 0 the floor.
+            "turns": turn, "places": torch.cat([place[:1], n.apply(place[1:])]) if len(place) else place, "cell_object": cell_object,
         }
 
     @staticmethod
@@ -204,8 +207,10 @@ def _answer(clip: CachedClip, objects: Path | None, assets: Path | None, slots: 
     the frame and no deeper than the surface shown at its cell (`depth` (T, h, w)) by more than SHAPE_TOL;
     what Kubric says of each object (`kubric_models.things`), and which move. With no `slots`, or a clip whose
     objects are not known, no corners and no objects."""
-    none = (torch.zeros(clip.traj.shape[0], 0, 3), torch.zeros(0, dtype=torch.long), torch.zeros(0, 2, dtype=torch.long),
-            torch.zeros(clip.traj.shape[0], 0, dtype=torch.bool), torch.zeros(0, 7), torch.zeros(0, dtype=torch.bool))
+    T = clip.traj.shape[0]
+    none = (torch.zeros(T, 0, 3), torch.zeros(0, dtype=torch.long), torch.zeros(0, 2, dtype=torch.long),
+            torch.zeros(T, 0, dtype=torch.bool), torch.zeros(0, 7), torch.zeros(0, dtype=torch.bool),
+            torch.zeros(0, T, 3, 3), torch.zeros(0, T, 3), torch.zeros(T, *depth.shape[1:], dtype=torch.long))
     T = clip.traj.shape[0]
     o = objects / f"{clip.seq_id}.npz" if slots and objects is not None else None
     if o is None or not o.exists() or not depth.numel():
@@ -229,8 +234,13 @@ def _answer(clip: CachedClip, objects: Path | None, assets: Path | None, slots: 
     inside = (z > 0) & (u >= 0) & (u < 1) & (v >= 0) & (v < 1)
     cell = (v * h).long().clamp(0, h - 1) * w + (u * w).long().clamp(0, w - 1)
     shown = depth.flatten(1).float().gather(1, cell)
+    turn, place = (torch.from_numpy(x).float() for x in poses(o))
+    turn = torch.cat([torch.eye(3).expand(1, T, 3, 3), turn])
+    place = torch.cat([torch.zeros(1, T, 3), place])
+    seg = torch.from_numpy(o["seg"]).float()
+    cell_object = torch.nn.functional.interpolate(seg[None], size=(h, w), mode="nearest")[0].long() if len(seg) == T else none[-1]
     return (mesh, body.long(), bars.long(), inside & (z <= shown + SHAPE_TOL), torch.from_numpy(things(o, assets)),
-            torch.from_numpy(moves(o)))
+            torch.from_numpy(moves(o)), turn, place, cell_object)
 
 
 def _clip_unit(depth: torch.Tensor, clip: CachedClip) -> torch.Tensor:

@@ -19,7 +19,12 @@ points, all sides, which a body first found imagines from it
 (`WorldModel.imagine`); from the next frame those are the world's as any other
 point, each put right every frame by what the model then knows.
 With the clip's `Answer` (training) the points kept are the true ones; without
-it, those the model says are there."""
+it, those the model says are there.
+
+Where a frame seen whole shows surface the world has no point for, the model
+says so (`WorldModel.select`) and `add` puts points there. In training every
+point beyond the clip's own is taught: an imagined one as its corner of the
+answer, an added one as the object its cell shows moves (`Answer.track`)."""
 
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -89,10 +94,12 @@ class Tracker:
     `groups`, `down` and `arrow` then hold the clip as the world has it, each
     frame's visibility logits, each point's last group vector, which way is
     down and each frame's arrows. With `add`, points are added as the clip
-    goes: before a frame is looked at, `add(t, pos, alive)` gives the ones to
-    add there (`score.Adder`), after the clip's own. A model that imagines
-    (`slots`) adds each new body's imagined points after those, the true ones
-    by `answer`."""
+    goes: before a frame seen whole is looked at, `add` (`score.Adder`) gives
+    the ones to add there from where the model says the world needs a point,
+    after the clip's own. A model that imagines (`slots`) adds each new body's
+    imagined points after those, the true ones by `answer`. With `answer`,
+    `truth` (T, M, 3) holds where each point beyond the clip's own truly is,
+    and `truth_shown` (T, M) whether a frame sees it where `shown_known` (M,)."""
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, rounds: int, cond: dict,
                  add: Optional[Callable] = None, answer: Optional[Answer] = None) -> None:
@@ -111,6 +118,9 @@ class Tracker:
         # Each body's description, as last put right, and what the model last knew of each point.
         self.what = torch.zeros(0, model.dim, device=anchor.device)
         self.h = torch.zeros(N, model.dim, device=anchor.device)
+        self.truth = torch.zeros(T, 0, 3, device=anchor.device)
+        self.truth_shown = torch.zeros(T, 0, dtype=torch.bool, device=anchor.device)
+        self.shown_known = torch.zeros(0, dtype=torch.bool, device=anchor.device)
         self.rays = _rays(self.cond, anchor)
         # Which way is down: as told, else as the model last said once it has.
         self.told = cond["down_known"]
@@ -177,14 +187,25 @@ class Tracker:
         self.groups, self.known = more(self.groups), more(self.known)
         self.h = more(self.h[None])[0]
 
-    def _added(self, t: int) -> None:
-        """The points `add` gives for frame `t`, put after the clip's others: each given there. It is shown every
-        point the world has there, and which a frame gave (the imagined take none of its room)."""
-        new = self.add(t, self.world.pos[t], self.world.alive(t), ~self.world.imagined)
+    def _teach(self, truth: torch.Tensor, shown: Optional[torch.Tensor]) -> None:
+        """Where the points just added beyond the clip's own truly are, (T, M, 3), and whether each frame sees
+        them, (T, M), None where that is not known."""
+        known = shown is not None
+        shown = shown if known else torch.zeros(truth.shape[:2], dtype=torch.bool, device=truth.device)
+        self.truth, self.truth_shown = torch.cat([self.truth, truth.float()], 1), torch.cat([self.truth_shown, shown], 1)
+        self.shown_known = torch.cat([self.shown_known, torch.full((truth.shape[1],), known, device=truth.device)])
+
+    def _added(self, t: int, logits: torch.Tensor, cover: torch.Tensor) -> None:
+        """The points `add` gives for frame `t` from where the model says the world needs one, put after the
+        clip's others: each given there (the imagined take none of its room)."""
+        new = self.add(t, logits, cover, int((~self.world.imagined).sum()))
         if new is None:
             return
-        self._more(t, *new)
-        self.world.add(new[0], t)
+        at, card, cells = new
+        self._more(t, at, card)
+        self.world.add(at, t)
+        if self.answer is not None:
+            self._teach(self.answer.track(t, cells, at), None)
 
     def _imagined(self, t: int, what: torch.Tensor, idx: torch.Tensor) -> list[Born]:
         """Frame `t` stored, each body first found in it imagines the whole of its points (`WorldModel.imagine`)
@@ -222,6 +243,8 @@ class Tracker:
                 bars = order[pairs[joined > 0]]
                 self._more(t, new, torch.zeros(len(kept), self.cond["id_card"].shape[-1], device=new.device))
                 w.imagine(k, new, t, bars[(bars >= 0).all(-1)])
+                if self.answer is not None:
+                    self._teach(self.answer.mesh[:, corner], self.answer.seen[:, corner])
         return born
 
     def _as_body(self) -> None:
@@ -234,8 +257,20 @@ class Tracker:
         m, w, dev = self.model, self.world, self.anchor.device
         view = self.cond["visual_mask"]
         for t in range(self.T):
-            if self.add is not None:
-                self._added(t)
+            select = needed = None
+            if m.slots and view[0, t].all() and (self.add is not None or self.answer is not None) and w.alive(t).any():
+                # Where the frame needs a new point, from the world as the engine has it: taught by the answer,
+                # and points added there.
+                proj, fmap = self.cond["fine_proj"][0, t], self.cond["fine_map"][0, t]
+                xyz = self.cond["fine_xyz"][0, t].flatten(1).T
+                with torch.no_grad():
+                    depth = project(xyz.float()[None, None], proj.float()[None, None])[1][0, 0].view(fmap.shape[1:])
+                    cover = covered(w.pos[t][w.alive(t)], proj, depth)
+                select = m.select(fmap, cover)
+                if self.answer is not None:
+                    needed = self.answer.corners_seen(t, proj, *fmap.shape[1:]) & ~cover.flatten()
+                if self.add is not None:
+                    self._added(t, select.detach(), cover)
             N, q = self.anchor.shape[1], self.cond["query_t"]
             alive = w.alive(t)
             idx = torch.nonzero(alive)[:, 0]
@@ -248,16 +283,6 @@ class Tracker:
                         self._ahead(t, self.h[idx], idx, self.what)
                 continue
             anchor = self.anchor[:, idx]
-            select = needed = None
-            if self.answer is not None and m.slots and view[0, t].all():
-                # Where the frame needs a new point, from the world as the engine has it, taught by the answer.
-                proj, fmap = self.cond["fine_proj"][0, t], self.cond["fine_map"][0, t]
-                xyz = self.cond["fine_xyz"][0, t].flatten(1).T
-                with torch.no_grad():
-                    depth = project(xyz.float()[None, None], proj.float()[None, None])[1][0, 0].view(fmap.shape[1:])
-                    cover = covered(w.pos[t][alive], proj, depth)
-                select = m.select(fmap, cover)
-                needed = self.answer.corners_seen(t, proj, *fmap.shape[1:]) & ~cover.flatten()
             # What the world has of the frame: the engine's, or a point just given where it is given.
             start = self._guess(w.pos[t])
             before = self._guess(w.pos[max(t - 1, 0)])[idx][None]
@@ -371,7 +396,7 @@ def track_loss(
     run = Tracker(model, anchor, x1.shape[1], rounds, cond, add, answer)
     own = x1.shape[2]
     shown = whole_frames(run.cond["visual_mask"])[0]
-    to_guess = lambda at, n: ((at - run.anchor[0, own:own + n].float()) / model.traj_scale)[None]
+    to_guess = lambda at: ((at - run.anchor[0, own:own + at.shape[0]].float()) / model.traj_scale)[None]
     w = [ROUND_DECAY ** (rounds - 1 - i) for i in range(rounds)]
     w = [v / sum(w) for v in w]
     share = 1 / x1.shape[1]
@@ -402,13 +427,15 @@ def track_loss(
             vis_loss = share * w[r.i] * visibility_error(r.logits[:, None], visible[:, r.t:r.t + 1], keep)
         n = every.g.shape[1] - own
         if imagine_weight and answer is not None and n:
-            all_n = torch.ones(1, n, dtype=torch.bool, device=x1.device)
-            loss = loss + w[r.i] * imagine_weight * _error(every.g[:, own:], to_guess(answer.at(r.t, n), n), all_n, None)
+            # The points looked at: those imagined after the frame's last round join from the next frame.
+            truth, seen_true, known = run.truth[:, :n], run.truth_shown[:, :n], run.shown_known[:n]
+            there = every.alive[None, own:]
+            loss = loss + w[r.i] * imagine_weight * _error(every.g[:, own:], to_guess(truth[r.t]), there, None)
             if ahead_weight and every.ahead is not None:
-                loss = loss + ahead_weight * imagine_weight * _error(every.ahead[:, own:], to_guess(answer.at(r.t + 1, n), n), all_n, None)
+                loss = loss + ahead_weight * imagine_weight * _error(every.ahead[:, own:], to_guess(truth[r.t + 1]), there, None)
             if visible is not None:
                 vis_loss = vis_loss + share * w[r.i] * imagine_weight * visibility_error(
-                    every.logits[:, None, own:], (answer.shown(r.t, n) & shown[r.t])[None, None], all_n)
+                    every.logits[:, None, own:], (seen_true[r.t] & shown[r.t])[None, None], there & known[None])
         if imagine_weight and answer is not None:
             for b in every.born:
                 true = torch.zeros_like(b.there)

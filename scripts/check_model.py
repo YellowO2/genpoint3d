@@ -218,7 +218,8 @@ from genpoint3d.train.tools.imagine import Answer
 from genpoint3d.train.tools.track import track_loss
 
 corners = torch.randn(4, 3) * 0.2 + torch.tensor([0, 0, 3.0])
-one = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7), torch.ones(1, dtype=torch.bool), torch.tensor([[0, 1], [1, 2]]))
+one = Answer(corners[None], torch.ones(4, dtype=torch.long), torch.ones(1, 4, dtype=torch.bool), torch.ones(3, dtype=torch.long), torch.zeros(1, 7), torch.ones(1, dtype=torch.bool), torch.tensor([[0, 1], [1, 2]]),
+             torch.eye(3).expand(2, 1, 3, 3), torch.zeros(2, 1, 3), torch.ones(1, 4, 4, dtype=torch.long))
 hit = one.match(0, 0, torch.cat([corners[[2, 0, 3, 1]] + 0.01, torch.full((2, 3), 9.0)]))
 print(f"imagine: six imagined points, four at the answer's corners shuffled: kept {hit[0].tolist()} as corners {hit[1].tolist()} "
       f"(want [0, 1, 2, 3] as [2, 0, 3, 1])")
@@ -244,6 +245,9 @@ b["mesh"] = (corners[None] + torch.randn(T, 1, 3) * 0.05)[None]
 b["mesh_body"], b["mesh_seen"], b["things"] = torch.ones(B, 4, dtype=torch.long), torch.rand(B, T, 4) > 0.5, torch.randn(B, 1, 7)
 b["moves"] = torch.ones(B, 1, dtype=torch.bool)
 b["mesh_bars"] = torch.tensor([[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]])           # four corners, every two joined
+b["turns"], b["places"] = torch.eye(3).expand(B, 2, T, 3, 3).clone(), torch.zeros(B, 2, T, 3)     # the floor and one still object
+b["cell_object"] = torch.ones(B, T, R // 4, R // 4, dtype=torch.long)
+s.points = N + 8
 s.imagine, s.imagine_loss, s.known_loss = 6, 1.0, 1.0
 m.train()
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
@@ -252,14 +256,22 @@ bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.is
 print(f"  loss {losses.method:.4f}; the imagining weights without gradient: {dead} (want none), with a non-finite one: {len(bad)} (want 0)")
 bd = to_device(b, torch.device("cpu"))
 fi = fine_inputs(m, bd)
-answer = Answer(bd["mesh"][0], bd["mesh_body"][0], bd["mesh_seen"][0], bd["segment"][0], bd["things"][0], bd["moves"][0], bd["mesh_bars"][0])
+answer = Answer.of(bd)
 with torch.no_grad():
     out = track_loss(m, bd["traj"], bd["anchor"], mask=bd["visibility"], rounds=2, answer=answer, imagine_weight=1.0, context=bd["context"],
                      visual_mask=whole, id_card=bd["id_card"], patch_xyz=bd["patch_xyz"], **fi)[1]
 w = out["world"]
-print(f"  the world has {int(w.imagined.sum())} imagined points (want 4) on body {w.body[w.imagined].tolist()}, each a corner "
-      f"{answer.corner.tolist()}, {len(w.bars)} bars among them (at most 6, each between two of them: "
+print(f"  the world has {int(w.imagined.sum())} imagined points (want 4) on body {w.body[w.imagined].tolist()}, "
+      f"{len(w.bars)} bars among them (at most 6, each between two of them: "
       f"{bool(w.imagined[w.bars].all()) if len(w.bars) else True}); the clip's own tracks {tuple(out['tracks'].shape)} (want {(B, T, N, 3)})")
+
+moving = Answer.of(bd)
+moving.turns = torch.eye(3).expand(2, T, 3, 3).clone()
+moving.places = torch.zeros(2, T, 3)
+moving.places[1] = torch.arange(T)[:, None] * torch.tensor([0.1, 0.0, 0.0])                     # object 1 slides along x
+path = moving.track(3, torch.tensor([0, 5]), torch.tensor([[0.0, 0.0, 3.0], [1.0, 1.0, 3.0]]))
+print(f"  a point added in frame 3 on a sliding object: at frame 0 x {float(path[0, 0, 0]):.2f}, at 10 x {float(path[10, 0, 0]):.2f} "
+      f"(want -0.30, 0.70)")
 from genpoint3d.train.score.shape_scores import shape_scores
 
 print("  the shapes' scores: " + ", ".join(f"{k} {float(v):.2f}" for k, v in shape_scores(bd, w, whole, m.known(out["what"])).items()))

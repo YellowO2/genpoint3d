@@ -15,25 +15,28 @@ class Loaders:
 
     def __init__(self, clips: Clips, settings, rank: int = 0, world: int = 1) -> None:
         how_data = dict(frames=clips.frames, asked=settings.asked, spawn_gap=settings.spawn_gap)
+        served = settings.points
         if getattr(settings, "imagine", 0):
+            # Only the asked points are served: the model adds the rest as the clip goes.
             how_data.update(objects=Path(settings.objects).expanduser(), assets=Path(settings.assets).expanduser(),
-                            slots=settings.imagine)
+                            slots=settings.imagine, asked=0)
+            served = settings.asked
         drawn = (dict(sampler=WeightedRandomSampler(clips.weights, len(clips.train)))
                  if clips.weights else dict(shuffle=True))
         self.train = DataLoader(
-            ClipDataset(clips.train, settings.points, view=(settings.min_context, settings.max_gap), **how_data),
+            ClipDataset(clips.train, served, view=(settings.min_context, settings.max_gap), **how_data),
             batch_size=settings.batch, num_workers=settings.workers, **drawn,
             drop_last=True, persistent_workers=settings.workers > 0,
         )
         self.val = DataLoader(
             # Each process scores its own share of the clips.
-            ClipDataset(clips.val[rank::world], settings.points, resample=False, query_before=settings.eval_cutoff,
+            ClipDataset(clips.val[rank::world], served, resample=False, query_before=settings.eval_cutoff,
                         **how_data),
             batch_size=settings.batch, shuffle=False, num_workers=settings.workers,
         )
         # Exactly as val is scored, on train clips.
         self.fit = DataLoader(
-            ClipDataset(clips.train[: settings.train_eval][rank::world], settings.points, resample=False,
+            ClipDataset(clips.train[: settings.train_eval][rank::world], served, resample=False,
                         query_before=settings.eval_cutoff, **how_data),
             batch_size=settings.batch, shuffle=False, num_workers=settings.workers,
         ) if settings.train_eval else None

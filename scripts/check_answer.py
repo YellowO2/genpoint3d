@@ -27,7 +27,7 @@ files = sorted(Path(args.cache).expanduser().glob("*.pt"))
 files = files[:: max(len(files) // args.clips, 1)][: args.clips]
 data = ClipDataset(files, 10 ** 6, resample=False, frames=Path(args.frames).expanduser(), objects=Path(args.objects).expanduser(),
                    assets=Path(args.assets).expanduser(), slots=args.slots)
-off, count, seen, never, bars, level = [], [], [], [], [], []
+off, count, seen, never, bars, level, by_pose = [], [], [], [], [], [], []
 for i, f in enumerate(files):
     b = data[i]
     mesh, of, shown = b["mesh"], b["mesh_body"], b["mesh_seen"]
@@ -48,6 +48,15 @@ for i, f in enumerate(files):
         up = torch.nn.functional.normalize(torch.linalg.cross(a1 - a0, a2 - a0), dim=0)
         ground = pos[:, b["segment"] == 0].reshape(-1, 3)
         level.append(((ground - a0) @ up).abs() * float(b["norm_scale"]))        # metres
+    # A point moved with its object's pose from its query frame (`Answer.track`'s rule) against its own track.
+    seg, q = b["segment"], b["query_t"]
+    on = (seg >= 0) & (seg < len(b["turns"]))
+    k, n = seg[on], torch.arange(len(seg))[on]
+    turn, place = b["turns"][k], b["places"][k]                                         # (n, T, 3, 3), (n, T, 3)
+    start = pos[q[on], n]
+    local = turn[torch.arange(len(n)), q[on]].transpose(-1, -2) @ (start - place[torch.arange(len(n)), q[on]])[..., None]
+    moved = ((turn @ local[:, None])[..., 0] + place).transpose(0, 1)                  # (T, n, 3)
+    by_pose.append((moved - pos[:, n]).norm(dim=-1).flatten() * float(b["norm_scale"]))
     seen.append(shown.float().mean())
     never.append((~shown.any(0)).float().mean())
     bars.append(len(b["mesh_bars"]) / len(of))
@@ -61,6 +70,9 @@ print(f"=== {len(seen)} clips: corners an object, median {int(count.median())}, 
       f"object's nearest corner: median {float(off.median()):.3f} of the object's size, 90% under {float(off.quantile(0.9)):.3f}, "
       f"99% under {float(off.quantile(0.99)):.3f}; a frame sees {float(torch.stack(seen).mean()):.0%} of the corners, "
       f"{float(torch.stack(never).mean()):.0%} are never seen ===", flush=True)
+by_pose = torch.cat(by_pose)
+print(f"=== a track moved with its object's pose from its query frame, against the track itself, cm: median "
+      f"{float(by_pose.median()) * 100:.2f}, 90% under {float(by_pose.quantile(0.9)) * 100:.2f}, 99% under {float(by_pose.quantile(0.99)) * 100:.2f} ===", flush=True)
 level = torch.cat(level)
 print(f"=== the floor's points from the floor's four corners' plane, cm: median {float(level.median()) * 100:.1f}, 90% under "
       f"{float(level.quantile(0.9)) * 100:.1f} (the floor is flat: a few cm is depth's own) ===", flush=True)

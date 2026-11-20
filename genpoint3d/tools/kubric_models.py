@@ -105,6 +105,17 @@ def moves(o) -> np.ndarray:
     return (np.linalg.norm(p - p[:, :1], axis=-1).max(1) > MOVED) if len(p) else np.zeros(0, bool)
 
 
+def poses(o) -> tuple[np.ndarray, np.ndarray]:
+    """Each of a clip's objects `o` in every frame, seen from the first frame's camera, in metres: its turn
+    (O, T, 3, 3) and the place of its origin (O, T, 3), so a point on it at `x` in frame s is at
+    turn[t] @ turn[s].T @ (x - place[s]) + place[t] in frame t."""
+    turn0, at0 = turns(o["camera_quaternions"][0].astype(np.float64)), o["camera_positions"][0].astype(np.float64)
+    to_cam = FLIP @ turn0.T
+    turn = np.einsum("ij,otjk->otik", to_cam, turns(o["quaternions"].astype(np.float64)))
+    place = (o["positions"].astype(np.float64) - at0) @ to_cam.T
+    return turn, place
+
+
 def floor(o, ground: np.ndarray) -> np.ndarray:
     """(4, 3) the floor as a game's flat body: the corners of the rectangle on Kubric's floor (z = 0) that holds
     `ground` (P, 3), the clip's floor points in metres seen from its first frame's camera, in that camera."""

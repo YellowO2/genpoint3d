@@ -8,4 +8,5 @@ def validation_settings(settings, hardware: Hardware) -> ScoreSettings:
     """The run's own refinement and cutoff, the scoring defaults otherwise."""
     return ScoreSettings(device=hardware.device, amp=hardware.amp, window=settings.window, overlap=settings.overlap, schedule=settings.schedule,
                          cutoff=settings.eval_cutoff,
-                         rounds=settings.rounds if settings.world else 0)
+                         rounds=settings.rounds if settings.world else 0,
+                         fill=settings.points if getattr(settings, "imagine", 0) else 0)
