@@ -5,6 +5,9 @@ from typing import Optional
 import torch
 from scipy.optimize import linear_sum_assignment
 
+from genpoint3d.train.tools.camera import project
+from genpoint3d.train.tools.select import cell_of
+
 
 class Answer:
     """What a clip's stored world should come to be (`kubric_models.answer`), for training. A body's points
@@ -66,6 +69,16 @@ class Answer:
     def joined(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         """(P,) whether corners `a` and `b` (P,) are joined by a bar."""
         return torch.isin(a * max(len(self.body), 1) + b, self.bar_keys)
+
+    def corners_seen(self, t: int, proj: torch.Tensor, h: int, w: int) -> torch.Tensor:
+        """(h * w,) the cells of frame `t` (drawn by `proj` (3, 4)) that show a corner of the answer."""
+        out = torch.zeros(h * w, dtype=torch.bool, device=self.mesh.device)
+        shown = self.mesh[t, self.seen[t]]
+        if len(shown):
+            uv, z = (x[0, 0] for x in project(shown[None, None], proj.float()[None, None]))
+            inside = (uv >= 0).all(-1) & (uv < 1).all(-1) & (z > 0)
+            out[cell_of(uv[inside], h, w)] = True
+        return out
 
     def at(self, t: int, n: int) -> torch.Tensor:
         """(n, 3) where the first `n` imagined points truly are in frame `t`."""

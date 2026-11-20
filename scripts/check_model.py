@@ -121,7 +121,7 @@ for kw, sched in ((dict(), "ff"), (full, "fbfb"), (full, "ffbb")):
 from genpoint3d.train.model.WorldModel import WorldModel
 from genpoint3d.train.tools.track import track
 
-m = WorldModel(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, group_dim=4, patch=4)
+m = WorldModel(dim=32, depth=1, num_heads=2, mlp_mult=2, feat_dim=F, cross_window=4, fine_neigh=4, group_dim=4, patch=4, slots=4)
 with torch.no_grad():
     for p in m.parameters():
         p.add_(torch.randn_like(p) * 0.05)
@@ -133,7 +133,7 @@ b["traj"][:, :, :3] = b["traj"][:, :, :1]                 # three points that mo
 b["segment"] = torch.tensor([[0, 0, 0, 1, 1, 1]])
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
 dead = [n for n, p in m.named_parameters() if (p.grad is None or p.grad.abs().sum() == 0)
-        and not n.startswith(("pair", "touch_out", "what", "known", "of_body"))]   # the touches' and the bodies' weights: checked below, where there are bodies
+        and not n.startswith(("pair", "touch_out", "what", "known", "of_body", "slot", "bar_out", "select_out", "imagined_in"))]   # the touches' and the bodies' weights: checked below, where there are bodies
 bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
 print(f"world: loss {losses.method:.4f} vis {losses.visibility:.4f}, params without gradient: {dead}, "
       f"with a non-finite one: {len(bad)} {bad[:3]} (want 0)")
@@ -145,13 +145,16 @@ print(f"  {len({**track_scores(pred, j), **visibility_scores(pred)})} scores")
 js = ScoreSettings(device=torch.device("cpu"), rounds=2, cutoff=6, fill=N + 8, spawn_gap=0.02)
 print(f"  with points added: tracks {tuple(Predictor(m, js)(b).tracks.shape)} (want {tuple(pred.tracks.shape)})")
 from genpoint3d.train.score.Adder import Adder
+
+with torch.no_grad():
+    m.select_out[-1].bias.fill_(10.0)          # the model says every cell needs a point: the adder's own rules decide
 from genpoint3d.train.tools.track import Tracker
 
 bd = to_device(b, torch.device("cpu"))
 whole = torch.ones(B, T, 2, 2, dtype=torch.bool)
 fi = fine_inputs(m, bd)
 run = Tracker(m, bd["anchor"], T, 2, dict(context=bd["context"], visual_mask=whole, id_card=bd["id_card"],
-                                          patch_xyz=bd["patch_xyz"], **fi), Adder(bd, fi, whole, N + 8, 0.02))
+                                          patch_xyz=bd["patch_xyz"], **fi), Adder(m, bd, fi, whole, N + 8))
 with torch.no_grad():
     for _ in run:
         pass
@@ -244,7 +247,7 @@ b["mesh_bars"] = torch.tensor([[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]]
 s.imagine, s.imagine_loss, s.known_loss = 6, 1.0, 1.0
 m.train()
 losses = learn(m, b, s, Hardware(torch.device("cpu"), False))
-dead = [n for n, p in m.named_parameters() if n.startswith(("slot", "bar_out", "imagined_in", "what", "known", "of_body")) and (p.grad is None or p.grad.abs().sum() == 0)]
+dead = [n for n, p in m.named_parameters() if n.startswith(("slot", "bar_out", "select_out", "imagined_in", "what", "known", "of_body")) and (p.grad is None or p.grad.abs().sum() == 0)]
 bad = [n for n, p in m.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
 print(f"  loss {losses.method:.4f}; the imagining weights without gradient: {dead} (want none), with a non-finite one: {len(bad)} (want 0)")
 bd = to_device(b, torch.device("cpu"))

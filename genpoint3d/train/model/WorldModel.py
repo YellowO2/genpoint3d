@@ -133,6 +133,9 @@ class WorldModel(nn.Module):
             self.slot_out = zero_init(nn.Linear(dim, 4), almost=False)
             # Two imagined points joined or not: from both (alike either way round) and how far apart they are.
             self.bar_out = nn.Sequential(nn.Linear(2 * dim + 99, dim), nn.GELU(), nn.Linear(dim, 1))
+            # Where a frame needs a new point (`select`): from the CNN's map and the cells the world explains.
+            fine_dim = self.fine.in_norm.normalized_shape[0]
+            self.select_out = nn.Sequential(nn.Conv2d(fine_dim + 1, 64, 3, padding=1), nn.GELU(), nn.Conv2d(64, 1, 1))
             # A point imagined, not given by a frame: it has no look to be found by.
             self.imagined_in = nn.Parameter(torch.zeros(dim))
         self.pair = nn.Sequential(nn.Linear(2 * dim + 3 * 99, dim), nn.GELU(), nn.Linear(dim, dim + 1))
@@ -276,6 +279,13 @@ class WorldModel(nn.Module):
         x = self.slot_mid(torch.cat([self.slot, what.to(self.slot.dtype).expand_as(self.slot)], -1))
         out = self.slot_out(x).float()
         return self.slot_home.float() + out[:, :3], out[:, 3], x
+
+    def select(self, fmap: torch.Tensor, covered: torch.Tensor) -> torch.Tensor:
+        """(h * w,) logits: does each cell of a frame show a corner of a body's mesh that the stored world has no
+        point for, from the CNN's map of the frame `fmap` (C, h, w) and the cells its points explain `covered`
+        (h, w, `tools.select.covered`)."""
+        x = torch.cat([fmap, covered[None].to(fmap.dtype)])[None]
+        return self.select_out(x)[0, 0].flatten().float()
 
     def bars(self, x: torch.Tensor, at: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
         """(P,) logits: is each pair of a body's imagined points `pairs` (P, 2) joined by a bar, from what the

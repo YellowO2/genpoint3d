@@ -43,7 +43,7 @@ class Predictor:
         add = None
         if j.fill and j.rounds:
             # The stored world adds its points as the clip goes.
-            add = Adder(b, fine, vm, j.fill, j.spawn_gap)
+            add = Adder(model, b, fine, vm, j.fill)
         elif j.fill:
             b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, fine, vm)[1]))

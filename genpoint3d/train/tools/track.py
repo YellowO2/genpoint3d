@@ -32,8 +32,10 @@ from genpoint3d.train.tools.engine import pulled
 from genpoint3d.train.tools.farthest_first import GAP, UNIT
 from genpoint3d.train.tools.imagine import Answer
 from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS
+from genpoint3d.train.tools.select import covered
 from genpoint3d.train.tools.regress import _angle, _clock, _corrected, _error, _group_error, _handed_over, _rays, _rigid_error
 from genpoint3d.train.tools.batch import whole_frames
+from genpoint3d.train.tools.camera import project
 from genpoint3d.train.tools.visibility import visibility_error
 from genpoint3d.train.tools.world import World
 
@@ -72,12 +74,14 @@ class Look:
     known: Optional[torch.Tensor] = None   # (K, KNOWN) what the bodies' descriptions say of their objects, after the frame's last round
     seed: Optional[torch.Tensor] = None    # (K,) the point each of those bodies is formed about
     free: Optional[torch.Tensor] = None    # (K,) how free each body is to move, from its description
+    select: Optional[torch.Tensor] = None  # (h * w,) where the frame needs a new point (`WorldModel.select`), with the clip's `Answer`
+    needed: Optional[torch.Tensor] = None  # (h * w,) where it truly does: a corner of the answer seen there, no stored point near
 
     def first(self, n: int) -> "Look":
         """The look at the clip's first `n` points: those it came with, not the ones added since."""
         cut = lambda x: None if x is None else x[:, :n]
         return Look(self.t, self.i, self.alive[:n], cut(self.g), cut(self.logits), cut(self.groups), self.down, cut(self.arrow),
-                    cut(self.ahead), self.born, self.known, self.seed, self.free)
+                    cut(self.ahead), self.born, self.known, self.seed, self.free, self.select, self.needed)
 
 
 class Tracker:
@@ -174,10 +178,9 @@ class Tracker:
         self.h = more(self.h[None])[0]
 
     def _added(self, t: int) -> None:
-        """The points `add` gives for frame `t`, put after the clip's others: each given there. It is shown the
-        points frames gave, not the imagined ones: those have no look, and take none of its room."""
-        real = ~self.world.imagined
-        new = self.add(t, self.world.pos[t][real], self.world.alive(t)[real])
+        """The points `add` gives for frame `t`, put after the clip's others: each given there. It is shown every
+        point the world has there, and which a frame gave (the imagined take none of its room)."""
+        new = self.add(t, self.world.pos[t], self.world.alive(t), ~self.world.imagined)
         if new is None:
             return
         self._more(t, *new)
@@ -245,6 +248,16 @@ class Tracker:
                         self._ahead(t, self.h[idx], idx, self.what)
                 continue
             anchor = self.anchor[:, idx]
+            select = needed = None
+            if self.answer is not None and m.slots and view[0, t].all():
+                # Where the frame needs a new point, from the world as the engine has it, taught by the answer.
+                proj, fmap = self.cond["fine_proj"][0, t], self.cond["fine_map"][0, t]
+                xyz = self.cond["fine_xyz"][0, t].flatten(1).T
+                with torch.no_grad():
+                    depth = project(xyz.float()[None, None], proj.float()[None, None])[1][0, 0].view(fmap.shape[1:])
+                    cover = covered(w.pos[t][alive], proj, depth)
+                select = m.select(fmap, cover)
+                needed = self.answer.corners_seen(t, proj, *fmap.shape[1:]) & ~cover.flatten()
             # What the world has of the frame: the engine's, or a point just given where it is given.
             start = self._guess(w.pos[t])
             before = self._guess(w.pos[max(t - 1, 0)])[idx][None]
@@ -292,7 +305,8 @@ class Tracker:
                         ahead = self._ahead(t, said.h[0], idx, now)[None]
                     if m.slots:
                         born = self._imagined(t, now, idx)
-                yield Look(t, i, alive, *look, ahead, born, known, seed, free)
+                last = i == self.rounds - 1
+                yield Look(t, i, alive, *look, ahead, born, known, seed, free, select if last else None, needed if last else None)
 
 
 def _balanced(logits: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
@@ -407,6 +421,8 @@ def track_loss(
                 ends = corner[b.pairs]
                 bar = ((ends >= 0).all(-1) & answer.joined(ends[:, 0], ends[:, 1])).float()
                 loss = loss + imagine_weight * _balanced(b.joined, bar)
+        if imagine_weight and every.select is not None:
+            loss = loss + imagine_weight * _balanced(every.select, every.needed.float())
         if known_weight and answer is not None and every.known is not None and len(every.seed):
             true, ok = answer.known(every.seed)
             if ok.any():
