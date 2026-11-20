@@ -8,7 +8,13 @@ from what the model says of the bodies: which are free to move, how heavy, and
 where they touch (`World.ahead`). A frame without its image is looked at the
 same way: the model sees nothing there, and the engine's frame stands unless
 the model knows better. Nothing goes back over a frame: the past changes only
-through the world's bodies."""
+through the world's bodies.
+
+A body first found in a frame imagines the whole of its points there, all
+sides (`WorldModel.imagine`); from the next frame they are the world's as any
+other point, each put right every frame by what the model then knows.
+With the clip's `Answer` (training) the points kept are the true ones; without
+it, those the model says are there."""
 
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -19,7 +25,10 @@ from torch import nn
 from genpoint3d.tools.traj_scale import GRAVITY_REF
 from genpoint3d.train.tools.engine import pulled
 from genpoint3d.train.tools.farthest_first import GAP, UNIT
+from genpoint3d.train.tools.imagine import Answer
+from genpoint3d.train.tools.kabsch import MIN_POSE_POINTS
 from genpoint3d.train.tools.regress import _angle, _clock, _corrected, _error, _group_error, _handed_over, _rays, _rigid_error
+from genpoint3d.train.tools.batch import whole_frames
 from genpoint3d.train.tools.visibility import visibility_error
 from genpoint3d.train.tools.world import World
 
@@ -27,6 +36,15 @@ from genpoint3d.train.tools.world import World
 ROUND_DECAY = 0.8
 # Two bodies may touch where their points are within this many point spacings.
 REACH = 1.5
+
+
+@dataclass
+class Born:
+    """What one body imagined of itself when first found."""
+    at: torch.Tensor                # (M, 3) where, in the clip's unit, with its graph
+    there: torch.Tensor             # (M,) logits: is there such a point
+    kept: torch.Tensor              # (m,) the ones the world then has
+    corner: Optional[torch.Tensor]  # (m,) the answer's corner each of those is, with the clip's `Answer`
 
 
 @dataclass
@@ -41,12 +59,13 @@ class Look:
     down: torch.Tensor              # (1, 3) which way is down
     arrow: torch.Tensor             # (1, N, 3) to each point's body's centre of gravity
     ahead: Optional[torch.Tensor]   # (1, N, 3) the engine's next frame, after the frame's last round (none after the clip's last)
+    born: list                      # what each body first found in the frame imagined, after its last round
 
     def first(self, n: int) -> "Look":
         """The look at the clip's first `n` points: those it came with, not the ones added since."""
         cut = lambda x: None if x is None else x[:, :n]
         return Look(self.t, self.i, self.alive[:n], cut(self.g), cut(self.logits), cut(self.groups), self.down, cut(self.arrow),
-                    cut(self.ahead))
+                    cut(self.ahead), self.born)
 
 
 class Tracker:
@@ -55,13 +74,15 @@ class Tracker:
     frame's visibility logits, each point's last group vector, which way is
     down and each frame's arrows. With `add`, points are added as the clip
     goes: before a frame is looked at, `add(t, pos, alive)` gives the ones to
-    add there (`score.Adder`), after the clip's own."""
+    add there (`score.Adder`), after the clip's own. A model that imagines
+    (`slots`) adds each new body's imagined points after those, the true ones
+    by `answer`."""
 
     def __init__(self, model: nn.Module, anchor: torch.Tensor, T: int, rounds: int, cond: dict,
-                 add: Optional[Callable] = None) -> None:
+                 add: Optional[Callable] = None, answer: Optional[Answer] = None) -> None:
         if anchor.shape[0] != 1:
             raise ValueError("a clip is tracked alone: its points come and go with its own frames")
-        self.model, self.anchor, self.T, self.rounds, self.add = model, anchor, T, rounds, add
+        self.model, self.anchor, self.T, self.rounds, self.add, self.answer = model, anchor, T, rounds, add, answer
         self.cond = dict(cond)
         if self.cond.get("visual_mask") is None:
             self.cond["visual_mask"] = torch.ones(1, T, 2, 2, dtype=torch.bool, device=anchor.device)
@@ -117,12 +138,10 @@ class Tracker:
                                        slide, at, self._fall())
         return self._guess(w.ahead(t, self._fall(), free, heavy, touch))
 
-    def _added(self, t: int) -> None:
-        """The points `add` gives for frame `t`, put after the clip's others: each given there, nothing said of it yet."""
-        new = self.add(t, self.world.pos[t], self.world.alive(t))
-        if new is None:
-            return
-        anchor, card = (x[None] for x in new)
+    def _more(self, t: int, anchor: torch.Tensor, card: torch.Tensor) -> None:
+        """Room for more points after the clip's others, given in frame `t` at `anchor` (M, 3) with the look
+        `card` (M, F): nothing said of them yet."""
+        anchor, card = anchor[None], card[None]
         M, c, dev = anchor.shape[1], self.cond, anchor.device
         more = lambda x, dim=1: torch.cat([x, torch.zeros(*x.shape[:dim], M, *x.shape[dim + 1:], dtype=x.dtype, device=dev)], dim)
         here = torch.full((1, M), t, dtype=torch.long, device=dev)
@@ -131,7 +150,50 @@ class Tracker:
         c["id_card"], c["query_t"] = torch.cat([c["id_card"], card.to(c["id_card"].dtype)], 1), torch.cat([c["query_t"], here], 1)
         self.vis, self.arrow = more(self.vis, 2), more(self.arrow, 2)
         self.groups, self.known = more(self.groups), more(self.known)
-        self.world.add(anchor[0], t)
+
+    def _added(self, t: int) -> None:
+        """The points `add` gives for frame `t`, put after the clip's others: each given there."""
+        new = self.add(t, self.world.pos[t], self.world.alive(t))
+        if new is None:
+            return
+        self._more(t, *new)
+        self.world.add(new[0], t)
+
+    def _imagined(self, t: int, said, idx: torch.Tensor) -> list[Born]:
+        """Frame `t` stored, each body first found in it imagines the whole of its points (`WorldModel.imagine`)
+        from the ones seen of it: about its centre, in its own size, the mean way of those from the centre.
+        The ones kept are the world's from now, with no look: the true ones by the clip's `Answer`, or
+        without it those said to be there."""
+        w, born = self.world, []
+        for k in torch.nonzero(w.first == t)[:, 0].tolist():
+            mine = torch.nonzero((w.body[idx] == k) & ~w.imagined[idx])[:, 0]
+            if len(mine) < MIN_POSE_POINTS:
+                continue
+            with torch.autocast(device_type=idx.device.type, enabled=False):
+                centre = w.centre[t, k]
+                way = w.pos[t, idx[mine]] - centre
+                size = way.norm(dim=-1).mean().clamp_min(1e-6)
+                out, there = self.model.imagine(said.h[0, mine], way / size)
+                at = centre + out * size
+            if self.answer is None:
+                kept, corner = torch.nonzero(there > 0)[:, 0], None
+            else:
+                hit = self.answer.match(int(w.seed[k]), t, at.detach())
+                if hit is None:
+                    continue
+                kept, corner = hit
+            born.append(Born(at, there, kept, corner))
+            if len(kept):
+                new = at[kept].detach()
+                self._more(t, new, torch.zeros(len(kept), self.cond["id_card"].shape[-1], device=new.device))
+                w.imagine(k, new, t)
+        return born
+
+    def _as_body(self) -> None:
+        """An imagined point is fed its body's group vector, its seed's: it is on that body whatever it says."""
+        w = self.world
+        self.groups[0, w.imagined] = self.groups[0, w.seed[w.body[w.imagined]]]
+        self.known[0, w.imagined] = True
 
     def __iter__(self):
         m, w, dev = self.model, self.world, self.anchor.device
@@ -153,6 +215,8 @@ class Tracker:
             seen = torch.zeros(N, device=dev)
             shown = float(view[0, t].any())
             given_now = torch.where(q[:, idx] == t, 0, -1)
+            imagined = w.imagined[idx][None]
+            self._as_body()
             placed = lambda x: w.pos[t].index_copy(0, idx, m.lookup_pos(x.float(), anchor.float())[0])
             for i in range(self.rounds):
                 with torch.no_grad():
@@ -162,7 +226,7 @@ class Tracker:
                     s = support[idx][None, :, None]
                 said = m(g.detach(), before, _clock(i, self.rounds, 1, dev), anchor, t, vis_prev=logits,
                          group_prev=self.groups[:, idx], group_known=self.known[:, idx],
-                         rigid=torch.cat([off * m.traj_scale, s / (s + 1)], -1),
+                         rigid=torch.cat([off * m.traj_scale, s / (s + 1)], -1), imagined=imagined,
                          **{**self.cond, "id_card": self.cond["id_card"][:, idx], "query_t": q[:, idx],
                             "down": self.down, "down_known": self.down_known})
                 self.down = torch.where(self.told[:, None], self.down, said.down.detach())
@@ -171,16 +235,20 @@ class Tracker:
                 g = pulled(own, g.detach() + off, said.stiff)
                 logits = said.logits.detach().float()
                 self.groups[:, idx], self.known[:, idx] = said.groups.detach(), True
+                self._as_body()
                 seen = torch.zeros(N, device=dev).index_copy(0, idx, torch.sigmoid(logits[0]) * shown)
-                ahead = None
+                ahead, born = None, []
+                full = lambda x: torch.zeros(1, N, *x.shape[2:], device=dev).index_copy(1, idx, x.float())
+                look = (start[None].index_copy(1, idx, g.float()), full(said.logits), self.groups.index_copy(1, idx, said.groups),
+                        said.down, full(said.arrow))
                 if i == self.rounds - 1:
                     self.vis[:, t, idx], self.arrow[:, t, idx] = logits, said.arrow.detach().float()
                     w.store(t, placed(g.detach()), seen, self.groups[0], placed(g.detach() + said.arrow.detach()))
                     if t + 1 < self.T:
                         ahead = self._ahead(t, said, idx)[None]
-                full = lambda x: torch.zeros(1, N, *x.shape[2:], device=dev).index_copy(1, idx, x.float())
-                yield Look(t, i, alive, start[None].index_copy(1, idx, g.float()), full(said.logits),
-                           self.groups.index_copy(1, idx, said.groups), said.down, full(said.arrow), ahead)
+                    if m.slots:
+                        born = self._imagined(t, said, idx)
+                yield Look(t, i, alive, *look, ahead, born)
 
 
 def track_loss(
@@ -205,6 +273,8 @@ def track_loss(
     centre_weight: float = 0.0,
     ahead_weight: float = 0.0,
     add: Optional[Callable] = None,
+    answer: Optional[Answer] = None,
+    imagine_weight: float = 0.0,
     **cond,
 ) -> tuple[torch.Tensor, dict]:
     """The loss of every round of every frame against the truth `x1` (1, T, N,
@@ -220,17 +290,24 @@ def track_loss(
     it says of the bodies. With `backward`, each round's loss times it is
     back-propagated at once (one round in memory) and the loss comes back
     detached. With `add`, points are added as the clip goes (`Tracker`); the
-    loss and what comes back are of the clip's own points. The dict also holds
+    loss and what comes back are of the clip's own points. With the clip's
+    `answer` and `imagine_weight`, what the bodies imagine is taught too, a
+    mean of its own beside the clip's points': when imagined, how far each
+    true point is from its corner and whether each is said to be there; from
+    then on, as any point, its place, the engine's next frame and whether it
+    is seen. The dict also holds
     the tracks, the visibility logits, each point's last group vector, which
     way is down, the arrows, and the arrows' loss alone (in the total)."""
-    run = Tracker(model, anchor, x1.shape[1], rounds, cond, add)
+    run = Tracker(model, anchor, x1.shape[1], rounds, cond, add, answer)
     own = x1.shape[2]
+    shown = whole_frames(run.cond["visual_mask"])[0]
+    to_guess = lambda at, n: ((at - run.anchor[0, own:own + n].float()) / model.traj_scale)[None]
     w = [ROUND_DECAY ** (rounds - 1 - i) for i in range(rounds)]
     w = [v / sum(w) for v in w]
     share = 1 / x1.shape[1]
     total = vis_total = centre_total = x1.new_zeros(())
     for r in run:
-        r = r.first(own)
+        every, r = r, r.first(own)
         keep = r.alive[None]
         at = lambda x: None if x is None else x[:, r.t]
         loss = w[r.i] * _error(r.g, at(x1), at(mask) & keep, at(weight))
@@ -250,10 +327,26 @@ def track_loss(
             nxt = slice(r.t + 1, r.t + 2)
             loss = loss + ahead_weight * _error(r.ahead[:, None], x1[:, nxt], mask[:, nxt] & keep[:, None],
                                                 None if weight is None else weight[:, nxt])
-        loss = share * loss
         vis_loss = x1.new_zeros(())
         if visible is not None:
             vis_loss = share * w[r.i] * visibility_error(r.logits[:, None], visible[:, r.t:r.t + 1], keep)
+        n = every.g.shape[1] - own
+        if imagine_weight and answer is not None and n:
+            all_n = torch.ones(1, n, dtype=torch.bool, device=x1.device)
+            loss = loss + w[r.i] * imagine_weight * _error(every.g[:, own:], to_guess(answer.at(r.t, n), n), all_n, None)
+            if ahead_weight and every.ahead is not None:
+                loss = loss + ahead_weight * imagine_weight * _error(every.ahead[:, own:], to_guess(answer.at(r.t + 1, n), n), all_n, None)
+            if visible is not None:
+                vis_loss = vis_loss + share * w[r.i] * imagine_weight * visibility_error(
+                    every.logits[:, None, own:], (answer.shown(r.t, n) & shown[r.t])[None, None], all_n)
+        if imagine_weight and answer is not None:
+            for b in every.born:
+                true = torch.zeros_like(b.there)
+                true[b.kept] = 1.0
+                loss = loss + imagine_weight * torch.nn.functional.binary_cross_entropy_with_logits(b.there, true)
+                if len(b.kept):
+                    loss = loss + imagine_weight * (b.at[b.kept] - answer.mesh[r.t, b.corner]).norm(dim=-1).mean() / model.traj_scale
+        loss = share * loss
         if backward is not None:
             with torch.autocast(device_type=x1.device.type, enabled=False):
                 ((loss + vis_weight * vis_loss) * backward).backward()
@@ -264,7 +357,7 @@ def track_loss(
         total = total + vis_weight * vis_total
     return total, {"loss": total.detach(), "visibility": vis_total.detach(), "tracks": run.tracks[:, :, :own],
                    "logits": run.vis[:, :, :own], "groups": run.groups[:, :own], "down": run.down,
-                   "arrows": run.arrow[:, :, :own], "centre": centre_total}
+                   "arrows": run.arrow[:, :, :own], "centre": centre_total, "world": run.world}
 
 
 @torch.no_grad()
@@ -273,4 +366,5 @@ def track(model: nn.Module, anchor: torch.Tensor, num_frames: int, rounds: int, 
     run = Tracker(model, anchor, num_frames, rounds, cond)
     for _ in run:
         pass
-    return run.tracks, run.vis
+    own = anchor.shape[1]
+    return run.tracks[:, :, :own], run.vis[:, :, :own]

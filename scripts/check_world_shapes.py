@@ -7,17 +7,13 @@ few centimetres are its own; a wrong placing would be tens. No model.
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kubric_tracks import quat_to_rot  # noqa: E402
-
-from genpoint3d.CachedClip import CachedClip  # noqa: E402
-from genpoint3d.tools.kubric_models import shape  # noqa: E402
+from genpoint3d.CachedClip import CachedClip
+from genpoint3d.tools.kubric_models import FLIP, shape, turns
 
 p = argparse.ArgumentParser()
 p.add_argument("--cache", required=True)
@@ -25,8 +21,6 @@ p.add_argument("--objects", required=True)
 p.add_argument("--assets", required=True)
 p.add_argument("--clips", type=int, default=40)
 args = p.parse_args()
-
-FLIP = np.diag([1.0, -1.0, -1.0])  # Blender's axes to OpenCV's
 
 
 def off_walls(p: torch.Tensor, wall: torch.Tensor) -> torch.Tensor:
@@ -60,14 +54,14 @@ for f in files:
     o = np.load(o)
     if "asset" not in o:
         continue
-    turn0, at0 = quat_to_rot(o["camera_quaternions"][:1].astype(np.float64))[0], o["camera_positions"][0].astype(np.float64)
+    turn0, at0 = turns(o["camera_quaternions"][0].astype(np.float64)), o["camera_positions"][0].astype(np.float64)
     traj, here = clip.traj.double(), []
     for k, name in enumerate(o["asset"].tolist()):
         mine = clip.segment == k + 1
         if not mine.any():
             continue
         corners, walls = shape(name, Path(args.assets).expanduser(), float(o["scale"][k]))
-        turn = quat_to_rot(o["quaternions"][k].astype(np.float64))                                         # (T, 3, 3) the object's to the world's
+        turn = turns(o["quaternions"][k].astype(np.float64))                                         # (T, 3, 3) the object's to the world's
         world = (traj[:, mine].numpy() @ FLIP) @ turn0.T + at0                                            # (T, n, 3) the tracks, out of the first frame's camera
         local = np.einsum("tji,tnj->tni", turn, world - o["positions"][k][:, None])                       # in the object's own frame, where its shape is
         d = off_walls(torch.from_numpy(local).flatten(0, 1), torch.from_numpy(corners[np.array(walls)])).view(local.shape[:2])   # (T, n)

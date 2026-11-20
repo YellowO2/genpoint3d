@@ -23,6 +23,7 @@ def score(model, loader, judging: ScoreSettings, split: str, gpus=None) -> dict 
         tally.count(prediction)
         tally.add(track_scores(prediction, judging))
         tally.add(visibility_scores(prediction))
+        tally.add(prediction.shape or {})
     predictor.done()
     if gpus is not None and gpus.world > 1:
         tallies = gpus.gather(tally)

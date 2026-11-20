@@ -77,6 +77,10 @@ def _line(m: dict) -> str:
         line += f"  groups right {m['group_right']:.2f} found {m['group_found']:.2f}"
     if "down_deg" in m:
         line += f"  down off {m['down_deg']:.1f} deg"
+    if "shape_back" in m:
+        line += (f"  SHAPE back {m['shape_back']:.3f} (seen only {m['shape_back_seen']:.3f}; early {m['shape_back_early']:.3f}"
+                 f" late {m['shape_back_late']:.3f}) front {m['shape_front']:.3f} made up {m['shape_made_up']:.3f}"
+                 f" imagined {m['imagined']:.0f}")
     return line + _visible(m)
 
 

@@ -15,3 +15,4 @@ class Prediction:
     groups: torch.Tensor | None = None      # (B, N, E) each point's last group vector
     down: torch.Tensor | None = None        # (B, 3) which way is down, as told or as the model said
     down_scored: torch.Tensor | None = None  # (B,) bool, the clips not told it whose truth is known
+    shape: dict | None = None               # the stored world's shapes against the answer (`shape_scores`)

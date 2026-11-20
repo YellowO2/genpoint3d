@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 
 from genpoint3d.CachedClip import CachedClip
 from genpoint3d.tools.feature_lookup import id_cards
+from genpoint3d.tools.kubric_models import CELLS, SHAPE_TOL, answer
 from genpoint3d.NormStats import NormStats
 from genpoint3d.tools.traj_scale import (GRAVITY, GRAVITY_REF, KUBRIC_FPS, MATCH_SPREAD, RADIUS, REACH, SCENE_SCALE,
                                          TRAJ_SCALE_DISP)
@@ -35,15 +36,20 @@ class ClipDataset(Dataset):
     frames as training does (`random_view`, served as "view"), and only points
     it can hand over are served: none starts in a frame not seen whole. With
     `asked`, that many points are asked and the rest added (`_spawned`);
-    "asked" says which.
+    "asked" says which. With `slots`, each clip comes with what its stored
+    world should come to be (`kubric_models.answer`): its objects from
+    `objects` (scripts/movi_objects.py's), their models from `assets`, no
+    object with more than `slots` corners.
     """
 
     def __init__(self, clips: list[Path | dict], num_points: int, resample: bool = True,
                  frames: Path | dict[Path, Path] | None = None, query_before: int = 0,
-                 asked: int = 0, spawn_gap: float = GAP, view: tuple[int, int] | None = None):
+                 asked: int = 0, spawn_gap: float = GAP, view: tuple[int, int] | None = None,
+                 objects: Path | None = None, assets: Path | None = None, slots: int = 0):
         self.clips, self.num_points, self.resample = clips, num_points, resample
         self.frames, self.query_before = frames, query_before
         self.asked, self.spawn_gap, self.view = asked, spawn_gap, view
+        self.objects, self.assets, self.slots = objects, assets, slots
         self.traj_scale = TRAJ_SCALE_DISP
 
     def __len__(self) -> int:
@@ -130,6 +136,7 @@ class ClipDataset(Dataset):
             if id_card is not None:
                 id_card = id_card[idx]
 
+        mesh, mesh_body, mesh_bars, mesh_seen = _answer(clip, self.objects, self.assets, self.slots, depth)
         # Features stay fp16 until `to_device`.
         ctx = clip.context
         norm = NormStats(n.mean, n.scale, torch.tensor(self.traj_scale))
@@ -162,6 +169,9 @@ class ClipDataset(Dataset):
             "norm_traj_scale": norm.traj_scale,
             # (1, N, 3) scene-normalised per-point origin, for `to_metres`.
             "norm_offset": offset,
+            # What the stored world should come to be: every object's corners (T, V, 3) in the clip's unit,
+            # each one's object (V,) as `segment`, the bars (E, 2) between them, and (T, V) the corners seen.
+            "mesh": n.apply(mesh), "mesh_body": mesh_body, "mesh_bars": mesh_bars, "mesh_seen": mesh_seen,
         }
 
     @staticmethod
@@ -182,6 +192,30 @@ class ClipDataset(Dataset):
             if got != (size, size):
                 raise SystemExit(f"{kind} in {d} are {got[0]}x{got[1]}, --fine-res {res} needs {size}x{size}")
         return d
+
+
+def _answer(clip: CachedClip, objects: Path | None, assets: Path | None, slots: int, depth: torch.Tensor):
+    """The clip's answer (`kubric_models.answer`) in metres, and (T, V) which of its corners each frame sees: in
+    the frame and no deeper than the surface shown at its cell (`depth` (T, h, w)) by more than SHAPE_TOL. With
+    no `slots`, or a clip whose objects are not known, no corners."""
+    T = clip.traj.shape[0]
+    o = objects / f"{clip.seq_id}.npz" if slots and objects is not None else None
+    if o is None or not o.exists() or not depth.numel():
+        return torch.zeros(T, 0, 3), torch.zeros(0, dtype=torch.long), torch.zeros(0, 2, dtype=torch.long), torch.zeros(T, 0, dtype=torch.bool)
+    o = np.load(o)
+    if "asset" not in o:
+        return torch.zeros(T, 0, 3), torch.zeros(0, dtype=torch.long), torch.zeros(0, 2, dtype=torch.long), torch.zeros(T, 0, dtype=torch.bool)
+    mesh, body, bars = (torch.from_numpy(x) for x in answer(o, assets, CELLS, slots))
+    mesh = mesh.float()
+    cam = torch.einsum("tij,tvj->tvi", clip.extrinsics.float()[:, :3], torch.cat([mesh, torch.ones(*mesh.shape[:2], 1)], -1))
+    pix = torch.einsum("tij,tvj->tvi", clip.intrinsics.float(), cam)
+    z = pix[..., 2]
+    h, w = depth.shape[1:]
+    u, v = pix[..., 0] / z.clamp_min(1e-6) / clip.hw[1], pix[..., 1] / z.clamp_min(1e-6) / clip.hw[0]
+    inside = (z > 0) & (u >= 0) & (u < 1) & (v >= 0) & (v < 1)
+    cell = (v * h).long().clamp(0, h - 1) * w + (u * w).long().clamp(0, w - 1)
+    shown = depth.flatten(1).float().gather(1, cell)
+    return mesh, body.long(), bars.long(), inside & (z <= shown + SHAPE_TOL)
 
 
 def _clip_unit(depth: torch.Tensor, clip: CachedClip) -> torch.Tensor:

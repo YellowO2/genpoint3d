@@ -104,6 +104,34 @@ n, m = world.touching(3, torch.full((N,), 0.5))
 want("the points where the two may touch are found", len(n) > 0 and (world.body[n] != world.body[m]).all()
      and bool((world.pos[3, n] - world.pos[3, m]).norm(dim=-1).max() < 0.5), f"{len(n)} pairs, each across the two bodies, within reach")
 
+# The far half of the ball is never given: the body imagines it when first found. Imagined right, the world
+# carries it with the body, thrown and spinning; imagined wrong and said right in frame 8, it is right from then on.
+true, label, centres = clip()
+far = torch.arange(N) >= N - 30
+for name, wrong in (("right", 0.0), ("wrong", 0.2)):
+    world = World(true[0, ~far], torch.zeros(N - 30, dtype=torch.long), torch.ones(N - 30, dtype=torch.bool), T)
+    groups = torch.nn.functional.one_hot(label[~far], 2).float() * 5
+    for t in range(T):
+        many = len(world.body)
+        pos = torch.cat([true[t, ~far], world.pos[t, N - 30:]])
+        pos = torch.cat([true[t, ~far], world.rigid(t, pos, torch.ones(many))[0][N - 30:]])    # said to be where its body's shape puts it
+        if wrong and t == 8:
+            pos[N - 30:] = true[t, far]
+        tips = torch.where(label[~far][:, None] == 1, centres[t], true[t, ~far].mean(0))
+        world.store(t, pos, torch.ones(many), torch.cat([groups, torch.zeros(many - len(groups), 2)]),
+                    torch.cat([tips, pos[N - 30:]]))
+        if t + 1 < T:
+            world.ahead(t, GRAVITY, (label[world.seed] == 1).float())
+        if not t:
+            world.imagine(int(world.body[N - 31]), true[0, far] + wrong, 0)
+    if not wrong:
+        want("a body's imagined points are carried with it", cm(world.pos[:, N - 30:], true[:, far]) < 0.1 and bool(world.imagined[N - 30:].all()),
+             f"{cm(world.pos[:, N - 30:], true[:, far]):.1e} cm off over the clip, the ball's pose fitted to its seen half alone")
+    else:
+        before, after = cm(world.pos[1:8, N - 30:], true[1:8, far]), cm(world.pos[8:, N - 30:], true[8:, far])
+        want("an imagined point said elsewhere is there from then on", before > 10 and after < 0.1,
+             f"{before:.0f} cm off before it is said right, {after:.1e} cm after")
+
 if failed:
     raise SystemExit(f"missed: {failed}")
 print("all as wanted")

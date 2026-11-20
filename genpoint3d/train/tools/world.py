@@ -25,6 +25,9 @@ class World:
     seen there (`store`); what is learned later changes the frames before it
     through the bodies: a point new to a body gets its past from the body's,
     and a body seen again after frames unseen has those frames put right.
+    A body's points are those seen on it and those imagined of it (`imagine`):
+    an imagined point is on the body that imagined it for good, never counts
+    as seen, and its place on the body is what was last said of it.
     All in the clip's own unit, nothing here learned."""
 
     def __init__(self, anchor: torch.Tensor, query: torch.Tensor, given: torch.Tensor, T: int) -> None:
@@ -37,6 +40,8 @@ class World:
         self.body = torch.full((N,), -1, dtype=torch.long, device=dev)
         self.place = torch.zeros(N, 3, device=dev)
         self.like = torch.zeros(N, device=dev)
+        # The points a body imagined of itself, not given by any frame.
+        self.imagined = torch.zeros(N, dtype=torch.bool, device=dev)
         # Each body's pose in every frame, and how it goes in the frame last stored.
         self.turn, self.centre = torch.zeros(T, 0, 3, 3, device=dev), torch.zeros(T, 0, 3, device=dev)
         self.speed, self.spin = torch.zeros(0, 3, device=dev), torch.zeros(0, 3, device=dev)
@@ -53,6 +58,20 @@ class World:
         self.body = torch.cat([self.body, torch.full((M,), -1, dtype=torch.long, device=dev)])
         self.place = torch.cat([self.place, torch.zeros(M, 3, device=dev)])
         self.like = torch.cat([self.like, torch.zeros(M, device=dev)])
+        self.imagined = torch.cat([self.imagined, torch.zeros(M, dtype=torch.bool, device=dev)])
+
+    @_exact
+    @torch.no_grad()
+    def imagine(self, k: int, at: torch.Tensor, t: int) -> None:
+        """More points of body `k`, imagined in frame `t` at `at` (M, 3): on it from now, and in every other
+        frame where the body's pose there puts them."""
+        N = len(self.body)
+        self.add(at, t)
+        new = torch.arange(N, N + len(at), device=at.device)
+        self.body[new], self.like[new], self.imagined[new] = k, 1.0, True
+        self.place[new] = (self.turn[t, k].T @ (at.float() - self.centre[t, k])[..., None])[..., 0]
+        self.pos[:, new] = (self.turn[:, k, None] @ self.place[new][None, :, :, None])[..., 0] + self.centre[:, k, None]
+        self.pos[t, new] = at.float()
 
     def alive(self, t: int) -> torch.Tensor:
         """(N,) the points the world has by frame `t`."""
@@ -66,6 +85,7 @@ class World:
         """Each body's pose in frame `t`, (K, 3, 3) and (K, 3): the one that best keeps its shape on its points
         `pos` (N, 3) believed seen (`seen` (N,), 0 to 1), or with under MIN_POSE_POINTS of them seen (their
         count, (K,)), the one the engine stored."""
+        seen = seen * ~self.imagined
         w = self._members() * seen
         count = ((w > 0) * seen).sum(-1)
         turn, centre = fitted(self.place[None], pos[None], w)
@@ -97,6 +117,10 @@ class World:
             self._put_right(t, turn, centre, backed)
             self.turn[t], self.centre[t] = turn, centre
             self.backed = torch.where(backed, t, self.backed)
+            # An imagined point is on its body where it was last said to be.
+            said = self.imagined & alive
+            k = self.body[said]
+            self.place[said] = (turn[k].transpose(-1, -2) @ (self.pos[t, said] - centre[k])[..., None])[..., 0]
         self._group(t, groups.float(), alive)
         self._find_centres(t, tips.float(), seen)
         if t:
@@ -129,6 +153,8 @@ class World:
             every = likeness(groups[:, None], groups[self.seed][None])                               # (N, K)
             like, to = every.max(1)
             to = torch.where(like > SAME, to, -1)
+        # An imagined point stays on the body that imagined it.
+        to, like = torch.where(self.imagined, self.body, to), torch.where(self.imagined, self.like, like)
         loose = alive & (to < 0)
         new = []
         while loose.any():
@@ -165,7 +191,7 @@ class World:
         with it; no point does."""
         if not len(self.seed):
             return
-        w = self._members() * seen                                                                    # (K, N)
+        w = self._members() * seen * ~self.imagined                                                   # (K, N)
         said = w.sum(-1) > 0
         k = self.body.clamp_min(0)
         on_body = (self.turn[t, k].transpose(-1, -2) @ (tips - self.centre[t, k])[..., None])[..., 0]   # (N, 3)

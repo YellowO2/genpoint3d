@@ -6,7 +6,7 @@ A model that imagines the world with a physics engine as its tool: it keeps the 
 
 1. The world is stored once: bodies, each with its points, the bars between them, mass, stiffness and a record of how it moved. A bar joins two nearby points of a body: three make a wall, so the bars are the body's whole shape, and each is the engine's constraint holding the two points apart as they are (stiff bars a stiff body, bars that give a soft one).
 2. Each frame, the engine predicts and the model corrects the stored world from what it sees: where things are, and what each body is.
-3. The model imagines each whole body, its unseen side too, and says what it is: fixed or free, how heavy, how stiff. Of a living thing it also says its own push.
+3. The model imagines each body whole the moment it first sees it: all its points, the unseen side too, the bars between them, and what it is (what kind of thing, its look, fixed or free, how heavy, how stiff; of a living thing also its own push). All of it is a guess it keeps correcting: a point is moved when what is seen says it is elsewhere, and one is added only where nothing was imagined.
 4. The engine does the rest: gravity, inertia, finding where bodies touch, the push that stops them there, a stiff body keeping its shape, keeping what is out of view.
 5. Any frame, past or future, is the stored world played.
 

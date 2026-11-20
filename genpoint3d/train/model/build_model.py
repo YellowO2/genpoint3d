@@ -11,7 +11,8 @@ def build_model(settings, feat_dim: int) -> PointDiT | WorldModel:
     if a("world", 0):
         return WorldModel(dim=settings.dim, depth=settings.depth, num_heads=settings.heads, feat_dim=feat_dim,
                           cross_window=settings.cross_window, fine_neigh=settings.fine_neigh,
-                          group_dim=settings.group_feedback, feedback_scale=settings.feedback_scale, patch=settings.patch)
+                          group_dim=settings.group_feedback, feedback_scale=settings.feedback_scale, patch=settings.patch,
+                          slots=a("imagine", 0))
     return PointDiT(dim=settings.dim, depth=settings.depth, num_heads=settings.heads, feat_dim=feat_dim,
                     cross_window=a("cross_window", 49), fine_neigh=a("fine_neigh", 32),
                     visibility=a("vis_loss", 0.0) > 0,

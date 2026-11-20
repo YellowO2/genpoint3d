@@ -12,7 +12,8 @@
                   centre of gravity, how stiffly its body holds it, how free
                   its body is to move and how heavy; per pair of bodies that
                   may touch: where, the way from one into the other, how far they hold and
-                  grip there, and a push
+                  grip there, and a push; per body first seen: the whole of its
+                  points as it imagines them, all sides (`imagine`)
 """
 
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ class Said:
 class WorldModel(nn.Module):
     def __init__(self, dim: int = 256, depth: int = 6, num_heads: int = 4, mlp_mult: int = 3, feat_dim: int = 384,
                  traj_scale: float = TRAJ_SCALE_DISP, cross_window: int = 49, fine_neigh: int = 32,
-                 group_dim: int = 16, feedback_scale: float = 10.0, patch: int = 0) -> None:
+                 group_dim: int = 16, feedback_scale: float = 10.0, patch: int = 0, slots: int = 0) -> None:
         super().__init__()
         self.dim, self.depth = dim, depth
         self.traj_scale = traj_scale
@@ -105,6 +106,17 @@ class WorldModel(nn.Module):
         nn.init.constant_(self.body_out.bias[:1], -3.0)
         # A pair of points that may be where two bodies touch: how much it is, and what it says of the touch;
         # then for the two bodies, the way from one into the other, how far they hold and grip there, and a push.
+        # What a body imagines of itself (`imagine`): up to `slots` points, each starting from its own place
+        # about the body's centre, a way out from it one body-size long.
+        self.slots = slots
+        if slots:
+            self.slot = nn.Parameter(torch.randn(slots, dim) * 0.02)
+            self.slot_home = nn.Parameter(F.normalize(torch.randn(slots, 3), dim=-1))
+            self.slot_at = FourierEmbedding(3, dim, std=2.0)
+            self.slot_read = CrossBlock(dim, num_heads, mlp_mult, dim)
+            self.slot_out = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), zero_init(nn.Linear(dim, 4), almost=False))
+            # A point imagined, not given by a frame: it has no look to be found by.
+            self.imagined_in = nn.Parameter(torch.zeros(dim))
         self.pair = nn.Sequential(nn.Linear(2 * dim + 3 * 99, dim), nn.GELU(), nn.Linear(dim, dim + 1))
         self.touch_out = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), zero_init(nn.Linear(dim, 8), almost=False))
 
@@ -119,7 +131,8 @@ class WorldModel(nn.Module):
                 context: torch.Tensor, id_card: torch.Tensor, patch_xyz: torch.Tensor, fine_map: torch.Tensor,
                 fine_proj: torch.Tensor, fine_xyz: torch.Tensor, query_t: torch.Tensor, gravity: torch.Tensor,
                 down: torch.Tensor, down_known: torch.Tensor, visual_mask: torch.Tensor, vis_prev: torch.Tensor,
-                group_prev: torch.Tensor, group_known: torch.Tensor, rigid: torch.Tensor) -> Said:
+                group_prev: torch.Tensor, group_known: torch.Tensor, rigid: torch.Tensor,
+                imagined: torch.Tensor) -> Said:
         """
         x            (B, N, 3)       the guess in frame `t`, displacement / traj_scale
         before       (B, N, 3)       the guess in the frame before
@@ -140,6 +153,8 @@ class WorldModel(nn.Module):
         vis_prev     (B, N)          the visibility logit last said of each point
         group_prev   (B, N, E)       the group vector last said, for the points `group_known` (B, N)
         rigid        (B, N, 4)       from the guess to the place that keeps its body's shape, and its support
+        imagined     (B, N) bool     the points a body imagined of itself: no frame gave them, so the matcher
+                     has nothing of theirs to find
         """
         B, N, _ = x.shape
         dev = x.device
@@ -174,6 +189,7 @@ class WorldModel(nn.Module):
                          ok=_cells(two(b_view, view), hh, ww), ok0=_cells(visual_mask, hh, ww))[:, 0]
         half = self.fine.out_dim // 2
         fine = torch.cat([fine[..., :half] * some[:, None, None], fine[..., half:] * both[:, None, None]], -1)
+        fine = fine * ~imagined[..., None]
 
         cond = self.time_emb(k[:, None, None].expand(B, 1, 1)) + self.anchor_emb(anchor)
         cond = cond + self.id_feature_proj(id_card) + self.fine_cond(fine).to(cond.dtype)
@@ -194,6 +210,8 @@ class WorldModel(nn.Module):
         h = h + self.motion_proj(motion.to(h.dtype)) + self.fine_tok(fine).to(h.dtype) + self.rigid_in(r.to(h.dtype))
         h = h + (self.feedback_scale * belief[..., None].to(h.dtype)) * self.vis_in.to(h.dtype)
         h = h + (query_t == t)[..., None] * self.query_in.to(h.dtype)
+        if self.slots:
+            h = h + imagined[..., None] * self.imagined_in.to(h.dtype)
         v = group_prev.float() * group_known[..., None]
         h = h + self.feedback_scale * self.group_in(v.to(h.dtype))
 
@@ -213,6 +231,18 @@ class WorldModel(nn.Module):
                     down=F.normalize(self.down_out(h.float().mean(1)), dim=-1), arrow=self.centre_out(h),
                     stiff=self.stiff(h)[..., 0].float(), free=torch.sigmoid(body[..., 0]), heavy=torch.exp(body[..., 1]),
                     h=h)
+
+    def imagine(self, h: torch.Tensor, at: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """A body's whole set of points as imagined from the ones seen of it: `h` (n, D) what the model knows
+        of those, `at` (n, 3) where each is from the body's centre, in the body's size. (M, 3) where each
+        imagined point is from the centre, in the body's size, and (M,) logits: is there such a point."""
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            where = self.slot_at(at.float())
+        seen = (h + where.to(h.dtype))[None]
+        x = self.slot[None].to(h.dtype)
+        x = self.slot_read(x, x, seen, window=torch.zeros(1, self.slots, len(h), device=h.device))
+        out = self.slot_out(x[0]).float()
+        return self.slot_home.float() + out[:, :3], out[:, 3]
 
     def touches(self, h: torch.Tensor, n: torch.Tensor, m: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
                 apart: torch.Tensor, slide: torch.Tensor, at: torch.Tensor, fall: torch.Tensor) -> Optional[Touch]:

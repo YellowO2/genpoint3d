@@ -1,5 +1,7 @@
 """Batches of a run's clips: an endless stream to train on, and val passes."""
 
+from pathlib import Path
+
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from genpoint3d.train.data.ClipDataset import ClipDataset
@@ -13,6 +15,9 @@ class Loaders:
 
     def __init__(self, clips: Clips, settings, rank: int = 0, world: int = 1) -> None:
         how_data = dict(frames=clips.frames, asked=settings.asked, spawn_gap=settings.spawn_gap)
+        if getattr(settings, "imagine", 0):
+            how_data.update(objects=Path(settings.objects).expanduser(), assets=Path(settings.assets).expanduser(),
+                            slots=settings.imagine)
         drawn = (dict(sampler=WeightedRandomSampler(clips.weights, len(clips.train)))
                  if clips.weights else dict(shuffle=True))
         self.train = DataLoader(

@@ -1,0 +1,64 @@
+"""Check the stored world's shapes: is each object whole, the side never seen too?"""
+
+import torch
+
+from genpoint3d.train.tools.batch import whole_frames
+from genpoint3d.train.tools.world import World
+
+EARLY, LATE = 4, 4   # the first and last frames with an image a clip is scored over, for what seeing more does
+
+
+def shape_scores(b: dict, world: World, view: torch.Tensor) -> dict:
+    """Per clip (1,) values, by name; empty for a clip with no answer (`mesh`).
+
+    Each of an object's true corners against the nearest point the world has
+    of that object in the same frame, as a share of the object's size (its
+    two farthest corners apart), a mean over the corners, the objects and the
+    frames. The world's points of an object are the clip's own points on it
+    and the points imagined by a body formed about one of those.
+
+    shape_back        the corners no frame with an image ever sees
+    shape_back_seen   the same with the world's own points alone: nothing imagined
+    shape_back_early  shape_back over the clip's first EARLY frames with an image
+    shape_back_late   ... its last LATE
+    shape_front       the corners some frame sees
+    shape_made_up     each imagined point from its object's nearest corner
+    imagined          imagined points in the clip
+    """
+    mesh, of, seen = b["mesh"][0].float(), b["mesh_body"][0], b["mesh_seen"][0]
+    if not mesh.shape[1]:
+        return {}
+    segment = b["segment"][0]
+    own = len(segment)
+    shown = torch.nonzero(whole_frames(view)[0])[:, 0]
+    ever = seen[shown].any(0)                                                        # (V,)
+    seed = world.seed[world.body.clamp_min(0)] if len(world.seed) else torch.full_like(world.body, own)
+    thing = torch.where(world.imagined, torch.where(seed < own, segment[seed.clamp_max(own - 1)], -1),
+                        torch.cat([segment, torch.full((len(world.body) - own,), -1, device=of.device)]))   # (N,) each point's object
+    sums = {k: [] for k in ("shape_back", "shape_back_seen", "shape_back_early", "shape_back_late", "shape_front", "shape_made_up")}
+    for o in of.unique().tolist():
+        mine, has = of == o, thing == o
+        size = torch.cdist(mesh[0, mine], mesh[0, mine]).max().clamp_min(1e-6)
+        for t in shown.tolist():
+            there = has & world.alive(t)
+            real = there & ~world.imagined
+            if not real.any():
+                continue
+            gap = torch.cdist(mesh[t, mine], world.pos[t, there]) / size                       # (v, n)
+            near, near_real = gap.min(1).values, gap[:, ~world.imagined[there]].min(1).values
+            back = ~ever[mine]
+            if back.any():
+                sums["shape_back"].append(near[back].mean())
+                sums["shape_back_seen"].append(near_real[back].mean())
+                if t in shown[:EARLY]:
+                    sums["shape_back_early"].append(near[back].mean())
+                if t in shown[-LATE:]:
+                    sums["shape_back_late"].append(near[back].mean())
+            if (~back).any():
+                sums["shape_front"].append(near[~back].mean())
+            if (there & world.imagined).any():
+                sums["shape_made_up"].append(gap[:, world.imagined[there]].min(0).values.mean())
+    nan = torch.tensor(float("nan"), device=mesh.device)
+    out = {k: (torch.stack(v).mean() if v else nan)[None] for k, v in sums.items()}
+    out["imagined"] = world.imagined.sum()[None].float()
+    return out

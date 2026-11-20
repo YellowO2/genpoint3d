@@ -5,6 +5,7 @@ import torch
 from genpoint3d.train.score.Adder import Adder
 from genpoint3d.train.score.Prediction import Prediction
 from genpoint3d.train.score.ScoreSettings import ScoreSettings
+from genpoint3d.train.score.shape_scores import shape_scores
 from genpoint3d.train.score.spawn_points import spawn_points
 from genpoint3d.train.tools.batch import fine_inputs, to_device, visual_mask
 from genpoint3d.train.tools.regress import regress_loss
@@ -47,10 +48,12 @@ class Predictor:
             b = spawn_points(model, b, fine, vm, j.fill, j.spawn_gap,
                              lambda bb: (lambda out: (out["tracks"], out["logits"]))(self._track(bb, fine, vm)[1]))
         loss, out = self._track(b, fine, vm, add)
+        # The stored world's shapes, on every point it has: before the helpers are dropped.
+        shape = shape_scores(b, out["world"], vm) if "world" in out and "mesh" in b else {}
         b, out = _asked_only(b, out)
         return Prediction(batch=b, visual_mask=vm, tracks=out["tracks"], loss=loss.item(),
                           visibility=out["logits"], groups=out["groups"], down=out["down"],
-                          down_scored=truly & hide)
+                          down_scored=truly & hide, shape=shape)
 
     def _track(self, b: dict, fine: dict, vm: torch.Tensor, add=None):
         j = self.judging

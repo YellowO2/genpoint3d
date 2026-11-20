@@ -92,6 +92,13 @@ class Settings(argparse.Namespace):
         p.add_argument("--rounds", type=int, default=3, help="with --world, looks at each frame")
         p.add_argument("--ahead-loss", type=float, default=1.0,
                        help="with --world, the error of the engine's next frame: what the model says of the bodies")
+        p.add_argument("--imagine", type=int, default=0, metavar="M",
+                       help="with --world, a body first found imagines the whole of its points, all sides, up to M "
+                            "(0: none); taught by each clip's objects (--objects, --assets)")
+        p.add_argument("--objects", default=None, help="each clip's objects, from scripts/movi_objects.py")
+        p.add_argument("--assets", default=None, help="the objects' 3D models (scripts/fetch_models.py)")
+        p.add_argument("--imagine-loss", type=float, default=1.0,
+                       help="with --imagine, the imagined points' errors beside the clip's own points'")
         # Refinement
         p.add_argument("--window", type=int, default=16, help="frames per window")
         p.add_argument("--overlap", type=int, default=4, help="frames each window shares")
@@ -134,6 +141,8 @@ class Settings(argparse.Namespace):
             p.error("--schedule sweeps over the windows: needs --window W")
         if settings.mix is not None and (len(settings.mix) != len(settings.cache) or min(settings.mix) <= 0):
             p.error("--mix gives each --cache a share above 0")
+        if settings.imagine and not (settings.world and settings.objects and settings.assets):
+            p.error("--imagine is the stored world's, taught by the clips' objects: needs --world 1 --objects DIR --assets DIR")
         if settings.rigid_proposal and not settings.group_feedback:
             p.error("--rigid-proposal is built from the group vectors: needs --group-feedback E")
         if settings.follow_fit and not settings.rigid_proposal:
