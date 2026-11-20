@@ -2,27 +2,33 @@
 
 ## The design
 
-A model that imagines the world with a physics engine as its tool: it keeps the world stored as an engine's, the engine plays it, and the model corrects it as it sees more. Whatever a physics engine does, the engine here does.
+A model that imagines the world with a physics engine as its tool: it keeps the world stored as a game's, the engine plays it, and the model corrects it as it sees more. Whatever a physics engine does, the engine here does. The test of what is stored: the video could be drawn again from it.
 
-1. The world is stored once: bodies, each with its points (as a game's mesh: the few its shape needs), the bars between them, one description of what it is, and a record of how it moved; and the camera. From it the video could be drawn again. A bar joins two nearby points of a body: three make a wall, so the bars are the body's whole shape, and each is the engine's constraint holding the two points apart as they are (stiff bars a stiff body, bars that give a soft one).
-2. Each frame, the engine predicts and the model corrects the stored world from what it sees: where things are, and what each body is.
-3. The model imagines each body whole the moment it first sees it: its description (what kind of thing, its look, fixed or free, how heavy, how stiff; of a living thing also its own push), and from the description all its points, the unseen side too, and the bars between them. All of it is a guess it keeps correcting every frame: the description as more is seen, a point when what is seen says it is elsewhere, and a point is added only where nothing was imagined.
-4. The engine does the rest: gravity, inertia, finding where bodies touch, the push that stops them there, a stiff body keeping its shape, keeping what is out of view.
-5. Any frame, past or future, is the stored world played.
+What is stored:
+
+- A body is a thing. It has one description of what it is (what kind of thing, its look, fixed or free, how heavy, how stiff; of a living thing also its own push), its points, the bars between them, and where it has been in every frame.
+- A point is a place on a body, not a thing. It has its body, where on the body it is, and whether it is seen now. A point a frame gave also keeps the look of its spot, for one use: finding that spot again. A body's points are as a game's mesh: the few its shape needs.
+- A bar joins two nearby points of a body. Three joined points are a wall, so the bars are the body's whole shape, and each is the engine's constraint holding the two points apart as they are (stiff bars a stiff body, bars that give a soft one).
+- The camera, and the light.
+
+How it runs:
+
+1. Each frame, the engine plays the stored world one frame on, and the model corrects it from what it sees.
+2. A body is imagined whole the moment it is first seen: its description, and from the description all its points, the unseen side too. All of it is a guess corrected every frame: the description as more is seen, a point when what is seen says it is elsewhere. A point is added only where nothing was imagined.
+3. The engine does the rest: gravity, inertia, finding where bodies touch, the push that stops them there, a stiff body keeping its shape, keeping what is out of view.
+4. Any frame, past or future, is the stored world played. A point someone asks to track is a place on a wall of its body.
 
 The model is offered these to learn to use; nothing is enforced on its answer.
 
-Not built yet: the bars, the model choosing its own points, and the light the video is drawn with; until the bars are, the model says where two bodies touch and how far they hold and grip there.
+Not built yet: the bars, the model choosing its own points, an asked point read off its body's walls, the light. Until the bars are, the model says where two bodies touch and how far they hold and grip there.
 
 ## Later
 
 - Asleep bodies skipped as a game engine skips them: one at rest or fixed costs nothing; one moving unseen keeps being stepped, without the image.
 - The model's range, as a game's simulation distance: a body farther than it from the camera is neither stepped nor looked at; it stays stored as it was until the camera comes near again.
-- Points as the vertices of a body's shape, as a game's collision mesh: one added only where the seen surface is not already explained by the body's points, so a flat floor needs few.
 - Rigid parts within an object (limbs), as a robot simulator has them: a joint is two parts always held together at one place, and the model says how hard each joint turns (a turning push, not yet in the engine).
-- The stored world rendered back into the video and compared with it, as CycleGAN's cycle: the model then learns by itself how many vertices and what physics the scene needs to come out the same. After the point loss is right.
-- A body's look (a texture on its walls): a point's one colour is too little to tell the scene from the stored world drawn (outputs/points_view.html).
-- A ready shape model as a second tool beside the engine: it proposes a body's whole shape from the points and views seen so far, the model corrects it. Best fit found: ShapeR (takes sparse 3D points and several posed views, gives the shape at true size and place); single-picture reference: TRELLIS (best on Kubric's own objects in an outside benchmark), SAM 3D Objects (32 GB). Its guess can be scored against Kubric's true shapes first. Closest whole design to ours: ReconPhys (video to points with springs, mass, stiffness and friction, taught by rendering back).
+- The stored world rendered back into the video and compared with it, as CycleGAN's cycle: the model then learns by itself how many points, what look and what physics the scene needs to come out the same. Needs the light, and a body's look as a texture on its walls.
+- A ready shape model as a hint for a body's unseen side, set aside: TripoSR knows a little (triposr_shape_prior). Others found: ShapeR, TRELLIS, SAM 3D Objects; closest whole design to ours, ReconPhys.
 - Speed, when we need it: search the current research on speeding up first. One seen: Spark3R (arXiv 2605.06270), attention over many frames up to 28 times faster with no retraining, by merging alike tokens that ask and dropping tokens that are asked.
 - Confidence as CoTracker3's.
 - SAM 3 masks and V-JEPA 2 as extra inputs.
